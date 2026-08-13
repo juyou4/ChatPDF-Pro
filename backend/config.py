@@ -176,6 +176,34 @@ class AppSettings(BaseSettings):
         ),
         description="评分后进入最终上下文的最大证据条数",
     )
+    # ragflow next_step.md 的 Decision Gate 思路：进入最终轮前用一次轻量反思
+    # 判定"如果现在停下，缺什么"；超时或失败回退现有规则充足度评估。
+    agent_reflection_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "agent_reflection_enabled",
+            "CHATPDF_AGENT_REFLECTION",
+        ),
+        description="Agent 是否在进入最终轮前做一次证据缺口反思（Decision Gate）",
+    )
+    agent_reflection_timeout: float = Field(
+        default=8.0,
+        validation_alias=AliasChoices(
+            "agent_reflection_timeout",
+            "CHATPDF_AGENT_REFLECTION_TIMEOUT",
+        ),
+        description="反思调用超时秒数，超时后跳过反思直接走现有规则",
+    )
+    # mem0 procedural memory 思路：按题型记录 evidence 侧成功的工具序列，
+    # 同文档同类问题下次首轮注入"历史成功策略"提示（只存正反馈，30 天失效）。
+    agent_procedural_memory_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "agent_procedural_memory_enabled",
+            "CHATPDF_AGENT_PROCEDURAL_MEMORY",
+        ),
+        description="Agent 是否记录并复用按题型的历史成功检索策略",
+    )
     # Agent 模式模糊问句的 cheap-model 澄清判定（规则层之后）
     agent_llm_clarification_enabled: bool = Field(
         default=True,

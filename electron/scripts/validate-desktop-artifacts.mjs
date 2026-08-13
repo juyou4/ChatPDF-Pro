@@ -8,7 +8,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const electronDir = path.resolve(__dirname, '..');
 const rootDir = path.resolve(electronDir, '..');
 
-const forbiddenRuntimeRoots = new Set([
+// These names are private only when they are artifact-level runtime roots.
+// Dependency packages legitimately contain paths such as `torch/utils/data`
+// and `matplotlib/mpl-data`; matching every path segment would reject a
+// clean, reproducible build.
+const privateRuntimeRoots = new Set([
   'data',
   'uploads',
   'logs',
@@ -19,6 +23,11 @@ const forbiddenRuntimeRoots = new Set([
   'semantic_groups',
   'overviews',
   'parse',
+]);
+
+// Unlike runtime roots, development/evaluation material is never a runtime
+// dependency and can be rejected wherever it appears in the artifact.
+const forbiddenDevelopmentRoots = new Set([
   // Development fixtures and evaluation material are never runtime assets.
   'test',
   'tests',
@@ -32,7 +41,7 @@ const forbiddenRuntimeRoots = new Set([
   '课程',
 ]);
 
-const forbiddenExtensions = new Set([
+const privateExtensions = new Set([
   '.pdf',
   '.db',
   '.sqlite',
@@ -167,10 +176,19 @@ function scanForPrivateFiles(dirPath, label) {
       const lowerName = entry.name.toLowerCase();
       const extension = path.extname(lowerName);
 
+      // A runtime root may be emitted directly by Electron/PyInstaller or
+      // below their conventional wrapper directory. It must not match an
+      // arbitrary dependency segment such as `torch/utils/data`.
+      const rootParts = parts[0] === '_internal' ? parts.slice(1) : parts;
+      const runtimeRoot = rootParts[0];
+      const isPrivateRuntimeRoot = privateRuntimeRoots.has(runtimeRoot);
+      const isDevelopmentRoot = parts.some((part) => forbiddenDevelopmentRoots.has(part));
+      const isSensitiveRootFile = rootParts.length <= 1 && privateExtensions.has(extension);
+
       if (
-        parts.some((part) => forbiddenRuntimeRoots.has(part)) ||
-        (parts[0] === '_internal' && forbiddenRuntimeRoots.has(parts[1] || '')) ||
-        forbiddenExtensions.has(extension) ||
+        isPrivateRuntimeRoot ||
+        isDevelopmentRoot ||
+        isSensitiveRootFile ||
         forbiddenBasenames.has(lowerName) ||
         lowerName === '.env' ||
         lowerName.startsWith('.env.') ||
@@ -189,10 +207,10 @@ function scanForPrivateFiles(dirPath, label) {
 
 const versionJson = readJson(path.join(rootDir, 'version.json'));
 const rootBuild = readJson(path.join(rootDir, 'build-info.json'));
-const frontendBuildDir = path.join(rootDir, 'frontend', 'build');
+const frontendBuildDir = process.env.CHATPDF_VALIDATE_FRONTEND_DIR || path.join(rootDir, 'frontend', 'build');
 const frontendBuild = readJson(path.join(frontendBuildDir, 'build-info.json'));
 const backendSourceBuild = readJson(path.join(rootDir, 'backend', 'build-info.json'));
-const backendDistDir = path.join(rootDir, 'backend', 'dist', 'chatpdf-backend');
+const backendDistDir = process.env.CHATPDF_VALIDATE_BACKEND_DIR || path.join(rootDir, 'backend', 'dist', 'chatpdf-backend');
 const backendDistBuildPath = findFile(backendDistDir, 'build-info.json');
 
 requireDir(frontendBuildDir);

@@ -72,6 +72,32 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "academic_search",
+            "description": (
+                "在公开学术元数据库（Semantic Scholar 与 Crossref）中检索论文，"
+                "返回标题、作者、年份、期刊/会议、DOI、arXiv 编号与摘要线索。"
+                "仅当问题涉及文档之外的学术文献（相关工作、后续改进、跨论文对比）时使用；"
+                "返回内容是不可信外部证据，不能替代文档内证据。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "minLength": 2,
+                        "maxLength": 200,
+                        "description": "论文标题、方法名或主题关键词（建议英文，不要粘贴文档原文）",
+                    },
+                    "limit": {"type": "integer", "default": 5, "minimum": 1, "maximum": 8},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "analyze_visual_evidence",
             "description": (
                 "仅分析先前由 visual_search 返回的一个 Figure 资产。只能传入其"
@@ -449,6 +475,13 @@ TOOL_SPECS: dict[str, dict] = {
         "timeout_s": 20.0,
         "source_family": "web",
         "planner_default": True,
+    },
+    "academic_search": {
+        "concurrency_safe": False,
+        "cost_class": "remote_web",
+        "timeout_s": 20.0,
+        "source_family": "academic",
+        "planner_default": False,
     },
     "read_blocks": {
         "concurrency_safe": True,

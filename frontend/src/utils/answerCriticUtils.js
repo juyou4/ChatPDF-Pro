@@ -103,10 +103,52 @@ export const getFullDocumentSummaryCoverage = (certainty) => {
     || (bodySummarized >= bodyExpected && appendixSummarized >= appendixExpected);
   const parts = [`正文 ${bodySummarized}/${bodyExpected}`];
   if (appendixExpected > 0) parts.push(`附录 ${appendixSummarized}/${appendixExpected}`);
+  const presentationMode = String(raw.presentation_mode ?? raw.presentationMode ?? '').trim().toLowerCase();
+  const visibleSectionCount = toCount(raw.visible_section_count ?? raw.visibleSectionCount);
+  const structuralSectionCount = toCount(raw.structural_section_count ?? raw.structuralSectionCount);
+  const semanticQualityStatus = String(raw.semantic_quality_status ?? raw.semanticQualityStatus ?? '').trim().toLowerCase();
+  const semanticQuality = raw.semantic_quality ?? raw.semanticQuality ?? {};
+  const derivedLandmarks = semanticQuality?.derived_landmark_result_coverage
+    ?? semanticQuality?.derivedLandmarkResultCoverage
+    ?? {};
+  const landmarkExpected = toCount(
+    semanticQuality?.landmark_expected_claim_count
+    ?? semanticQuality?.landmarkExpectedClaimCount
+    ?? derivedLandmarks?.expected_claim_count
+    ?? derivedLandmarks?.expectedClaimCount,
+  );
+  const landmarkCovered = toCount(
+    semanticQuality?.landmark_covered_claim_count
+    ?? semanticQuality?.landmarkCoveredClaimCount
+    ?? derivedLandmarks?.covered_claim_count
+    ?? derivedLandmarks?.coveredClaimCount,
+  );
+  const missingSlots = Array.isArray(semanticQuality?.missing_slots ?? semanticQuality?.missingSlots)
+    ? (semanticQuality.missing_slots ?? semanticQuality.missingSlots).filter(Boolean)
+    : [];
+  const restatingThemes = Array.isArray(semanticQuality?.themes_restating_sections ?? semanticQuality?.themesRestatingSections)
+    ? (semanticQuality.themes_restating_sections ?? semanticQuality.themesRestatingSections).filter(Boolean)
+    : [];
+  const themesWithoutEvidence = Array.isArray(semanticQuality?.themes_without_evidence ?? semanticQuality?.themesWithoutEvidence)
+    ? (semanticQuality.themes_without_evidence ?? semanticQuality.themesWithoutEvidence).filter(Boolean)
+    : [];
+  const projectionHint = presentationMode === 'thematic'
+    ? '已按主题综合，不逐章复述。'
+    : (visibleSectionCount > 0 ? `已展开 ${visibleSectionCount} 节章节导览。` : '当前为章节导览。');
+  // 主题退化和主题缺证据是两类不同的缺口，笼统写成「有待补充」会让用户无从下手。
+  const qualityDetails = [
+    missingSlots.length ? `缺${missingSlots.join('、')}` : '',
+    landmarkExpected ? `关键结论证据 ${landmarkCovered}/${landmarkExpected}` : '',
+    restatingThemes.length ? `${restatingThemes.length} 个主题仅复述章节` : '',
+    themesWithoutEvidence.length ? `${themesWithoutEvidence.length} 个主题缺证据` : '',
+  ].filter(Boolean);
+  const qualityHint = semanticQualityStatus === 'needs_review'
+    ? `主题重点仍有待补充${qualityDetails.length ? `（${qualityDetails.join('；')}）` : ''}，建议核对关键结论。`
+    : '';
   return {
     complete,
     text: `全文覆盖 ${summarized}/${expected}`,
-    title: `${parts.join('，')}。${complete ? '当前解析版本的章节均已纳入。' : '部分章节尚未形成可验证提要。'}`,
+    title: `${parts.join('，')}。${complete ? '当前解析版本的章节均已纳入。' : '部分章节尚未形成可验证提要。'}${projectionHint}${structuralSectionCount && structuralSectionCount !== summarized ? `结构节点 ${structuralSectionCount} 个。` : ''}${qualityHint}`,
   };
 };
 

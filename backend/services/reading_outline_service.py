@@ -28,6 +28,10 @@ from services.document_block_roles import (
 )
 from services.document_parse_state import read_parse_manifest
 from services.keyword_extractor import KeywordExtractor
+from services.citation_alignment_service import claim_support_score
+from services.reading_outline_quality_service import (
+    semantic_summary_quality_diagnostics as _build_semantic_summary_quality_diagnostics,
+)
 from services.structured_json import (
     StructuredJSONError,
     parse_json_object,
@@ -110,6 +114,25 @@ EXPERIMENT_SECTION_TITLE_PATTERN = re.compile(
     r"实验|评估|结果|分析|消融|基准|鲁棒|泛化)",
     re.IGNORECASE,
 )
+EXPERIMENT_SETUP_SECTION_TITLE_PATTERN = re.compile(
+    r"(?:datasets?|data\s*set|experimental\s+setup|evaluation\s+setup|"
+    r"implementation\s+details|protocol|数据集|实验设置|评测设置|实现细节|协议)",
+    re.IGNORECASE,
+)
+# ``EXPERIMENT_SETUP_SECTION_TITLE_PATTERN`` decides whether a *source
+# section* is setup-like.  The thematic writer needs a separate, deliberately
+# reader-facing check: simply attaching an "Experimental Setup" section id to
+# the experiment theme must not make a result-only sentence look as if it
+# explained how the paper was evaluated.
+EXPERIMENT_SETUP_NARRATIVE_PATTERN = re.compile(
+    r"(?:datasets?|data\s*set|data collection|benchmark(?:s)?|"
+    r"experimental\s+setup|evaluation\s+setup|evaluation\s+protocol|"
+    r"implementation\s+details|training\s+configuration|protocol|"
+    r"evaluat(?:e|ed|ion)\s+(?:on|with|using)|"
+    r"数据集|数据采集|基准(?:测试)?|实验设置|评测设置|评测协议|"
+    r"实现细节|训练配置|协议|在[^。；]{0,32}(?:数据集|基准|评测|测试)上)",
+    re.IGNORECASE,
+)
 CONCLUSION_SECTION_TITLE_PATTERN = re.compile(
     r"(?:conclusion|discussion|limitation|future|impact|结论|讨论|局限|限制|未来|影响)",
     re.IGNORECASE,
@@ -190,8 +213,13 @@ OVERVIEW_COVERAGE_SLOT_SPECS = (
     (
         "data_or_setup",
         "数据构建或基准定义",
-        "innovation",
-        re.compile(r"dataset|data collection|pretraining data|benchmark construction|数据集|数据采集|预训练数据|基准构建", re.IGNORECASE),
+        "experiment",
+        re.compile(
+            r"dataset|data(?:set)?|data collection|pretraining data|benchmark(?: construction)?|"
+            r"experimental setup|evaluation setup|implementation details|protocol|"
+            r"数据集|数据采集|预训练数据|基准(?:构建)?|实验设置|评测设置|实现细节|协议",
+            re.IGNORECASE,
+        ),
     ),
     (
         "main_result",
@@ -236,6 +264,15 @@ OVERVIEW_COVERAGE_SLOT_SPECS = (
         re.compile(r"conclusion|discussion|limitation|failure|bias|ethic|future|结论|讨论|局限|限制|失败|偏差|伦理|未来", re.IGNORECASE),
     ),
 )
+# Slots that turn "required" merely because a candidate section exists, so
+# their candidate detection must not fire on motivational mentions outside
+# the experimental part of the paper.
+_EXPERIMENT_CONDITIONAL_SLOTS = frozenset({
+    "data_or_setup",
+    "comparison",
+    "ablation",
+    "generalization",
+})
 THEME_SUMMARY_PLACEHOLDERS = {
     "全文要旨",
     "背景与问题",
@@ -4409,7 +4446,25 @@ def _build_overview_coverage_plan(section_summaries: list[dict[str, Any]]) -> di
                 or (slot == "main_result" and role == "experiment")
                 or (slot == "boundary" and role == "conclusion")
             )
-            if role_match or pattern.search(title):
+            # A result section is still an experiment section, but should not
+            # be used as proof that the paper covered data/setup.  That slot
+            # is opt-in through an explicit title or the evidence-bound section
+            # summary, so it cannot pressure the writer to misfile results as
+            # methodology merely to satisfy a ledger denominator.
+            slot_text = " ".join([title, str(item.get("summary") or "")])
+            if slot in _EXPERIMENT_CONDITIONAL_SLOTS:
+                # These slots become *required* merely by having a candidate.
+                # A method section motivated by "robustness" or a conclusion
+                # praising it is not evidence that the paper ran that kind of
+                # experiment, so demand an explicit title or an experiment
+                # section whose evidence-bound summary mentions it.
+                matched = bool(
+                    pattern.search(title)
+                    or (role == "experiment" and pattern.search(slot_text))
+                )
+            else:
+                matched = bool(role_match or pattern.search(slot_text))
+            if matched:
                 section_id = str(item.get("source_section_id") or "")
                 if section_id and section_id not in ids:
                     ids.append(section_id)
@@ -4451,7 +4506,7 @@ def _build_overview_coverage_plan(section_summaries: list[dict[str, Any]]) -> di
         "empirical_study": {"main_result"},
         "conceptual_or_position": set(),
     }[paper_type]
-    conditional_required = {"data_or_setup", "comparison", "ablation", "generalization"}
+    conditional_required = _EXPERIMENT_CONDITIONAL_SLOTS
     slots: list[dict[str, Any]] = []
     labels = {slot: label for slot, label, _theme, _pattern in OVERVIEW_COVERAGE_SLOT_SPECS}
     for slot, _label, _theme, _pattern in OVERVIEW_COVERAGE_SLOT_SPECS:
@@ -4498,14 +4553,33 @@ def _select_landmark_claims(
         role = str(item.get("summary_role") or "general")
         if role != "experiment" and not EXPERIMENT_SECTION_TITLE_PATTERN.search(title):
             continue
+        if EXPERIMENT_SETUP_SECTION_TITLE_PATTERN.search(title):
+            # Setup is a separately audited overview slot, not a reader-facing
+            # landmark result.  Including it here consumes the small landmark
+            # budget and can crowd out a true main-result/ablation conclusion.
+            continue
         category = _landmark_claim_category(title)
-        claims = [
-            claim for claim in [
-                *(item.get("metric_claims") or []),
-                *(item.get("prose_claims") or []),
-            ]
-            if isinstance(claim, dict) and claim.get("claim_text") and claim.get("values")
-        ]
+        claims: list[dict[str, Any]] = []
+        # Numeric table claims and exact prose claims are both already bound
+        # to evidence before this stage.  The old `and claim.get("values")`
+        # predicate discarded a reader-important result such as "A outperforms
+        # B" whenever the paper did not state a safely extractable number.
+        # Preserve the distinction in the stored landmark contract instead of
+        # inventing a number for qualitative evidence.
+        for claim_source, raw_claim in (
+            *(("metric", claim) for claim in item.get("metric_claims") or []),
+            *(("prose", claim) for claim in item.get("prose_claims") or []),
+        ):
+            if not isinstance(raw_claim, dict) or not raw_claim.get("claim_text"):
+                continue
+            is_prose = claim_source == "prose"
+            evidence_block_id = str(raw_claim.get("evidence_block_id") or "").strip()
+            evidence_quote = " ".join(str(raw_claim.get("evidence_quote") or "").split())
+            # A metric claim is validated by its table bindings. A prose claim
+            # is eligible only with its exact original quote/block binding.
+            if is_prose and not (evidence_block_id and evidence_quote):
+                continue
+            claims.append({**raw_claim, "_landmark_source": claim_source})
         for claim in claims:
             claim_text = " ".join(str(claim.get("claim_text") or "").split())
             dedupe_key = _normalized_match_text(claim_text)
@@ -4516,11 +4590,17 @@ def _select_landmark_claims(
             if not subjects and claim.get("subject"):
                 subjects = [claim.get("subject")]
             values = [str(value) for value in claim.get("values") or [] if str(value).strip()]
+            subjects = [str(subject) for subject in subjects if str(subject).strip()]
+            if not subjects and claim.get("subject"):
+                subjects = [str(claim.get("subject") or "").strip()]
+            claim_kind = str(claim.get("claim_kind") or "value").strip().lower()
+            is_qualitative = not values
             score = (
                 6
                 + (4 if category == "main_result" else 3)
-                + (2 if str(claim.get("claim_kind") or "") in {"comparison", "range", "maximum", "minimum"} else 0)
+                + (2 if claim_kind in {"comparison", "range", "maximum", "minimum"} else 0)
                 + min(3, len(values))
+                + (2 if is_qualitative and claim_kind in {"comparison", "causal", "limitation"} else 0)
             )
             claim_id = hashlib.sha1(
                 f"{item.get('source_section_id')}|{claim_text}".encode("utf-8")
@@ -4531,8 +4611,12 @@ def _select_landmark_claims(
                 "source_section_id": str(item.get("source_section_id") or ""),
                 "title": title,
                 "claim_text": claim_text,
-                "subjects": [str(subject) for subject in subjects if str(subject).strip()],
+                "subjects": subjects,
                 "values": values,
+                "claim_kind": claim_kind,
+                "evidence_kind": "prose" if is_qualitative else "numeric",
+                "evidence_block_id": str(claim.get("evidence_block_id") or "").strip(),
+                "evidence_quote": " ".join(str(claim.get("evidence_quote") or "").split()),
                 "pages": claim.get("pages") or [],
             }))
     candidates.sort(key=lambda entry: (-entry[0], entry[1]["source_section_id"]))
@@ -5217,9 +5301,15 @@ def _raw_overview_requirement_issues(
         if not theme_text(theme).strip() or not (expected_ids & actual_ids):
             issues.append("slot:" + str(slot.get("slot") or ""))
 
-    experiment_text = theme_text(themes.get("experiment") or {})
+    experiment_theme = themes.get("experiment") or {}
+    experiment_text = theme_text(experiment_theme)
     experiment_key = _normalized_match_text(experiment_text)
     experiment_numbers = _numeric_tokens(experiment_text)
+    experiment_source_ids = {
+        str(value).strip()
+        for value in experiment_theme.get("source_section_ids") or []
+        if str(value).strip()
+    }
     for claim in landmark_claims:
         values = {str(value) for value in claim.get("values") or [] if str(value).strip()}
         subjects = [
@@ -5227,9 +5317,32 @@ def _raw_overview_requirement_issues(
             for subject in claim.get("subjects") or []
             if _normalized_match_text(subject)
         ]
+        claim_text = str(claim.get("claim_text") or "")
+        claim_key = _normalized_match_text(claim_text)
+        source_section_id = str(claim.get("source_section_id") or "").strip()
+        source_in_experiment = bool(
+            source_section_id and source_section_id in experiment_source_ids
+        )
         covered = bool(values) and values.issubset(experiment_numbers)
         if subjects:
             covered = covered and all(subject in experiment_key for subject in subjects)
+        elif not values:
+            # Qualitative landmarks must retain the exact evidence-bound claim
+            # (or its complete theme finding); a lone generic result paragraph
+            # cannot satisfy a comparison/causal/limitation landmark.
+            covered = bool(claim_key and claim_key in experiment_key)
+        # Model output can preserve a claim through the experiment theme
+        # summary without repeating it byte-for-byte.  Its source section is
+        # still an explicit, parse-bound inclusion in that theme, so accept
+        # it only when the independently selected claim has a direct evidence
+        # binding.  This is deliberately unavailable to old unbound claims.
+        if (
+            not covered
+            and source_in_experiment
+            and str(claim.get("evidence_block_id") or "").strip()
+            and str(claim.get("evidence_quote") or "").strip()
+        ):
+            covered = True
         if not covered:
             issues.append("landmark:" + str(claim.get("claim_id") or ""))
     return issues
@@ -5548,7 +5661,8 @@ async def _generate_learning_overview(
                     "上一版遗漏了以下本文确实存在的必答项："
                     + ", ".join(requirement_issues)
                     + "。请仍按原 JSON 合同完整重写一次，只补入逐章摘要和已验证 Claim 直接支持的内容；"
-                    "landmark 必须同时保留数值、所属对象和限定条件，不得为凑覆盖而编造。"
+                    "数值 landmark 必须保留数值、所属对象和限定条件；定性 landmark 必须保留完整的已绑定比较、因果或边界结论，"
+                    "不得为凑覆盖而编造数字或改写证据关系。"
                 ),
             },
         ]
@@ -6041,8 +6155,8 @@ def _theme_candidate_section_ids(
             "model", "training", "algorithm", "pipeline", "贡献", "方法", "框架", "架构", "模型", "训练", "算法",
         ),
         "experiment": (
-            "experiment", "evaluation", "result", "analysis", "ablation",
-            "benchmark", "robustness", "generalization", "实验", "评估", "结果", "分析", "消融", "鲁棒", "泛化",
+            "experiment", "evaluation", "result", "analysis", "ablation", "dataset", "setup", "protocol",
+            "benchmark", "robustness", "generalization", "实验", "评估", "结果", "分析", "消融", "数据集", "设置", "评测", "协议", "鲁棒", "泛化",
         ),
         "conclusion": (
             "conclusion", "discussion", "limitation", "future", "impact",
@@ -6197,6 +6311,12 @@ def _normalize_learning_themes(
             for claim in normalized_sections[section_id].get("metric_claims") or []
             if isinstance(claim, dict)
         ]
+        source_prose_claims = [
+            claim
+            for section_id in source_ids
+            for claim in normalized_sections[section_id].get("prose_claims") or []
+            if isinstance(claim, dict)
+        ]
         table_row_texts = [
             row_text
             for claim in source_metric_claims
@@ -6238,6 +6358,7 @@ def _normalize_learning_themes(
             else []
         )
         findings: list[str] = []
+        finding_evidence: list[dict[str, Any]] = []
         for point in raw_points:
             # The model contract requires typed points. Bare strings are often
             # topic labels (for example "KITTI 泛化") rather than conclusions.
@@ -6262,6 +6383,32 @@ def _normalize_learning_themes(
             finding = f"{label}：{text}" if label and text else text
             if finding and finding not in findings:
                 findings.append(finding)
+                ranked_evidence_ids = sorted(
+                    evidence_ids,
+                    key=lambda block_id: claim_support_score(
+                        finding,
+                        {"source_text": str(block_map[block_id].get("text") or "")},
+                    ),
+                    reverse=True,
+                )
+                best_evidence_ids = ranked_evidence_ids[:2]
+                best_source_section_ids: list[str] = []
+                for section_id in source_ids:
+                    section_evidence = {
+                        str(block_id)
+                        for block_id in normalized_sections[section_id].get("evidence_block_ids") or []
+                    }
+                    if section_evidence.intersection(best_evidence_ids):
+                        best_source_section_ids.append(section_id)
+                # The point contract did not have source IDs in v4.16.  Its
+                # evidence is therefore derived only from the already
+                # validated theme scope; later prompt versions may provide a
+                # narrower explicit list without changing this cache shape.
+                finding_evidence.append({
+                    "text": finding,
+                    "source_section_ids": best_source_section_ids,
+                    "evidence_block_ids": best_evidence_ids,
+                })
             if len(findings) >= point_limit:
                 break
 
@@ -6287,6 +6434,7 @@ def _normalize_learning_themes(
                 "purpose": "",
                 "method_or_argument": "",
                 "findings": findings,
+                "finding_evidence": finding_evidence,
                 "caveats_or_connections": "",
                 "learning_path": [],
             },
@@ -6298,6 +6446,7 @@ def _normalize_learning_themes(
             "evidence_scope": "cross_section",
             "evidence_block_ids": evidence_ids,
             "metric_claims": source_metric_claims,
+            "prose_claims": source_prose_claims,
             "table_evidence_unit_ids": list(dict.fromkeys(
                 evidence_unit_id
                 for claim in source_metric_claims
@@ -6376,6 +6525,11 @@ def _audit_landmark_claims(
     text = _theme_audit_text(experiment)
     text_key = _normalized_match_text(text)
     text_numbers = _numeric_tokens(text)
+    experiment_source_ids = {
+        str(value).strip()
+        for value in experiment.get("source_section_ids") or []
+        if str(value).strip()
+    }
     audited: list[dict[str, Any]] = []
     for claim in claims:
         values = {str(value) for value in claim.get("values") or [] if str(value).strip()}
@@ -6384,14 +6538,31 @@ def _audit_landmark_claims(
             for value in claim.get("subjects") or []
             if _normalized_match_text(value)
         ]
-        covered = bool(values) and values.issubset(text_numbers)
-        if subjects:
-            covered = covered and all(subject in text_key for subject in subjects)
+        if values:
+            covered = values.issubset(text_numbers)
+            if subjects:
+                covered = covered and all(subject in text_key for subject in subjects)
+        else:
+            # A qualitative landmark is intentionally stricter than a loose
+            # subject match: preserve the exact evidence-bound conclusion in
+            # the experiment theme/finding so "VLD-RAG is effective" cannot
+            # falsely satisfy "VLD-RAG outperforms the baseline".
+            claim_key = _normalized_match_text(claim.get("claim_text"))
+            covered = bool(claim_key and claim_key in text_key)
+        if (
+            not covered
+            and str(claim.get("source_section_id") or "").strip() in experiment_source_ids
+            and str(claim.get("evidence_block_id") or "").strip()
+            and str(claim.get("evidence_quote") or "").strip()
+        ):
+            covered = True
         audited.append({
             "claim_id": str(claim.get("claim_id") or ""),
             "category": str(claim.get("category") or "main_result"),
             "source_section_id": str(claim.get("source_section_id") or ""),
             "values": sorted(values),
+            "claim_kind": str(claim.get("claim_kind") or "value"),
+            "evidence_kind": str(claim.get("evidence_kind") or ("numeric" if values else "prose")),
             "covered": covered,
         })
     covered_count = sum(1 for claim in audited if claim["covered"])
@@ -6402,6 +6573,72 @@ def _audit_landmark_claims(
         "missing_claim_ids": [claim["claim_id"] for claim in audited if not claim["covered"]],
         "claims": audited,
     }
+
+
+def recompute_semantic_ledgers_for_cache(
+    section_items: Any,
+    outline_items: Any,
+) -> dict[str, Any]:
+    """Re-audit a cached outline with the current semantic-ledger contract.
+
+    A persisted ``overview_coverage``/``landmark_result_coverage`` describes
+    the audit rules of the prompt version that generated the outline.  Those
+    rules evolve (slot ownership moved themes, qualitative landmarks were not
+    selected at all before v4.17), so response-time diagnostics derived from a
+    stale ledger misreport perfectly healthy caches.  This is a pure function
+    over the persisted tree: it never writes, so the cache identity and the
+    outline source hash stay untouched.
+
+    Returns ``{}`` when the cached shape predates per-theme
+    ``source_section_ids``.  Both audits key coverage on that field, so
+    recomputing without it would judge every slot uncovered and make an old
+    cache look *worse* than its own persisted ledger.
+    """
+
+    themes = [
+        item
+        for item in (outline_items if isinstance(outline_items, list) else [])
+        if isinstance(item, dict) and str(item.get("type") or "").startswith("theme_")
+    ]
+    if not themes or any(not (item.get("source_section_ids") or []) for item in themes):
+        return {}
+    sections = [
+        item
+        for item in _flatten_outline_items(
+            section_items if isinstance(section_items, list) else []
+        )
+        if isinstance(item, dict) and item.get("source_section_id")
+    ]
+    if not sections:
+        return {}
+    raw = {
+        "_coverage_plan": _build_overview_coverage_plan(sections),
+        "_landmark_claims": _select_landmark_claims(sections),
+    }
+    return {
+        "overview_coverage": _audit_overview_coverage(raw, themes),
+        "landmark_result_coverage": _audit_landmark_claims(raw, themes),
+    }
+
+
+def _semantic_summary_quality_diagnostics(
+    *,
+    overview_coverage: dict[str, Any],
+    landmark_result_coverage: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose semantic-summary gaps without invalidating a usable outline.
+
+    Structural coverage answers whether every MinerU section received an
+    evidence-bound section review.  It does *not* establish that the thematic
+    synthesis names every reader-important slot.  Keeping this as a separate,
+    non-blocking diagnostic lets old healthy caches remain reusable while we
+    collect stable quality fixtures for any future hard gate.
+    """
+
+    return _build_semantic_summary_quality_diagnostics(
+        overview_coverage=overview_coverage,
+        landmark_result_coverage=landmark_result_coverage,
+    )
 
 
 def _normalize_section_study_outline(
@@ -6690,6 +6927,10 @@ def _normalize_section_study_outline(
     unsupported_numeric_claims.extend(theme_unsupported_claims)
     overview_coverage = _audit_overview_coverage(raw_overview, theme_items)
     landmark_result_coverage = _audit_landmark_claims(raw_overview, theme_items)
+    semantic_quality = _semantic_summary_quality_diagnostics(
+        overview_coverage=overview_coverage,
+        landmark_result_coverage=landmark_result_coverage,
+    )
     items = [overview_item, *theme_items] if is_ai_source else [overview_item, *section_items]
     display_flat_items = _flatten_outline_items(items)
     flat_section_items = _flatten_outline_items(section_items)
@@ -6798,6 +7039,7 @@ def _normalize_section_study_outline(
             },
             "overview_coverage": overview_coverage,
             "landmark_result_coverage": landmark_result_coverage,
+            "semantic_quality": semantic_quality,
             "overview_reduce": raw_overview.get("_reduce_meta") or {},
             "presentation": {
                 "mode": "thematic" if is_ai_source else "section_guide",
@@ -7597,6 +7839,7 @@ def _section_study_quality_issues(
     ]
     if ungrounded_themes:
         issues.append("重点主题缺少来源:" + ",".join(ungrounded_themes))
+
     return issues
 
 

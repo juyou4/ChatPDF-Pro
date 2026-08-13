@@ -25,33 +25,30 @@ jobs:
           python-version: "3.11"
 
       - name: Install core dependencies
-        run: python -m pip install -r backend/requirements-core.txt pytest
+        run: python -m pip install -r backend/requirements-core.txt pytest pytest-asyncio
 
       - name: Compile changed backend contracts
         run: >-
           python -m py_compile
-          backend/services/paper_metadata_provider_registry.py
-          backend/services/paper_metadata_hydration_service.py
-          backend/services/retrieval_decision_snapshot.py
-          backend/services/task_event_ledger.py
-          backend/routes/document_routes.py
+          backend/services/full_document_summary_request.py
+          backend/services/chat_intent_service.py
+          backend/services/full_document_summary_service.py
+          backend/services/reading_outline_quality_service.py
+          backend/services/reading_outline_quality_gate.py
+          backend/services/reading_outline_service.py
+          backend/scripts/check_reading_outline_gate.py
           backend/routes/chat_routes.py
 
       - name: Run local reliability regression
         working-directory: backend
         run: >-
           python -m pytest -q
-          tests/test_paper_metadata_provider_registry.py
-          tests/test_retrieval_decision_snapshot.py
-          tests/test_retrieval_decision_snapshot_route.py
-          tests/test_task_event_ledger.py
-          tests/test_document_job_store.py
-          tests/test_document_parse_artifact.py
-          tests/test_citation_alignment_service.py
-          tests/test_citation_quality_metrics.py
-          tests/test_answer_critic_claim_verifier.py
-          tests/test_reading_outline_claim_verifier.py
-          tests/test_mineru_text_normalizer.py
+          tests/test_full_document_summary_service.py
+          tests/test_chat_routes_full_document_summary.py
+          tests/test_reading_outline_overview_contract.py
+          tests/test_reading_outline_quality_gate.py
+          tests/test_structure_aware_split.py
+          tests/test_vector_context_identity_passthrough.py
 
   frontend-local:
     name: Frontend local regression
@@ -77,6 +74,7 @@ jobs:
         run: >-
           npm run test -- --run
           src/utils/__tests__/pdfSelectionUtils.test.js
+          src/utils/__tests__/answerCriticUtils.coverage.test.js
           src/hooks/__tests__/useMessageState.test.js
 
       - name: Lint frontend

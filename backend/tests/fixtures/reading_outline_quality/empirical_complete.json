@@ -1,0 +1,72 @@
+{
+  "doc_id": "quality-fixture-empirical-complete",
+  "items": [
+    {
+      "type": "overview",
+      "summary": "该研究建立可追溯的多模态文档问答流程。"
+    },
+    {
+      "type": "theme_background",
+      "summary": "现有系统难以同时维护结构定位与证据可信度。",
+      "study": { "findings": [] }
+    },
+    {
+      "type": "theme_innovation",
+      "summary": "方法通过双空间表示协调布局与语义。",
+      "study": {
+        "findings": ["双空间：布局与文本语义分别建模后再融合。"]
+      }
+    },
+    {
+      "type": "theme_experiment",
+      "summary": "在基准测试中，该方法整体优于单一检索基线。",
+      "study": {
+        "findings": ["主结果：F1 从 71.2 提升至 76.4。"]
+      }
+    },
+    {
+      "type": "theme_conclusion",
+      "summary": "方案适合证据敏感场景，但依赖上游解析质量。",
+      "study": { "findings": [] }
+    }
+  ],
+  "section_items": [
+    {
+      "source_section_id": "s1",
+      "summary": "引言说明多模态文档问答常在布局定位与文本检索之间发生断裂。",
+      "children": []
+    },
+    {
+      "source_section_id": "s2",
+      "summary": "方法将页面布局索引与语义索引结合，并用证据绑定限制最终生成。",
+      "children": []
+    },
+    {
+      "source_section_id": "s3",
+      "summary": "实验比较多个检索基线，报告了 F1 从 71.2 到 76.4 的提升以及局限。",
+      "children": []
+    }
+  ],
+  "meta": {
+    "section_coverage": {
+      "body_expected": 3,
+      "body_summarized": 3,
+      "appendix_expected": 0,
+      "appendix_summarized": 0
+    },
+    "overview_coverage": {
+      "paper_type": "empirical_method",
+      "required_slot_count": 4,
+      "covered_slot_count": 4,
+      "missing_slots": []
+    },
+    "landmark_result_coverage": {
+      "expected_claim_count": 1,
+      "covered_claim_count": 1,
+      "missing_claim_ids": []
+    },
+    "sampling": {
+      "review_recommended_sections": 0
+    }
+  }
+}

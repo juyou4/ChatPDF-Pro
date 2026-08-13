@@ -1,0 +1,9 @@
+{
+  "version": "reading-outline-gate-v1",
+  "description": "固定阅读总结 fixture 的确定性质量门禁；不调用模型，也不替代线上 fail-open 策略。",
+  "section_replay_similarity": 0.8,
+  "max_section_replay_ratio": 0.4,
+  "near_duplicate_similarity": 0.85,
+  "min_empirical_landmark_claims": 1,
+  "max_review_recommended_sections": 0
+}

@@ -576,6 +576,7 @@ def get_relevant_context(
     embedding_api_host: str = "",
     provider: str = "",
     api_host: str = "",
+    retrieval_identity: Optional[dict] = None,
 ):
     """兼容旧调用，并把 embedding 身份参数透传给核心实现。"""
     embedding_model, embedding_provider, embedding_api_host = _resolve_embedding_request_args(
@@ -612,4 +613,5 @@ def get_relevant_context(
         embedding_model=embedding_model or None,
         embedding_provider=embedding_provider or None,
         embedding_api_host=embedding_api_host or None,
+        retrieval_identity=retrieval_identity,
     )

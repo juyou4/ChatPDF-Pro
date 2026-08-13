@@ -50,6 +50,7 @@ from services.web_research_query_service import (
     build_web_research_query,
     extract_safe_web_anchors,
 )
+from services.paper_subscription_discovery_service import discover_subscription_papers
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,12 @@ _MAX_WEB_SEARCH_RESULTS = 10
 _WEB_SEARCH_SNIPPET_LIMIT = 900
 _MAX_WEB_SOURCE_READS = 2
 _MAX_WEB_SOURCE_READ_CHARS = 12_000
+
+# 学术元数据检索复用联网授权，但独立限次，防止 planner 借它绕过 web 预算。
+_MAX_ACADEMIC_SEARCH_CALLS = 2
+_MAX_ACADEMIC_SEARCH_QUERY_LENGTH = 200
+_MAX_ACADEMIC_SEARCH_RESULTS = 8
+_ACADEMIC_SEARCH_TIMEOUT_SECONDS = 8.0
 
 _SENSITIVE_VISUAL_METADATA_RE = re.compile(
     r"(?:https?://|file://|^[A-Za-z]:[\\/]|^\\\\|\b(?:bearer\s+|sk-)[A-Za-z0-9._-]{8,}|[\\/][^\s]*\.pdf(?:$|[?#]))",
@@ -184,6 +191,7 @@ class DocContext:
         self._web_search_executor = web_search_executor if callable(web_search_executor) else None
         self._web_search_lock = threading.Lock()
         self._web_search_claimed = False
+        self._academic_search_call_count = 0
         # The outbound query is request-owned. Only bounded public anchors
         # extracted from successful document retrieval may refine it.
         self._web_search_request_query = ""
@@ -307,6 +315,21 @@ class DocContext:
             self._web_search_claimed = True
             return self._web_search_executor, ""
 
+    def academic_search_available(self) -> bool:
+        """学术元数据检索跟随本请求的联网搜索授权，不引入独立开关。"""
+        with self._web_search_lock:
+            return callable(self._web_search_executor)
+
+    def claim_academic_search_slot(self) -> tuple:
+        """Claim one bounded academic metadata lookup for this request."""
+        with self._web_search_lock:
+            if not callable(self._web_search_executor):
+                return False, "academic_search_not_enabled"
+            if self._academic_search_call_count >= _MAX_ACADEMIC_SEARCH_CALLS:
+                return False, "academic_search_limit_reached"
+            self._academic_search_call_count += 1
+            return True, ""
+
     def set_web_search_request_query(self, query: Any) -> None:
         """Freeze the route-owned user/retrieval query before Agent planning."""
         self._web_search_request_query = _safe_web_result_text(
@@ -379,7 +402,8 @@ class DocContext:
                     continue
                 source_id = str(source.get("source_id") or source.get("evidence_id") or "").strip()
                 url = str(source.get("url") or "").strip()
-                if not source_id.startswith("web:") or not url:
+                # web_search 与 academic_search 是仅有的两个允许登记外部来源的工具。
+                if not source_id.startswith(("web:", "academic:")) or not url:
                     continue
                 self._web_source_registry[source_id] = {
                     "source_id": source_id,
@@ -670,6 +694,14 @@ def execute_tool(
                 "result_count": 0,
                 "summary": "联网搜索只能通过请求级异步执行器调用",
             }
+        elif tool_name == "academic_search":
+            return {
+                "error": "academic_search_requires_async_executor",
+                "error_code": "academic_search_requires_async_executor",
+                "results": [],
+                "result_count": 0,
+                "summary": "学术检索只能通过请求级异步执行器调用",
+            }
         elif tool_name == "visual_search":
             result = _exec_visual_search(args, doc_ctx)
         elif tool_name == "vector_search":
@@ -720,6 +752,8 @@ async def execute_async_tool(
         return await execute_visual_analysis_tool(args, doc_ctx)
     if tool_name == "web_search":
         return await _exec_web_search(args, doc_ctx)
+    if tool_name == "academic_search":
+        return await _exec_academic_search(args, doc_ctx)
     if tool_name == "read_web_source":
         return await _exec_read_web_source(args, doc_ctx)
     if tool_name == "search_document":
@@ -927,6 +961,218 @@ async def _exec_web_search(args: dict, ctx: DocContext) -> dict:
             "anchor_count": int(resolution.get("anchor_count") or 0),
             "used_document_anchors": bool(resolution.get("used_document_anchors")),
         },
+    }
+
+
+def _academic_candidate_url(metadata: dict) -> str:
+    url = _safe_web_result_text(metadata.get("external_url"), 1200)
+    if url and re.match(r"^https?://", url, re.IGNORECASE):
+        return url
+    doi = _safe_web_result_text(metadata.get("doi"), 300)
+    if doi:
+        return f"https://doi.org/{doi}"
+    arxiv_id = _safe_web_result_text(metadata.get("arxiv_id"), 120)
+    if arxiv_id:
+        return f"https://arxiv.org/abs/{arxiv_id}"
+    return ""
+
+
+def _render_academic_source_evidence(metadata: dict, index: int) -> str:
+    title = _safe_web_result_text(metadata.get("title"), 300) or "未知标题"
+    authors = [str(name) for name in (metadata.get("authors") or []) if str(name).strip()]
+    author_text = ", ".join(authors[:6]) + (" 等" if len(authors) > 6 else "")
+    year = metadata.get("year")
+    venue = _safe_web_result_text(metadata.get("venue"), 200)
+    doi = _safe_web_result_text(metadata.get("doi"), 300)
+    arxiv_id = _safe_web_result_text(metadata.get("arxiv_id"), 120)
+    abstract = _safe_web_result_text(metadata.get("abstract_preview"), _WEB_SEARCH_SNIPPET_LIMIT)
+    url = _academic_candidate_url(metadata)
+    lines = [
+        _UNTRUSTED_WEB_EVIDENCE_NOTICE,
+        f"[A{index}]",
+        f"标题: {title}",
+        "证据类型: 学术元数据",
+    ]
+    if author_text:
+        lines.append(f"作者: {author_text}")
+    detail_parts = [str(part) for part in (year, venue) if part]
+    if detail_parts:
+        lines.append(f"发表: {' · '.join(detail_parts)}")
+    identifier_parts = [part for part in (f"DOI:{doi}" if doi else "", f"arXiv:{arxiv_id}" if arxiv_id else "") if part]
+    if identifier_parts:
+        lines.append(f"标识: {' · '.join(identifier_parts)}")
+    if url:
+        lines.append(f"URL: {url}")
+    if abstract:
+        lines.append(f"摘要: {abstract}")
+    return "\n".join(lines)
+
+
+async def _exec_academic_search(args: dict, ctx: DocContext) -> dict:
+    """检索公开学术元数据库（Semantic Scholar/Crossref），返回论文线索。
+
+    复用 paper_subscription_discovery_service 的 fail-open 引擎；端点、字段与
+    超时均由系统固定，planner 只能提供查询词与数量。
+    """
+    query = _safe_web_result_text(args.get("query"), _MAX_ACADEMIC_SEARCH_QUERY_LENGTH)
+    if not query:
+        return {
+            "results": [],
+            "chunk_meta": [],
+            "candidate_meta": [],
+            "result_count": 0,
+            "summary": "学术检索查询为空",
+            "error": "academic_query_required",
+            "error_code": "academic_query_required",
+            "suggested_next_tool": "web_search",
+        }
+
+    allowed, skip_reason = ctx.claim_academic_search_slot()
+    if not allowed:
+        return {
+            "results": [],
+            "chunk_meta": [],
+            "candidate_meta": [],
+            "result_count": 0,
+            "summary": (
+                "学术检索不可用（联网搜索未开启）"
+                if skip_reason == "academic_search_not_enabled"
+                else "本次请求的学术检索次数已用完"
+            ),
+            "error": skip_reason,
+            "error_code": skip_reason,
+            "suggested_next_tool": "web_search",
+        }
+
+    try:
+        limit = max(1, min(_MAX_ACADEMIC_SEARCH_RESULTS, int(args.get("limit") or 5)))
+    except (TypeError, ValueError):
+        limit = 5
+
+    try:
+        from config import settings as _app_settings
+
+        semantic_scholar_api_key = str(
+            getattr(_app_settings, "paper_metadata_semantic_scholar_api_key", "") or ""
+        )
+    except Exception:
+        semantic_scholar_api_key = ""
+
+    try:
+        discovery = await discover_subscription_papers(
+            query,
+            semantic_scholar_api_key=semantic_scholar_api_key,
+            limit=limit,
+            timeout_seconds=_ACADEMIC_SEARCH_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("[RetrievalTools] 学术检索执行失败: %s", exc)
+        return {
+            "results": [],
+            "chunk_meta": [],
+            "candidate_meta": [],
+            "result_count": 0,
+            "summary": "学术检索失败，可改用 web_search 或继续使用文档证据",
+            "error": "academic_search_failed",
+            "error_code": "academic_search_failed",
+            "suggested_next_tool": "web_search",
+        }
+
+    providers = discovery.get("providers") if isinstance(discovery, dict) else {}
+    candidates = [
+        candidate
+        for candidate in (discovery.get("candidates") or [])
+        if isinstance(candidate, dict) and isinstance(candidate.get("metadata"), dict)
+    ][:limit]
+    if not candidates:
+        return {
+            "results": [],
+            "chunk_meta": [],
+            "candidate_meta": [],
+            "result_count": 0,
+            "summary": f"学术检索 \"{query[:80]}\" 没有返回可用论文",
+            "providers": providers,
+            "suggested_next_tool": "web_search",
+        }
+
+    results: list[str] = []
+    chunk_meta: list[dict] = []
+    candidate_meta: list[dict] = []
+    context_parts: list[str] = []
+    registry_sources: list[dict] = []
+    public_sources: list[dict] = []
+    for index, candidate in enumerate(candidates, start=1):
+        metadata = candidate.get("metadata") or {}
+        title = _safe_web_result_text(metadata.get("title"), 300)
+        url = _academic_candidate_url(metadata)
+        identity = str(metadata.get("doi") or metadata.get("arxiv_id") or url or title or index)
+        source_id = hashlib.sha1(identity.casefold().encode("utf-8", errors="ignore")).hexdigest()[:16]
+        evidence_id = f"academic:{source_id}"
+        evidence_text = _render_academic_source_evidence(metadata, index)
+        snippet_bits = [
+            ", ".join(str(name) for name in (metadata.get("authors") or [])[:3]),
+            str(metadata.get("year") or ""),
+            _safe_web_result_text(metadata.get("venue"), 200),
+            _safe_web_result_text(metadata.get("abstract_preview"), 360),
+        ]
+        snippet = " · ".join(part for part in snippet_bits if part)
+        item = {
+            "chunk": evidence_text,
+            "source": "academic_search",
+            "context_id": evidence_id,
+            "evidence_id": evidence_id,
+            "chunk_id": evidence_id,
+            "chunk_type": "academic_result",
+            "web_url": url,
+            "web_title": title,
+        }
+        rendered = _format_tool_chunk(
+            evidence_text,
+            source="academic_search",
+            context_id=evidence_id,
+            evidence_id=evidence_id,
+            chunk_idx=evidence_id,
+            chunk_type="academic_result",
+        )
+        if not rendered:
+            continue
+        meta = _build_tool_candidate_meta(item, ctx=ctx, chunk_idx=evidence_id)
+        meta["web_url"] = url
+        meta["web_title"] = title
+        results.append(rendered)
+        chunk_meta.append(meta)
+        candidate_meta.append(meta)
+        context_parts.append(evidence_text)
+        registry_sources.append({
+            "title": title,
+            "url": url,
+            "snippet": _safe_web_result_text(snippet, _WEB_SEARCH_SNIPPET_LIMIT),
+            "evidence_type": "academic_metadata",
+            "content_status": "",
+            "source_id": evidence_id,
+            "evidence_id": evidence_id,
+            "adapter": external_adapter_for_url(url),
+        })
+        public_sources.append({
+            "title": title,
+            "url": url,
+            "snippet": _safe_web_result_text(snippet, _WEB_SEARCH_SNIPPET_LIMIT),
+        })
+
+    # 登记来源后 planner 可用 read_web_source 继续读取公开落地页。
+    ctx.register_web_sources(registry_sources)
+
+    return {
+        "results": results,
+        "chunk_meta": chunk_meta,
+        "candidate_meta": candidate_meta,
+        "result_count": len(results),
+        "web_search_sources": public_sources,
+        "web_search_source_registry": registry_sources,
+        "web_search_context": "\n\n".join(context_parts),
+        "summary": f"学术检索 \"{query[:80]}\" 返回 {len(results)} 篇论文线索",
+        "effective_query": query,
+        "providers": providers,
     }
 
 

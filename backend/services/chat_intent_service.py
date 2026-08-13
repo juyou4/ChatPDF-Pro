@@ -14,6 +14,9 @@ import re
 from typing import Literal, Sequence
 
 from services.block_inventory_service import detect_inventory_kinds
+from services.full_document_summary_request import (
+    is_full_document_section_summary_request,
+)
 from services.modal_asset_service import detect_query_modalities
 from services.query_analyzer import count_content_terms, get_retrieval_strategy
 
@@ -444,7 +447,34 @@ def prepare_chat_intent(
     visual_intent = bool(
         set(modalities) & {"figure", "table", "formula", "layout"}
     ) or mode == "image"
+    # The contextualizer may shorten a self-contained request in a multi-turn
+    # chat.  Full-document / each-section semantics belong to the original
+    # user turn, so retain them if either representation carries the explicit
+    # signal.  Ordinary retrieval still uses the resolved question below.
+    section_detail_summary = bool(
+        is_full_document_section_summary_request(original)
+        or is_full_document_section_summary_request(question)
+    )
     operations = _infer_operations(question, query_type, retry_resolved=retry_resolved)
+    if section_detail_summary:
+        # A request such as "请按章节梳理全文" or "Please go through the
+        # sections" carries summary intent even though it may not include the
+        # literal summarize/总结 token.  Replace only the synthetic qa fallback;
+        # any real compound operation remains visible and will keep this turn
+        # out of the fixed full-summary route below.
+        operations = tuple(
+            item for item in operations
+            if not (
+                str(item.get("kind") or "") == "qa"
+                and str(item.get("polarity") or "") == "requested"
+            )
+        )
+        if not any(
+            str(item.get("kind") or "") == "summarize"
+            and str(item.get("polarity") or "") == "requested"
+            for item in operations
+        ):
+            operations = (*operations, {"kind": "summarize", "polarity": "requested"})
     task, task_rule = _infer_task(
         question,
         query_type,
@@ -454,8 +484,13 @@ def prepare_chat_intent(
     page_ranges = extract_page_ranges(question)
     inventory_kinds = tuple(detect_inventory_kinds(question))
     scope, scope_rule = _infer_scope(question, mode)
+    if section_detail_summary and mode == "default" and not page_ranges:
+        # "Each section" denotes a complete-document projection, not a
+        # request about one named section.  Recording document scope keeps the
+        # route trace, Agent gate and renderer contract semantically aligned.
+        scope, scope_rule = "document", "scope:document_section_detail"
     full_document_summary = _is_full_document_summary_request(
-        question=question,
+        question=original if section_detail_summary else question,
         task=task,
         scope=scope,
         interaction_mode=mode,
@@ -1070,6 +1105,11 @@ def _is_full_document_summary_request(
     text = str(question or "").strip()
     if not text:
         return False
+    if is_full_document_section_summary_request(text):
+        # "Summarize each section" naturally contains the word "section",
+        # but it asks for the complete structural projection rather than a
+        # local section answer.  Check this before the local-scope guard.
+        return True
     # "总结本文的方法" contains a soft document target (本文) but is still
     # narrower than the whole paper.  Only an explicit whole-document phrase
     # is allowed to override a named subsection target.
