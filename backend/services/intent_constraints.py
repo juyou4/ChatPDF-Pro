@@ -21,7 +21,9 @@ _TASK_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("summarize", re.compile(r"总结|概述|摘要|概览|summari[sz]e|summary|overview", re.IGNORECASE)),
     ("translate", re.compile(r"翻译|译文|translate|translation", re.IGNORECASE)),
     ("compare", re.compile(r"比较|对比|区别|差异|异同|compare|comparison|contrast|versus|\bvs\.?\b", re.IGNORECASE)),
-    ("explain", re.compile(r"解释|说明|为什么|为何|如何|怎么|原理|explain|why|how|mechanism", re.IGNORECASE)),
+    # “使用方法”是口语规范化（“怎么用/咋用”）的产物词面，与“如何/怎么”同一极性；
+    # 缺了它，规范化改写会被判为丢失 explain 极性而整体回退。
+    ("explain", re.compile(r"解释|说明|为什么|为何|如何|怎么|原理|使用方法|explain|why|how|mechanism", re.IGNORECASE)),
     ("extract", re.compile(r"提取|找出|给出|列出|数值|extract|list|exact|value|number", re.IGNORECASE)),
     ("inventory", re.compile(r"全部|所有|每个|列出|哪些|多少个|\ball\b|\bevery\b|inventory", re.IGNORECASE)),
     ("figure", re.compile(r"图表|图片|图\s*\d+|figure|fig(?:ure)?|chart|plot", re.IGNORECASE)),
@@ -406,6 +408,38 @@ class IntentConstraintSet:
             )
         return validation
 
+    def validate_normalized_rewrite(self, candidate: str) -> ConstraintValidation:
+        """Validate a deterministic lexical normalization plus template hints.
+
+        Colloquial normalization rewrites CJK word surfaces ("咋用" becomes
+        "的使用方法"), so the entity-set checks structurally misfire on it:
+        ``_CJK_ENTITY_RE`` captures the whole surrounding phrase and every
+        rewrite then looks like one entity removed plus one introduced.  Hard
+        locators (numbers, table/figure references, identifiers, comparison
+        operands, scope words, pages) and task polarity still must survive —
+        a buggy rewrite rule that eats them has changed the question and must
+        fall back to the original query.
+        """
+        validation = self._validate_text(
+            candidate,
+            require_complete=True,
+            exact_tasks=False,
+            implicit_scope_terms={"selected"} if self.has_allowed_context else None,
+            allow_introduced_tasks=True,
+            skip_entity_checks=True,
+        )
+        if not validation.allowed:
+            return validation
+        observed = set(_task_polarities(_clean_text(candidate)))
+        missing_polarities = set(self.task_polarities) - observed
+        if missing_polarities:
+            return ConstraintValidation(
+                False,
+                ("missing_task_polarity",),
+                tuple(sorted(f"polarity:{item}" for item in missing_polarities)),
+            )
+        return validation
+
     def validate_subquestions(self, sub_questions: Sequence[str]) -> ConstraintValidation:
         items = [_clean_text(item, 400) for item in sub_questions if _clean_text(item, 400)]
         if not (2 <= len(items) <= 3):
@@ -526,6 +560,7 @@ class IntentConstraintSet:
         allow_introduced_tasks: bool = False,
         allowed_introduced_tasks: frozenset[str] = frozenset(),
         allow_language_change: bool = False,
+        skip_entity_checks: bool = False,
     ) -> ConstraintValidation:
         text = _clean_text(candidate)
         if not text:
@@ -581,6 +616,8 @@ class IntentConstraintSet:
             ("scope", set(self.scope_terms), set(_scope_terms(text)), set()),
         )
         for label, required, observed, allowed_context in checks:
+            if skip_entity_checks and label == "entity":
+                continue
             if label == "scope" and implicit_scope_terms:
                 required = required - set(implicit_scope_terms)
             if require_complete and required - observed:

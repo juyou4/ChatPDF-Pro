@@ -187,9 +187,13 @@ class QueryRewriter:
             return query
 
         try:
+            allowed_context = [
+                *([selected_text] if selected_text and selected_text.strip() else []),
+                *self._deterministic_enrichment_context(query),
+            ]
             constraints = IntentConstraintSet.from_text(
                 query,
-                allowed_context=[selected_text] if selected_text and selected_text.strip() else (),
+                allowed_context=allowed_context,
             )
             rewritten = query
 
@@ -211,7 +215,10 @@ class QueryRewriter:
                 evidence_need=evidence_need,
             )
 
-            validation = constraints.validate_enrichment(rewritten)
+            # 本地改写全部来自可信来源（原句、用户选中文本、代码模板），
+            # 这里的守卫只负责硬锚点（数字/表图引用/页码/标识符/极性）不被
+            # 正则意外吞掉；词面规范化不按幻觉实体处理。
+            validation = constraints.validate_normalized_rewrite(rewritten)
             if not validation.allowed:
                 logger.warning(
                     "查询改写违反意图约束，回退原始查询 constraint_id=%s violations=%s",
@@ -307,6 +314,29 @@ class QueryRewriter:
         if not key_content:
             return query
         return f"{query} {key_content}"
+
+    # 口语规范化替换（COLLOQUIAL_PATTERNS）注入的静态词面。动态部分（\1）来自
+    # 原句本身，天然满足约束，无需豁免。
+    _COLLOQUIAL_REPLACEMENT_CONTEXT = (
+        "的含义和解释 的主要内容 的定义 的原因和目的 的原因 的使用方法 如何 什么"
+    )
+
+    def _deterministic_enrichment_context(self, query: str) -> list[str]:
+        """本地确定性改写可能注入的全部词面，作为意图约束的豁免上下文。
+
+        这些词是代码资产（口语规范化替换词、数值表格检索模板与由原句提示词
+        派生的别名），不是模型输出。意图约束继续负责“原意图要素不得丢失”，
+        但不应把自家模板判成幻觉实体后整体回退——那会让口语规范化与表格
+        检索模板在运行时全部失效。LLM 改写路径构建自己的约束集，不经过这里。
+        """
+        context: list[str] = [self._COLLOQUIAL_REPLACEMENT_CONTEXT]
+        try:
+            context.append(self.build_numeric_table_hint_text(query))
+            context.append(self.build_numeric_table_cost_hint_text(query))
+        except Exception:
+            # 提示词构建失败时退回严格校验，而不是让改写流程整体报错。
+            pass
+        return [item for item in context if str(item or "").strip()]
 
     def _apply_evidence_need_templates(
         self,
