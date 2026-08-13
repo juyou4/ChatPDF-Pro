@@ -10,6 +10,7 @@ from services.citation_alignment_service import (
     citation_support_text,
     extract_atomic_claims,
     strip_inline_citations,
+    strip_source_reference_markers,
 )
 
 
@@ -34,7 +35,9 @@ def _span_is_in_source(citation: dict, span: str) -> bool:
     source = citation_support_text(citation)
     if not source:
         return False
-    compact = lambda value: re.sub(r"\s+", "", str(value or "")).lower()
+    # 证据进 prompt 前已经去掉原文自带的参考文献角标，模型回传的 span 因此不带这些
+    # 角标，而存储的原文仍带。比对两侧必须走同一个归一化，否则 span_precision 会假性下跌。
+    compact = lambda value: re.sub(r"\s+", "", strip_source_reference_markers(value)).lower()
     return compact(span) in compact(source)
 
 

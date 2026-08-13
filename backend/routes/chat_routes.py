@@ -169,6 +169,7 @@ from services.citation_alignment_service import (
     build_claim_verifier_candidates,
     claim_support_score,
     query_relevance_score,
+    strip_source_reference_markers,
 )
 from services.citation_quality_metrics import compute_citation_quality_metrics
 import base64
@@ -2001,17 +2002,29 @@ def _build_agent_doc_context(
 
 
 def _numeric_regex_locator_pattern(query: str = "") -> str:
-    """Build a conservative regex for table metadata secondary lookup."""
+    """Build a conservative regex for table metadata secondary lookup.
+
+    An explicit "Table N" in the question never becomes the pattern on its
+    own: grepping for the table number mostly hits prose references
+    ("Table 7 shows ...") and every row of that table, and table identity is
+    already enforced separately as a candidate filter
+    (``_record_matches_explicit_table_labels``).  The target row is located by
+    the value and method-name anchors that remain after structural numbers are
+    stripped; when such anchors exist, the table label is OR-ed in as an extra
+    recall variant so caption/whole-table blocks stay reachable.
+    """
     text = str(query or "")
-    explicit_table_patterns: list[str] = []
+    explicit_table_variants: list[str] = []
     for match in _NUMERIC_TABLE_QUERY_TABLE_RE.finditer(text):
-        label_match = re.search(r"(?:\btable|表)\s*\.?\s*(\d+(?:\.\d+)?)", match.group(0), re.IGNORECASE)
+        label_match = re.search(
+            r"(?:\btable|表)\s*\.?\s*(\d+(?:\.\d+)?)", match.group(0), re.IGNORECASE
+        )
         if not label_match:
             continue
         table_no = re.escape(label_match.group(1))
-        explicit_table_patterns.append(rf"(?:\btable\s*\.?\s*{table_no}\b|表\s*{table_no}\b)")
-    if explicit_table_patterns:
-        return r"(?:" + "|".join(dict.fromkeys(explicit_table_patterns)) + r")"
+        for variant in (rf"\btable\s*\.?\s*{table_no}\b", rf"表\s*{table_no}\b"):
+            if variant not in explicit_table_variants:
+                explicit_table_variants.append(variant)
 
     structural_spans = [
         (match.start(), match.end())
@@ -2063,6 +2076,7 @@ def _numeric_regex_locator_pattern(query: str = "") -> str:
                 variants.append(escaped[:-1] + r"\s*%?")
             else:
                 variants.append(escaped + r"\s*%?")
+        variants.extend(explicit_table_variants)
         return r"(?:" + "|".join(variants) + r")"
 
     # Numeric table questions often mention a distinctive method/model/dataset
@@ -2083,8 +2097,13 @@ def _numeric_regex_locator_pattern(query: str = "") -> str:
             if compact not in candidates:
                 candidates.append(compact)
     if not candidates:
+        # An explicit table label alone is deliberately not enough: without a
+        # value or method-name anchor the grep would only reproduce the noise
+        # the label filter exists to remove.
         return ""
-    return r"(?:" + "|".join(re.escape(item) for item in candidates[:4]) + r")"
+    variants = [re.escape(item) for item in candidates[:4]]
+    variants.extend(explicit_table_variants)
+    return r"(?:" + "|".join(variants) + r")"
 
 
 def _normalize_paper_table_label(value: str = "") -> str:
@@ -4493,11 +4512,16 @@ def _build_fused_context(
 
 def _format_context_segments_for_prompt(segments: list[dict], *, max_segments: int = 12) -> str:
     lines: list[str] = []
+    used_refs: list[int] = []
     seen: set[str] = set()
     for segment in segments or []:
         if not isinstance(segment, dict):
             continue
-        text = re.sub(r"\s+", " ", str(segment.get("text") or "")).strip()
+        # 先去掉原文自带的参考文献角标，再压空白：论文正文的 [12]、[3,4] 与本段前缀的
+        # [n] 语法完全相同，留在 prompt 里模型无法区分，抄到范围内编号就会产出一个
+        # 通过全部校验但语义无关的引用。数值表格走 _format_numeric_table_context_
+        # segments_for_prompt，不经过这里，精确证据里的方括号内容不受影响。
+        text = re.sub(r"\s+", " ", strip_source_reference_markers(segment.get("text"))).strip()
         if not text:
             continue
         key = text.casefold()
@@ -4516,9 +4540,17 @@ def _format_context_segments_for_prompt(segments: list[dict], *, max_segments: i
         if page_text:
             prefix += f" {page_text}"
         lines.append(f"{prefix}\n{text}")
+        if ref not in used_refs:
+            used_refs.append(ref)
         if len(lines) >= max(1, int(max_segments or 1)):
             break
-    return "\n\n".join(lines).strip()
+    body = "\n\n".join(lines).strip()
+    if not body or not used_refs:
+        return body
+    # 显式枚举可用编号。段落前缀里的 [n] 散落在长上下文各处，模型需要自行归纳可用
+    # 集合，长文档下容易漏号或越界；越界引用会被清除，那句话就丢了引用。
+    allowed = ", ".join(f"[{ref}]" for ref in used_refs)
+    return f"{body}\n\n可用引用编号（仅限以下这些，不得出现其他编号）：{allowed}"
 
 
 def _compact_context_text(text: str, *, limit: int = 1800) -> str:
@@ -4689,6 +4721,52 @@ def _is_numeric_table_visual_verification_segment(segment: dict) -> bool:
     return is_visual_segment and str(segment.get("visual_verdict") or "").strip().lower() == "confirmed"
 
 
+_TABLE_IDENTITY_FIELDS = ("table_instance_id", "table_bundle_id", "table_id")
+
+
+def _mark_conflicting_table_citations(retrieval_meta: dict, visual_diag: dict) -> int:
+    """给视觉核验判为冲突的表格引用打上判定标记。
+
+    冲突此前只往 prompt 末尾拼一句中文劝阻，属于软约束：模型照引不误时，被核验
+    判定与结构化文字证据矛盾的那一行仍然是一条完全正常、无任何标记的引用。这里
+    只做标记不做删除——误判冲突不应该静默删掉正确证据，但下游排序和前端需要能
+    看见这个信号。
+    """
+    if not isinstance(retrieval_meta, dict) or not isinstance(visual_diag, dict):
+        return 0
+    targets = {
+        value
+        for field in _TABLE_IDENTITY_FIELDS
+        if (value := str(visual_diag.get(field) or "").strip())
+    }
+    if not targets:
+        return 0
+
+    marked = 0
+    updated: list[dict] = []
+    for citation in retrieval_meta.get("citations") or []:
+        if not isinstance(citation, dict):
+            continue
+        identities = {
+            value
+            for field in _TABLE_IDENTITY_FIELDS
+            if (value := str(citation.get(field) or "").strip())
+        }
+        if identities & targets:
+            citation = {
+                **citation,
+                "visual_verdict": "conflict",
+                "visual_conflict_reason": str(visual_diag.get("rejected_reason") or "conflict")[:200],
+            }
+            marked += 1
+        updated.append(citation)
+
+    if marked:
+        retrieval_meta["citations"] = updated
+        visual_diag["conflict_marked_citation_count"] = marked
+    return marked
+
+
 async def _maybe_add_numeric_table_visual_verification(
     *,
     request: ChatRequest,
@@ -4757,6 +4835,8 @@ async def _maybe_add_numeric_table_visual_verification(
         or ""
     ).strip().lower()
     if not visual_segment or visual_verdict != "confirmed":
+        if visual_verdict == "conflict":
+            _mark_conflicting_table_citations(retrieval_meta, visual_diag)
         return
 
     retrieval_meta["_context_segments"] = _merge_response_context_segments(
@@ -9757,12 +9837,16 @@ _PUBLIC_CITATION_KEYS = {
     "support_span_start",
     "support_span_end",
     "claim_support_score",
+    # 表格视觉核验判为冲突时的标记。引用保留但前端需要能标注"视觉核验存疑"。
+    "visual_verdict",
+    "visual_conflict_reason",
 }
 _PUBLIC_CITATION_TEXT_LIMITS = {
     "source_text": 1400,
     "display_text": 900,
     "highlight_text": 360,
     "support_span": 360,
+    "visual_conflict_reason": 200,
     "start_phrase": 160,
     "end_phrase": 160,
     "table_caption": 320,
@@ -12494,7 +12578,16 @@ async def _prepare_chat_routing(
     retrieval_seed = str(
         continuation_state.get("retrieval_question") or resolved_question
     ).strip()
-    if use_agent or intent.query_type == "inventory":
+    if (
+        use_agent
+        or intent.query_type == "inventory"
+        or bool(getattr(intent, "full_document_summary", False))
+    ):
+        # The parse-bound full-document summary branch does not consume a
+        # retrieval query at all.  Skipping a cheap-model rewrite here keeps
+        # this deterministic route independent from an otherwise unrelated
+        # model call, avoids needless latency, and preserves the original
+        # whole-document request semantics all the way to the renderer.
         retrieval_query = retrieval_seed
     else:
         retrieval_query = await _maybe_rewrite_query(
@@ -12988,7 +13081,11 @@ async def _build_full_document_summary_for_turn(
 
     if not isinstance(outline, dict):
         return _full_document_summary_unavailable("reading_outline_missing")
-    rendered = build_full_document_summary(outline, block_index)
+    rendered = build_full_document_summary(
+        outline,
+        block_index,
+        question=str(turn_context.original_question or request.question or ""),
+    )
     rendered["outline"] = outline
     return rendered
 
@@ -14561,6 +14658,7 @@ def _merge_claim_verifier_into_critic(
             "status": str(item.get("status") or "uncertain")[:20],
             "reason": str(item.get("reason") or "")[:240],
             "evidence_ids": [str(value)[:80] for value in (item.get("evidence_ids") or [])][:4],
+            "evidence_count": int(item.get("evidence_count") or 0),
         })
     summary = {
         "status": str(verifier.get("status") or "completed"),
@@ -15696,7 +15794,10 @@ def _build_faithfulness_guard_prompt(*, allow_web_evidence: bool = False) -> str
         if allow_web_evidence
         else "- 仅允许使用 [n] 形式（n 为提示词中给出的文档引用编号），禁止使用 [0]、[ID:n]、【n】等其他写法\n"
     )
-    citation_example = "[3][W2]" if allow_web_evidence else "[3][7]"
+    # 示例编号一律取 9x 段。引用候选上限硬编码为 20（见 _resolve_citation_candidate_limit），
+    # 因此这些编号不可能是真实来源。模型照抄示例时会因越界被清除，而不是产出一个
+    # 格式合法、编号合法、语义无关的引用——后者能通过全部校验，比缺引用危险得多。
+    citation_example = "[91][W9]" if allow_web_evidence else "[91][92]"
     return (
         "【忠实性与引用规则手册 - 严格遵守】\n"
         "\n"
@@ -15729,13 +15830,14 @@ def _build_faithfulness_guard_prompt(*, allow_web_evidence: bool = False) -> str
         "- 你对答案结构的解释（「下面分三点说明」）\n"
         "\n"
         "## 示例\n"
-        "- ✅ 数据型：「该模型在测试集上取得 95.2% 准确率 [4]。」\n"
-        "- ✅ 因果型：「该问题源于训练数据稀疏，迫使模型借助合成样本 [2][5]。」\n"
-        "- ✅ 技术型：「方法采用 cross-attention 替代 self-attention [3]。」\n"
-        "- ✅ 比较型：「Method A 71.3 vs Method B 68.5，提升 2.8 个百分点 [4][6]。」\n"
-        "- ✅ 混合型：「该方法由 Smith 等人于 2024 年提出 [1]，在多个基准测试上取得 SOTA [4]。」\n"
+        "- ✅ 数据型：「该模型在测试集上取得 95.2% 准确率 [91]。」\n"
+        "- ✅ 因果型：「该问题源于训练数据稀疏，迫使模型借助合成样本 [91][92]。」\n"
+        "- ✅ 技术型：「方法采用 cross-attention 替代 self-attention [91]。」\n"
+        "- ✅ 比较型：「Method A 71.3 vs Method B 68.5，提升 2.8 个百分点 [91][92]。」\n"
+        "- ✅ 混合型：「该方法由 Smith 等人于 2024 年提出 [91]，在多个基准测试上取得 SOTA [92]。」\n"
         "- ❌ 错误：「文档显示模型表现较好。」（无具体数据 + 无引用）\n"
-        "- ❌ 错误：「实验在多个数据集进行，效果不错 [3]。」（事实模糊 + 引用覆盖整段）\n"
+        "- ❌ 错误：「实验在多个数据集进行，效果不错 [91]。」（事实模糊 + 引用覆盖整段）\n"
+        "- 注意：以上示例中的 91/92 只是占位编号，实际回答必须使用证据列表里给出的真实编号。\n"
         "\n"
         "## 严格守则\n"
         f"- 答案中的**每个事实声明**必须能在{evidence_scope}中找到直接依据，禁止编造或推测\n"

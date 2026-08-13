@@ -42,6 +42,11 @@ _ISSUE_TYPES = frozenset({
 _DEFAULT_ISSUE_TYPE = "other"
 _MAX_ISSUES = 5
 _MAX_CLAIM_VERIFIER_CANDIDATES = 8
+# supported 判定所需的最少授权证据条数。非 supported 的判定会变成 overreach 修复项
+# 并触发答案重写，而论文里单条证据支撑的数值事实非常常见，因此默认保持 1（等价于
+# 只要求"有证据"）。每条 verdict 都会带上 evidence_count，先按真实分布观测再决定
+# 是否上调。
+_MIN_SUPPORTING_EVIDENCE = 1
 _CLAIM_VERDICTS = frozenset({"supported", "unsupported", "contradicted", "uncertain"})
 _ANSWER_CITATION_RE = re.compile(r"\[(\d{1,3})\]")
 _ANSWER_NUMBER_RE = re.compile(r"(?<![\w])[-+]?\d+(?:\.\d+)?%?(?![\w])")
@@ -333,11 +338,16 @@ def _normalize_claim_verdicts(
             original_status = status
             status = "uncertain"
             reason = f"{original_status}_without_authorized_evidence"
+        elif status == "supported" and len(evidence_ids) < _MIN_SUPPORTING_EVIDENCE:
+            # 孤证不足以让一条断言拿到与多证据同等的 supported 权重。
+            status = "uncertain"
+            reason = f"supported_below_min_evidence:{len(evidence_ids)}"
         verdicts.append({
             "claim_id": claim_id,
             "status": status,
             "reason": reason,
             "evidence_ids": evidence_ids,
+            "evidence_count": len(evidence_ids),
         })
     return verdicts
 

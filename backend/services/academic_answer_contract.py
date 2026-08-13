@@ -373,7 +373,8 @@ def build_compact_academic_contract_prompt(
     citation_rule = (
         "- 文档事实使用 [n]，联网事实使用 [Wn]；不得把网页编号冒充文档编号。\n"
         if allow_web_evidence
-        else "- 每个含事实的句子末尾附 [n]；单句最多两个编号，如 [2][5]。\n"
+        # 示例编号取 9x 段，超出引用候选上限（20），照抄示例不会产出看似合法的引用。
+        else "- 每个含事实的句子末尾附 [n]；单句最多两个编号，如 [91][92]（占位示例，实际须用证据列表编号）。\n"
     )
     return (
         "【学术忠实性合同 · 精简版】\n"
@@ -680,6 +681,12 @@ def derive_answer_certainty(
                 "body_complete",
                 "appendix_complete",
                 "complete",
+                "render_version",
+                "presentation_mode",
+                "visible_section_count",
+                "structural_section_count",
+                "structural_expected_count",
+                "semantic_quality_status",
                 "rendered_section_count",
                 "citation_count",
                 "retryable",

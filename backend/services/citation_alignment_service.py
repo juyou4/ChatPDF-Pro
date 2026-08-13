@@ -78,6 +78,31 @@ def strip_inline_citations(text: str = "") -> str:
     return re.sub(r"(?<![A-Za-z_])(?:\[\d{1,3}\]|【\d{1,3}】)", "", str(text or "")).strip()
 
 
+_SOURCE_REFERENCE_GROUP_RE = re.compile(
+    r"(?<![A-Za-z_])[\[【]\d{1,3}(?:\s*[,，、\-–—]\s*\d{1,3})+[\]】]"
+)
+
+
+def strip_source_reference_markers(text: str = "") -> str:
+    """Remove the source paper's own numeric reference markers from evidence text.
+
+    Academic PDFs are full of ``[12]`` / ``[3,4]`` markers that use the same
+    syntax as our citation numbers. Inside a prompt they are indistinguishable
+    from the evidence list's ``[n]`` prefixes, so a model can copy one and
+    produce a citation that passes every format and range check while pointing
+    at unrelated evidence.
+
+    Author-year forms such as ``(Zhang et al., 2019)`` are deliberately left
+    alone: they cannot be mistaken for our ``[n]`` syntax, and any regex wide
+    enough to catch them also eats real data like ``(n=120, 2020 cohort)``.
+
+    Callers that compare model-produced spans against stored evidence must run
+    the stored text through this same function, otherwise the span will carry
+    no marker while the source still does and the match will fail.
+    """
+    return strip_inline_citations(_SOURCE_REFERENCE_GROUP_RE.sub("", str(text or "")))
+
+
 def tokenize(text: str = "", *, informative_only: bool = False) -> list[str]:
     lowered = str(text or "").lower()
     atoms = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]", lowered)
