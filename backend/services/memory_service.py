@@ -679,7 +679,9 @@ class MemoryService:
             if node.get("label", "").lower() in lowered_query or any(token and token in lowered_query for token in node.get("label", "").lower().split())
         ]
         if not matched_nodes:
-            matched_nodes = nodes[:3]
+            # 关键词门很宽（"表/方法/指标/结论"都算命中），但没有实体对得上就说明
+            # 图谱帮不上这个问题。此时注入任意节点只是噪声，直接放弃这一路。
+            return []
 
         matched_ids = {node["id"] for node in matched_nodes}
         matched_edges = [
