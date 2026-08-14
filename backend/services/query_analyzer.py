@@ -686,6 +686,28 @@ def is_analysis_explanation_query(query: str) -> bool:
     )
 
 
+# caption 在视觉语言论文里是**训练目标/任务名**（caption language model、image
+# caption、图像描述），不是表格标题。裸 \bcaption\b 曾把「Figure 2 中 caption
+# language model 与 baseline 的训练效率关系」判成显式表格范围，叠加 baseline 的
+# metric 信号后误判为 numeric_table——该类目带 1.0 硬闸，误判会同时把问题挡在
+# Agent 之外并按精确抽取取证。真正的表格 caption 提问必然带表号或「表」字，
+# 已由上面的表号模式覆盖，这里只负责剔除建模语义的同形词。
+_CAPTION_TOKEN_RE = re.compile(r"\bcaptions?\b", re.IGNORECASE)
+_CAPTION_MODELING_RE = re.compile(
+    r"(?:\bimage\s+captions?\b|\bcaptions?\s+(?:language\s+model|model|generation|"
+    r"generator|decoder|encoder|head|loss|objective|branch|task|pretraining|"
+    r"supervision)\b|图像描述|图像字幕|看图说话)",
+    re.IGNORECASE,
+)
+
+
+def _is_table_caption_scope(query_lower: str) -> bool:
+    """判断 caption 是否指向表格标题，而非图像描述类建模术语。"""
+    if not _CAPTION_TOKEN_RE.search(query_lower):
+        return False
+    return not _CAPTION_MODELING_RE.search(query_lower)
+
+
 def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
     """识别学术论文场景下的证据类型需求。"""
     if not query:
@@ -695,11 +717,14 @@ def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
     evidence_need: list[EvidenceNeed] = []
     cost_query = _is_numeric_table_cost_query(query_lower)
 
-    explicit_table_scope = bool(re.search(
-        r"(?:表格|表\s*\d+|第\s*\d+\s*表|表中|\btable(?:s)?(?:\s*\d+)?\b|\bcaption\b)",
-        query_lower,
-        re.IGNORECASE,
-    ))
+    explicit_table_scope = bool(
+        re.search(
+            r"(?:表格|表\s*\d+|第\s*\d+\s*表|表中|\btable(?:s)?(?:\s*\d+)?\b)",
+            query_lower,
+            re.IGNORECASE,
+        )
+        or _is_table_caption_scope(query_lower)
+    )
     numeric_table_metric_scope_patterns = [
         'baseline', '基线', 'metric', '指标', '阈值', 'threshold',
         '比率', 'ratio', 'percentage', 'accuracy', 'acc', 'score',

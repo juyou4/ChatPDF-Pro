@@ -791,6 +791,46 @@ _TOOL_FALLBACK_SUGGESTIONS: Dict[str, str] = {
 }
 
 
+# 反思缺口按提示词约定写成「缺什么，建议检索词：X」。取出 X 才能直接执行，
+# 整句描述当查询会把「检索」「建议」这类元词也送进检索通道。
+_GAP_QUERY_MARKER_RE = re.compile(
+    r"(?:建议检索词|建议查询|检索词|search\s+terms?|query)\s*[:：]\s*(.+)$",
+    re.IGNORECASE,
+)
+
+
+# 问句碎片（"是什么""为什么能省掉"）在正文里不会出现：进 BM25 只会稀释词频，
+# 进 OR 精确串只会空耗一个分支。回填时过滤，既有蓝图路径的行为保持不变。
+_LEXICAL_NOISE_TERM_RE = re.compile(
+    r"(?:是什么|为什么|怎么样|怎么|哪一?些|哪个|多少|如何|请问|能否|吗$|呢$)"
+)
+
+
+def _usable_lexical_terms(terms: Any) -> list[str]:
+    """只保留可能在文档正文中原样出现的检索词。"""
+    usable: list[str] = []
+    for term in _dedupe_terms(list(terms or [])):
+        if not (2 <= len(term) <= 40):
+            continue
+        if _LEXICAL_NOISE_TERM_RE.search(term):
+            continue
+        usable.append(term)
+    return usable
+
+
+def _gap_search_query(gap: str) -> str:
+    """把一条反思缺口描述编译成可直接执行的检索词。"""
+    text = re.sub(r"\s+", " ", str(gap or "")).strip()
+    if not text:
+        return ""
+    match = _GAP_QUERY_MARKER_RE.search(text)
+    if match:
+        candidate = match.group(1).strip(" 。.;；、,，\"'")
+        if candidate:
+            return candidate[:120]
+    return text[:120]
+
+
 def _format_tool_fallback_hint(suggestions: List[dict] | None) -> str:
     """把上一轮失败工具的降级建议压成一条 planner hint。"""
     seen: set[str] = set()
@@ -1736,6 +1776,7 @@ class RetrievalAgent:
             # 并入 uncovered/hints 通道；失败或超时静默回退现有规则。
             # ----------------------------------------------------------------
             reflection_extra_hints: List[str] = []
+            reflection_gap_queries: List[str] = []
             if (
                 self.reflection_enabled
                 and not self._reflection_attempted
@@ -1753,6 +1794,9 @@ class RetrievalAgent:
                 if isinstance(reflection, dict):
                     gaps = [gap for gap in reflection.get("missing_gaps") or [] if gap]
                     if gaps:
+                        reflection_gap_queries = _dedupe_terms(
+                            [_gap_search_query(gap) for gap in gaps]
+                        )
                         merged_gaps = list(uncovered_sub_questions)
                         gap_keys = {item.casefold() for item in merged_gaps}
                         for gap in gaps:
@@ -1974,6 +2018,32 @@ class RetrievalAgent:
                 # 一次补搜是硬边界。本轮仍执行 planner 规划出的其他互补工具，
                 # 但无论证据是否补足都在本轮收口，不再进入第三次恢复循环。
                 is_final = True
+
+            if reflection_gap_queries and not evidence_gap_retry_key_in_round:
+                # 反思只在最终轮触发，而该轮提示要求 planner 直接 final=true，
+                # 缺口若只作文本提示极易被整轮忽略。这里把首个未检索过的缺口
+                # 编译成一次确定性补搜与 planner 计划并列，跳过转述损耗。
+                # 预算与去重由下方执行循环统一裁决，此处不重复限制。
+                for gap_query in reflection_gap_queries:
+                    gap_operation = {
+                        "tool": "search_document",
+                        "args": {
+                            "query": gap_query,
+                            "keywords": [],
+                            "exactQuery": "",
+                            "strategy": "semantic",
+                            "limit": 14,
+                        },
+                    }
+                    normalized_gap = self._normalize_operation(gap_operation)
+                    if normalized_gap is None:
+                        continue
+                    gap_tool, _gap_args, gap_query_key = normalized_gap
+                    if self._is_duplicate_search(search_history, gap_tool, gap_query_key):
+                        continue
+                    operations.insert(0, gap_operation)
+                    self.diagnostics.setdefault("reflection_gap_searches", []).append(gap_query)
+                    break
 
             completion_ops = [
                 op for op in operations
@@ -2839,8 +2909,15 @@ class RetrievalAgent:
             all_content.append(f"【{gid}】({data['granularity']})\n{preview}")
 
         if all_content:
-            fetched_summary = "\n\n".join(all_content)
-            fetched_summary = self._compress_context_summary(fetched_summary)
+            raw_summary = "\n\n".join(all_content)
+            fetched_summary = self._compress_context_summary(raw_summary)
+            if len(fetched_summary) < len(raw_summary):
+                # 压缩是首尾截断，被丢掉的中间段里含有已获取意群/视觉资产的标识。
+                # 标识一旦消失，Planner 会把同一个意群再 fetch 一遍。搜索历史另有
+                # 独立段落不受影响，这里补的是正文里才有的那部分标识。
+                executed = self._executed_retrieval_keys(fetched_content)
+                if executed:
+                    fetched_summary += f"\n\n【已执行检索】(不要重复获取):\n{executed}"
 
         parts.append(f"\n【已获取内容】:\n{fetched_summary}")
 
@@ -3673,7 +3750,84 @@ class RetrievalAgent:
             self.diagnostics["forced_initial_search_injected_tools"] = [
                 str(op.get("tool", "") or "") for op in injected if str(op.get("tool", "") or "")
             ]
-        return [*injected, *operations]
+        merged = [*injected, *operations]
+        self._backfill_planner_search_channels(merged, bundle, question)
+        return merged
+
+    def _backfill_planner_search_channels(
+        self,
+        operations: list,
+        bundle: dict,
+        question: str,
+    ) -> None:
+        """把系统蓝图的词法通道回填给 planner 自己写的 search_document。
+
+        蓝图合并按**工具名**去重：planner 一旦自带 search_document，蓝图那条
+        （含双语术语、公式别名与 OR 精确串）会被整条丢弃。而 grep 通道只在
+        ``exactQuery`` 非空时才组装，于是首轮实际只剩稠密 + 由 query 切出的
+        BM25 两路，精确通道整轮缺席。这里只在 planner 未指定这些参数时回填，
+        不动它的 query，因此不额外消耗工具预算，也不改变它的检索意图。
+        """
+        if self._root_numeric_table_hard_gate(question):
+            # 数值表证据链由确定性通道锁定，首轮参数保持与改造前逐字节一致。
+            return
+        blueprint = next(
+            (
+                op
+                for op in (bundle.get("operations") or [])
+                if isinstance(op, dict) and str(op.get("tool") or "").strip() == "search_document"
+            ),
+            None,
+        )
+        blueprint_args = blueprint.get("args") if isinstance(blueprint, dict) else None
+        if not isinstance(blueprint_args, dict):
+            return
+        keywords = _usable_lexical_terms(blueprint_args.get("keywords"))
+        exact_query = "|".join(
+            _usable_lexical_terms(str(blueprint_args.get("exactQuery") or "").split("|"))
+        )[:260]
+        if not keywords and not exact_query:
+            return
+
+        backfilled: list[str] = []
+        for op in operations:
+            if not isinstance(op, dict) or str(op.get("tool") or "").strip() != "search_document":
+                continue
+            args = op.get("args")
+            if not isinstance(args, dict):
+                continue
+            # planner 已自行指定词法参数时尊重它的选择，只补空缺的一侧。
+            if args.get("keywords") or str(args.get("exactQuery") or "").strip():
+                continue
+            if keywords:
+                args["keywords"] = list(keywords)
+            if exact_query:
+                args["exactQuery"] = exact_query
+            backfilled.append(str(args.get("query") or "")[:80])
+        if backfilled:
+            self.diagnostics["initial_search_lexical_backfill"] = backfilled
+
+    def _executed_retrieval_keys(self, fetched_content: dict) -> str:
+        """列出本轮之前已经取到手的检索标识，供压缩后回填。
+
+        只列标识不列正文：目的是让 Planner 知道"这些已经读过"，而不是把被
+        压缩掉的内容再塞回去。
+        """
+        keys: list[str] = []
+        for gid in (fetched_content or {}):
+            identifier = str(gid or "").strip()
+            if identifier:
+                keys.append(f"意群 {identifier}")
+        for asset_id in sorted(self._visual_analysis_attempted_ids):
+            identifier = str(asset_id or "").strip()
+            if identifier:
+                keys.append(f"视觉资产 {identifier}")
+        if not keys:
+            return ""
+        listed = "、".join(keys[:40])
+        if len(keys) > 40:
+            listed += f"（另有 {len(keys) - 40} 项）"
+        return listed
 
     def _compress_context_summary(self, text: str) -> str:
         threshold = self.context_compress_threshold

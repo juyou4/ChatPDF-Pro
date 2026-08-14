@@ -696,6 +696,25 @@ def derive_answer_certainty(
     return result
 
 
+def _find_fabricated_quotes(answer: str, retrieval_meta: Optional[dict]) -> list[str]:
+    """找出答案里无法在授权证据中逐字找到的引号片段。
+
+    延迟导入以避免与引用度量模块的循环依赖；任何异常都按"未发现问题"处理，
+    这是一项附加检查，不应让回答链路失败。
+    """
+    citations = (retrieval_meta or {}).get("citations") if isinstance(retrieval_meta, dict) else None
+    if not isinstance(citations, list) or not citations:
+        return []
+    try:
+        from services.citation_quality_metrics import compute_citation_quality_metrics
+
+        metrics = compute_citation_quality_metrics(answer, citations)
+        unmatched = metrics.get("unmatched_quoted_spans")
+        return [str(item) for item in unmatched or [] if str(item).strip()]
+    except Exception:
+        return []
+
+
 def postprocess_critic_result(
     critique: Optional[dict],
     *,
@@ -758,6 +777,24 @@ def postprocess_critic_result(
                 "issue_type": "missing_citation",
                 # 确定性检查知道确切是哪一句，直接作为前端定位锚点。
                 "claim_span": str(tip)[:160],
+                "evidence_refs": [],
+            })
+
+    # 引号承诺"原文照录"，因此必须逐字可查。这项检查是确定性的，不依赖 critic
+    # 模型是否发现问题；引用编号合法不代表引号内容属实，后者是更危险的一类幻觉。
+    fabricated_quotes = _find_fabricated_quotes(answer, retrieval_meta)
+    if fabricated_quotes:
+        claim_span = fabricated_quotes[0][:160]
+        msg = (
+            f"有 {len(fabricated_quotes)} 处引号内容无法在已授权证据中逐字找到"
+            f"：「{claim_span[:60]}」"
+        )
+        if all(item.get("text") != msg for item in issue_details):
+            issue_details.append({
+                "text": msg,
+                # 伪造引文属于无据论断，而不是引用编号错配。
+                "issue_type": "hallucination",
+                "claim_span": claim_span,
                 "evidence_refs": [],
             })
 

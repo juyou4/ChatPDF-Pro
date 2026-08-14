@@ -790,6 +790,17 @@ class AppSettings(BaseSettings):
         validation_alias=AliasChoices("memory_archive_recall_min_overlap", "CHATPDF_MEMORY_ARCHIVE_RECALL_MIN_OVERLAP"),
         description="归档回捞的查询 token 最小重叠率，范围 0-1"
     )
+    # 记忆向量召回的相似度地板：低于此值的条目不进候选池。
+    # 默认 0 保持既有行为（只取 top_k、无下限）；设为正值可阻止库很空或问题
+    # 偏离已有记忆时，把最相近但其实无关的条目塞进上下文。
+    memory_vector_recall_min_similarity: float = Field(
+        default=0.0,
+        validation_alias=AliasChoices(
+            "memory_vector_recall_min_similarity",
+            "CHATPDF_MEMORY_VECTOR_RECALL_MIN_SIMILARITY",
+        ),
+        description="记忆向量召回的最小相似度，范围 0-1，0 表示不设下限"
+    )
     # 活跃记忆池容量（类 OS RAM，LRU 策略管理）
     memory_active_pool_size: int = Field(
         default=100,
@@ -1016,6 +1027,17 @@ class AppSettings(BaseSettings):
                 f"memory_archive_recall_min_overlap 值 {v} 超出合理范围 (0-1)，使用默认值 0.3"
             )
             return 0.3
+        return v
+
+    @field_validator("memory_vector_recall_min_similarity")
+    @classmethod
+    def validate_memory_vector_recall_min_similarity(cls, v: float) -> float:
+        """校验记忆向量召回地板，范围 0-1，超出范围回落到不设下限"""
+        if not (0.0 <= v <= 1.0):
+            logger.warning(
+                f"memory_vector_recall_min_similarity 值 {v} 超出合理范围 (0-1)，使用默认值 0.0"
+            )
+            return 0.0
         return v
 
     @field_validator("memory_compression_max_items")

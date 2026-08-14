@@ -763,6 +763,12 @@ def align_answer_citations(
     replacements: list[tuple[int, int, str]] = []
     bindings: list[dict[str, Any]] = []
     unsupported_count = 0
+    # 同一段证据被反复拿来支撑不同结论会制造虚假的高覆盖率。独占键刻意带上
+    # 该结论涉及的数字集合：一张表可以合法支撑多个**不同数值**的结论，按整块
+    # 一刀切会误杀正当的一表多用。这里只标记不删除——误判独占不应让正确证据
+    # 消失，但下游度量需要能看见这个信号。
+    occupied_spans: set[tuple[int, str, frozenset]] = set()
+    reused_span_count = 0
     for claim in claims:
         if _is_conservative_claim(claim["claim_text"]):
             unsupported_count += 1
@@ -800,15 +806,27 @@ def align_answer_citations(
             unsupported_count += 1
         selected_refs.update(refs)
         span_records = []
+        claim_number_key = frozenset(_claim_numbers(claim["claim_text"]))
         for score, ref, _item in chosen:
             record = updated[ref]
             span = _find_support_span(claim["claim_text"], record, score)
+            occupancy_key = (
+                int(ref),
+                re.sub(r"\s+", "", str(span["text"] or "")).lower(),
+                claim_number_key,
+            )
+            reused = occupancy_key in occupied_spans
+            if reused:
+                reused_span_count += 1
+            else:
+                occupied_spans.add(occupancy_key)
             span_record = {
                 "ref": ref,
                 "score": round(score, 4),
                 "text": span["text"],
                 "start": span["start"],
                 "end": span["end"],
+                "reused": reused,
             }
             span_records.append(span_record)
             existing_spans = list(record.get("support_spans") or []) if isinstance(record.get("support_spans"), list) else []
@@ -834,6 +852,7 @@ def align_answer_citations(
                 for row in chosen
             ],
             "support_spans": span_records,
+            "span_reused": any(item.get("reused") for item in span_records),
         })
 
     rewritten = str(answer or "")
@@ -850,5 +869,6 @@ def align_answer_citations(
             "unsupported_claim_count": unsupported_count,
             "min_claim_support_score": round(float(min_score), 4),
             "max_refs_per_claim": max(1, int(max_refs_per_claim)),
+            "reused_span_count": reused_span_count,
         },
     }

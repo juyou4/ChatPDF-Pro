@@ -37,6 +37,21 @@ def _archive_recall_min_overlap() -> float:
         return 0.3
 
 
+def _vector_recall_min_similarity() -> float:
+    """向量召回的相似度地板。
+
+    取 top_k 时没有下限，库很空或问题偏离已有记忆时，最相近的那几条仍会被
+    塞进上下文并污染回答。地板作用在**向量相似度**上而不是 RRF 融合分：后者
+    是排名倒数和，绝对值没有语义，无法设阈值。BM25 与归档回捞另有各自门槛，
+    不受此值影响。
+    """
+    try:
+        from config import settings
+        return float(getattr(settings, "memory_vector_recall_min_similarity", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
 def _is_retrievable(entry) -> bool:
     """条目是否可参与检索；对缺少新字段的旧对象保持宽松。"""
     checker = getattr(entry, "is_retrievable", None)
@@ -328,6 +343,7 @@ class MemoryRetriever:
         """
         try:
             raw_results = self.memory_index.search(query, top_k=top_k, api_key=api_key)
+            floor = _vector_recall_min_similarity()
             # 转换为 hybrid_search_merge 期望的格式（需要 chunk 字段）
             return [
                 {
@@ -336,6 +352,7 @@ class MemoryRetriever:
                     "similarity": item["similarity"],
                 }
                 for item in raw_results
+                if floor <= 0.0 or float(item.get("similarity") or 0.0) >= floor
             ]
         except Exception as e:
             logger.error(f"记忆向量检索失败: {e}")

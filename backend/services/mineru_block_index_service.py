@@ -966,6 +966,13 @@ def _convert_mineru_item(
     if block_type in {"figure", "table"} and not text:
         text = "Figure" if block_type == "figure" else "Table"
 
+    # 目录页条目（"引言 ······ 3"）在检索里是纯噪声：它和真正讲引言的正文
+    # 共享全部关键词，却不含任何内容。归为 artifact 而不是丢弃，block_id 与
+    # 页面定位都保留，阅读面板仍能显示。
+    toc_entry = block_type == "paragraph" and _looks_like_toc_entry(text)
+    if toc_entry:
+        block_type = "artifact"
+
     bbox = _item_bbox(item)
     page_spec = page_specs.get(page_num, {"width": 612.0, "height": 792.0})
     geometry_uncertain = bool(geometry_uncertain and bbox)
@@ -1022,7 +1029,30 @@ def _convert_mineru_item(
             block["level"] = _infer_heading_level(text)
     if block_type == "artifact":
         block["layout_excluded_from_outline"] = True
+        if toc_entry:
+            block["structure_exclusion_reason"] = "toc_dot_leader"
     return block
+
+
+# 目录条目的点引导符：标题与页码之间那串填充点。要求至少 4 个填充符并以页码
+# 收尾，避免把正文里偶然出现的省略号加数字（"……见第 3 节"）误判成目录。
+_TOC_DOT_LEADER_RE = re.compile(r"[.．·・∙•…]{4,}\s*\d{1,4}\s*$")
+
+
+def _looks_like_toc_entry(text: str) -> bool:
+    """判断一段文本是否为目录条目。
+
+    目录条目与真正讲该章节的正文共享全部关键词却不含内容，是检索里的纯噪声。
+    单行必须命中；多行要求过半命中，这样一整块目录会被识别，而夹带一行类似
+    格式的正文段落不会。
+    """
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    matched = sum(1 for line in lines if _TOC_DOT_LEADER_RE.search(line))
+    if len(lines) == 1:
+        return matched == 1
+    return matched * 2 >= len(lines)
 
 
 def _normalize_type(value: Any) -> str:
