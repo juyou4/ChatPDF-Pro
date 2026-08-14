@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { ChevronLeft, Type, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff, CheckCircle2, Search, Key } from 'lucide-react';
+import { ChevronLeft, Type, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff, CheckCircle2, Search, Key, Library } from 'lucide-react';
 import MemoryPanel from './MemoryPanel';
+import PaperLibraryPanel from './PaperLibraryPanel';
 import { useFontSettings, PRESET_FONTS } from '../contexts/FontSettingsContext';
 import { useChatParams } from '../contexts/ChatParamsContext';
 import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
@@ -31,6 +32,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
 
     const [customFontInput, setCustomFontInput] = useState(customFont);
     const [showMemoryPanel, setShowMemoryPanel] = useState(false);
+    const [showPaperLibraryPanel, setShowPaperLibraryPanel] = useState(false);
     const [showImportDialog, setShowImportDialog] = useState(false);
     const [importText, setImportText] = useState('');
     const [showApiKey, setShowApiKey] = useState(false);
@@ -242,6 +244,20 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         <ToggleSwitch checked={enableMemory} onChange={setEnableMemory} color="#3b82f6" />
                                     </div>
                                 </div>
+                                <div className="mt-4 pt-4 border-t border-gray-100 flex items-center justify-between gap-4">
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-8 h-8 rounded-full bg-indigo-50 text-indigo-500 flex items-center justify-center">
+                                            <Library className="w-4 h-4" />
+                                        </div>
+                                        <div>
+                                            <h3 className="text-[14px] font-bold text-gray-900">论文订阅库</h3>
+                                            <p className="text-[12px] text-gray-500">按订阅追踪新论文，反馈会调整后续相关性排序</p>
+                                        </div>
+                                    </div>
+                                    <button onClick={() => setShowPaperLibraryPanel(true)} className="text-[12px] font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-xl transition-colors">
+                                        打开论文库
+                                    </button>
+                                </div>
                                 {enableMemory && (
                                     <div className="mt-4 space-y-3">
                                         <MemoryOverrideSlider
@@ -442,6 +458,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                         </motion.div>
                     )}
                     <MemoryPanel isOpen={showMemoryPanel} onClose={() => setShowMemoryPanel(false)} />
+                    <PaperLibraryPanel isOpen={showPaperLibraryPanel} onClose={() => setShowPaperLibraryPanel(false)} />
                 </motion.div>
             )}
         </AnimatePresence>

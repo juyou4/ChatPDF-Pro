@@ -63,6 +63,9 @@ class PaperLibraryService:
             "subscriptions": [],
             "feedback": [],
             "seen_papers": {},
+            # 文件内容哈希 → work_id。canonical_work_id 依赖 DOI/arXiv/标题，
+            # 元数据缺失或解析出入时同一个文件会被认成两篇；内容哈希是兜底。
+            "seen_source_hashes": {},
             "feed": [],
             "updated_at": "",
         }
@@ -218,7 +221,69 @@ class PaperLibraryService:
         return metadata, source_hash, document_version_rank(filename, metadata)
 
     @staticmethod
-    def _relevance(subscription: Mapping[str, Any], metadata: Mapping[str, Any]) -> tuple[float, list[str]]:
+    def _keyword_weights(
+        feedback: list[Any],
+        feed: list[Any],
+        subscription_id: str,
+        keywords: list[str],
+    ) -> dict[str, float]:
+        """从历史反馈学习关键词权重。
+
+        反馈只保存 ``paper_id``，而关键词命中记录在 feed 条目里，两者按
+        ``paper_id`` 关联即可统计每个关键词分别出现在「相关 / 不相关」论文
+        中的次数——全程不需要论文正文，隔离性不变。
+
+        权重取 Beta(1,1) 后验均值并平移到 (0.5, 1.5)：没有任何反馈时恒为
+        1.0，此时打分与未学习前逐位相同；持续被判无关的关键词最多降到半权，
+        持续相关的最多升到 1.5 倍。有界是刻意的，避免少数几次反馈就让某个
+        词独占排序。
+        """
+        subscription_id = _clean(subscription_id, 80)
+        matched_by_paper: dict[str, set[str]] = {}
+        for item in feed:
+            if not isinstance(item, Mapping):
+                continue
+            if _clean(item.get("subscription_id"), 80) != subscription_id:
+                continue
+            paper_id = _clean(item.get("paper_id"), 80)
+            if not paper_id:
+                continue
+            bucket = matched_by_paper.setdefault(paper_id, set())
+            for value in item.get("matched_keywords") or []:
+                token = str(value or "").casefold().strip()
+                if token:
+                    bucket.add(token)
+
+        positive: dict[str, int] = {}
+        negative: dict[str, int] = {}
+        for record in feedback:
+            if not isinstance(record, Mapping):
+                continue
+            if _clean(record.get("subscription_id"), 80) != subscription_id:
+                continue
+            hits = matched_by_paper.get(_clean(record.get("paper_id"), 80))
+            if not hits:
+                continue
+            bucket = positive if record.get("relevance") == "relevant" else negative
+            for token in hits:
+                bucket[token] = bucket.get(token, 0) + 1
+
+        weights: dict[str, float] = {}
+        for value in keywords:
+            token = str(value or "").casefold().strip()
+            if not token:
+                continue
+            pos = positive.get(token, 0)
+            neg = negative.get(token, 0)
+            weights[token] = round(0.5 + (1 + pos) / (2 + pos + neg), 4)
+        return weights
+
+    @staticmethod
+    def _relevance(
+        subscription: Mapping[str, Any],
+        metadata: Mapping[str, Any],
+        weights: Mapping[str, float] | None = None,
+    ) -> tuple[float, list[str], bool]:
         keywords = [str(value).casefold() for value in (subscription.get("keywords") or [])]
         haystack = " ".join((
             _clean(metadata.get("title"), 500),
@@ -226,8 +291,16 @@ class PaperLibraryService:
             _clean(metadata.get("venue"), 300),
         )).casefold()
         matches = [keyword for keyword in keywords if keyword and keyword in haystack]
-        score = len(matches) / max(1, len(keywords))
-        return round(score, 4), matches[:16]
+        weight_map = weights or {}
+        total = sum(weight_map.get(keyword, 1.0) for keyword in keywords if keyword)
+        hit = sum(weight_map.get(keyword, 1.0) for keyword in matches)
+        score = hit / total if total > 0 else 0.0
+        informed = any(
+            abs(weight_map.get(keyword, 1.0) - 1.0) > 1e-9
+            for keyword in keywords
+            if keyword
+        )
+        return round(score, 4), matches[:16], informed
 
     def process_new_documents(self, documents: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         """Process unseen works or newer explicit versions only."""
@@ -235,7 +308,20 @@ class PaperLibraryService:
             state = self._load()
             subscriptions = [item for item in (state.get("subscriptions") or []) if item.get("enabled")]
             seen = state.setdefault("seen_papers", {})
+            seen_hashes = state.setdefault("seen_source_hashes", {})
             feed = state.setdefault("feed", [])
+            # 权重在本批入库前一次性算好：同一批内新写入的 feed 条目还没有反馈，
+            # 不应影响本批打分，否则同批文档的先后顺序会改变各自的分数。
+            history = list(state.get("feedback") or [])
+            weights_by_subscription = {
+                str(subscription.get("subscription_id") or ""): self._keyword_weights(
+                    history,
+                    feed,
+                    str(subscription.get("subscription_id") or ""),
+                    [str(value) for value in (subscription.get("keywords") or [])],
+                )
+                for subscription in subscriptions
+            }
             processed: list[dict[str, Any]] = []
             skipped: list[dict[str, Any]] = []
             for doc_id, doc in (documents or {}).items():
@@ -251,7 +337,19 @@ class PaperLibraryService:
                 if previous and int(previous.get("version_rank") or 0) >= version_rank:
                     skipped.append({"doc_id": str(doc_id), "paper_id": paper_id, "reason": "already_processed"})
                     continue
+                # 同一文件改名重传、或元数据解析出入导致 work_id 漂移时，内容哈希
+                # 仍然相同。不同版本是不同文件，哈希天然不同，不会被这条误杀。
+                known_work_for_hash = str(seen_hashes.get(source_hash) or "") if source_hash else ""
+                if known_work_for_hash and known_work_for_hash != work_id:
+                    skipped.append({
+                        "doc_id": str(doc_id),
+                        "paper_id": paper_id,
+                        "reason": "duplicate_source_hash",
+                    })
+                    continue
                 novelty = "new_version" if previous else "new_work"
+                if source_hash:
+                    seen_hashes[source_hash] = work_id
                 seen[work_id] = {
                     "paper_id": paper_id,
                     "doc_id": str(doc_id),
@@ -262,7 +360,11 @@ class PaperLibraryService:
                 }
                 matches = []
                 for subscription in subscriptions:
-                    relevance_score, matched_keywords = self._relevance(subscription, metadata)
+                    relevance_score, matched_keywords, feedback_informed = self._relevance(
+                        subscription,
+                        metadata,
+                        weights_by_subscription.get(str(subscription.get("subscription_id") or "")),
+                    )
                     if relevance_score <= 0:
                         continue
                     item = {
@@ -282,6 +384,9 @@ class PaperLibraryService:
                         "discovery_provider": _clean(metadata.get("discovery_provider"), 80),
                         "relevance_score": relevance_score,
                         "matched_keywords": matched_keywords,
+                        # 让界面能说明这条分数是否已被历史反馈调整过，避免用户
+                        # 觉得反馈石沉大海。
+                        "feedback_informed": feedback_informed,
                         "novelty": novelty,
                         "created_at": _now(),
                     }

@@ -5,16 +5,28 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from services.block_index_service import ensure_block_index
+from services.block_index_service import ensure_block_index, load_block_index
 from services.ai_cache_state import load_ai_cache_generation
 from services.document_parse_state import is_parse_prepared, read_parse_manifest
+from services.delta_brief_service import build_delta_brief
+from services.reference_extraction_service import (
+    REFERENCE_EXTRACTION_VERSION,
+    extract_references,
+    recommend_by_coupling,
+    references_to_bibtex,
+)
 from services.reading_outline_service import (
     get_or_create_reading_outline,
+    load_reading_outline,
     save_reading_outline,
 )
 
 
 router = APIRouter()
+
+# 对照组上限：对比是逐点做的，成本随对照篇数线性增长，且超过三篇后简报本身
+# 就不再适合阅读。宁可让用户显式挑选，也不默认拉全库。
+MAX_DELTA_BRIEF_BASELINES = 3
 
 
 def _require_document_parse_ready(doc_id: str, doc: dict) -> dict:
@@ -32,6 +44,19 @@ def _require_document_parse_ready(doc_id: str, doc: dict) -> dict:
     else:
         detail = "当前文档解析尚未完成，请稍后重试"
     raise HTTPException(status_code=409, detail=detail)
+
+
+class DeltaBriefRequest(BaseModel):
+    doc_id: str
+    baseline_doc_ids: list[str] = []
+
+
+class ReferenceCouplingRequest(BaseModel):
+    doc_id: str
+    # 候选范围留空表示与库内全部已解析文档比对。
+    candidate_doc_ids: list[str] = []
+    limit: int = 10
+    min_shared: int = 2
 
 
 class SummaryRequest(BaseModel):
@@ -257,4 +282,167 @@ async def generate_summary(request: SummaryRequest):
         "source_hash": parse_identity["document_source_hash"],
         "document_source_hash": parse_identity["document_source_hash"],
         "block_source_hash": outline.get("source_hash") or "",
+    }
+
+
+def _outline_title(doc_id: str, doc: Any, outline: dict[str, Any]) -> str:
+    title = str((outline or {}).get("title") or "").strip()
+    if title:
+        return title
+    if isinstance(doc, dict):
+        metadata = doc.get("paper_metadata") if isinstance(doc.get("paper_metadata"), dict) else {}
+        return str(metadata.get("title") or doc.get("filename") or doc_id).strip() or doc_id
+    return doc_id
+
+
+@router.post("/delta-brief")
+async def generate_delta_brief(request: DeltaBriefRequest):
+    """相对若干对照论文，给出这篇论文的真实增量。
+
+    只读已有的阅读大纲，不触发解析、不调用模型、不联网：拿不到大纲的文档
+    直接报告为不可比较，而不是临时生成一份质量未知的替代品。
+    """
+    store = getattr(router, "documents_store", None)
+    if not isinstance(store, dict):
+        raise HTTPException(status_code=500, detail="文档存储未初始化")
+    if request.doc_id not in store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    data_dir = _summary_data_dir()
+    primary_outline = load_reading_outline(data_dir, request.doc_id)
+    if not isinstance(primary_outline, dict):
+        raise HTTPException(
+            status_code=409,
+            detail="当前文档还没有可用的阅读总结，请先生成总结再做增量对比",
+        )
+
+    baselines: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for baseline_id in request.baseline_doc_ids[:MAX_DELTA_BRIEF_BASELINES]:
+        baseline_id = str(baseline_id or "").strip()
+        if not baseline_id or baseline_id == request.doc_id:
+            continue
+        if baseline_id not in store:
+            skipped.append({"doc_id": baseline_id, "reason": "document_not_found"})
+            continue
+        outline = load_reading_outline(data_dir, baseline_id)
+        if not isinstance(outline, dict):
+            # 对照论文没有大纲就跳过并说明，不静默降级成"没有增量"。
+            skipped.append({"doc_id": baseline_id, "reason": "reading_outline_missing"})
+            continue
+        baselines.append({
+            "doc_id": baseline_id,
+            "title": _outline_title(baseline_id, store.get(baseline_id), outline),
+            "outline": outline,
+        })
+
+    brief = build_delta_brief(
+        {
+            "doc_id": request.doc_id,
+            "title": _outline_title(request.doc_id, store.get(request.doc_id), primary_outline),
+            "outline": primary_outline,
+        },
+        baselines,
+    )
+    brief["skipped_baselines"] = skipped
+    brief["timestamp"] = datetime.now().isoformat()
+    return brief
+
+
+def _document_references(doc_id: str, doc: Any) -> list:
+    """取一篇文档的参考文献，拿不到块索引就返回空。
+
+    只读已发布的块索引缓存，不走 ensure_block_index：推荐是附加能力，遍历
+    整库时不应该顺带触发一轮重建。
+    """
+    if not isinstance(doc, dict):
+        return []
+    try:
+        block_index = load_block_index(_summary_data_dir(), doc_id)
+    except Exception:
+        return []
+    blocks = (block_index or {}).get("blocks") if isinstance(block_index, dict) else None
+    if not isinstance(blocks, list):
+        return []
+    return extract_references(blocks)
+
+
+@router.post("/reference-coupling")
+async def recommend_reference_coupling(request: ReferenceCouplingRequest):
+    """按共享参考文献推荐库内相关论文。
+
+    完全本地：不联网、不调用模型。共享参考文献是作者自己给出的主题信号，比
+    摘要相似度更难被表述差异干扰，但只有 DOI/arXiv/长标题能作为可靠身份，
+    解析不出的条目会被丢弃而不是猜。
+    """
+    store = getattr(router, "documents_store", None)
+    if not isinstance(store, dict):
+        raise HTTPException(status_code=500, detail="文档存储未初始化")
+    if request.doc_id not in store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    target = _document_references(request.doc_id, store.get(request.doc_id))
+    if not target:
+        return {
+            "doc_id": request.doc_id,
+            "version": REFERENCE_EXTRACTION_VERSION,
+            "reference_count": 0,
+            "recommendations": [],
+            # 与"没有相关论文"区分开：这是取不到参考文献，不是比对后没结果。
+            "status": "no_references_extracted",
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    candidate_ids = [
+        str(doc_id) for doc_id in (request.candidate_doc_ids or store.keys())
+        if str(doc_id) != request.doc_id and str(doc_id) in store
+    ]
+    corpus = {}
+    for candidate_id in candidate_ids:
+        references = _document_references(candidate_id, store.get(candidate_id))
+        if references:
+            corpus[candidate_id] = references
+
+    ranked = recommend_by_coupling(
+        target,
+        corpus,
+        limit=max(1, min(50, int(request.limit or 10))),
+        min_shared=max(1, int(request.min_shared or 2)),
+    )
+    for row in ranked:
+        candidate = store.get(row["doc_id"])
+        row["title"] = _outline_title(row["doc_id"], candidate, {})
+
+    return {
+        "doc_id": request.doc_id,
+        "version": REFERENCE_EXTRACTION_VERSION,
+        "reference_count": len(target),
+        "compared_document_count": len(corpus),
+        "recommendations": ranked,
+        "status": "completed",
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@router.post("/references/bibtex")
+async def export_references_bibtex(request: ReferenceCouplingRequest):
+    """导出这篇文档参考文献的 BibTeX。
+
+    只写解析出来的字段，不臆造作者或期刊——缺字段可以在文献管理器里补，
+    编造的字段会被当成真的。
+    """
+    store = getattr(router, "documents_store", None)
+    if not isinstance(store, dict):
+        raise HTTPException(status_code=500, detail="文档存储未初始化")
+    if request.doc_id not in store:
+        raise HTTPException(status_code=404, detail="文档未找到")
+
+    references = _document_references(request.doc_id, store.get(request.doc_id))
+    return {
+        "doc_id": request.doc_id,
+        "version": REFERENCE_EXTRACTION_VERSION,
+        "reference_count": len(references),
+        "bibtex": references_to_bibtex(references),
+        "references": [reference.to_dict() for reference in references],
+        "timestamp": datetime.now().isoformat(),
     }
