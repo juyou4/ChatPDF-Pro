@@ -170,7 +170,7 @@ describe('useMessageState streaming regressions', () => {
     expect(requestBody.embedding_api_key).toBe('embed-key-new');
   });
 
-  it('有检索进度但尚未返回 reasoning_content 时，思考框不应一直空白', async () => {
+  it('有检索进度但尚未返回 reasoning_content 时，应写入结构化时间线', async () => {
     const events = [
       `data: ${JSON.stringify({ type: 'retrieval_progress', phase: 'start', message: '正在检索文档...' })}\n\n`,
       `data: ${JSON.stringify({ type: 'retrieval_progress', phase: 'complete', message: '检索完成' })}\n\n`,
@@ -196,14 +196,17 @@ describe('useMessageState streaming regressions', () => {
     });
 
     const assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
-    expect(assistant.thinking).toContain('正在检索文档');
-    expect(assistant.thinking).toContain('检索完成');
+    // 检索进度不再混入 thinking 文本：ThinkingBlock 使用 retrievalProgress
+    // 单独渲染这条时间线，避免真实 reasoning_content 到达前后重复展示。
+    expect(assistant.retrievalProgress).toEqual([
+      expect.objectContaining({ phase: 'start', text: '正在检索文档...' }),
+      expect.objectContaining({ phase: 'complete', text: '检索完成，正在整理上下文...' }),
+    ]);
     expect(assistant.thinking).toContain('等待模型输出思考内容');
 
     const thinkingStream = hoisted.useSmoothStreamMock.mock.results[1]?.value;
-    expect(thinkingStream.replace).toHaveBeenCalledWith('正在检索文档...');
-    expect(thinkingStream.replace).toHaveBeenCalledWith('正在检索文档...\n检索完成');
-    expect(thinkingStream.replace).toHaveBeenCalledWith('正在检索文档...\n检索完成\n正在等待模型输出思考内容...');
+    expect(thinkingStream.replace).toHaveBeenCalledWith('正在等待模型输出思考内容...');
+    expect(thinkingStream.replace).not.toHaveBeenCalledWith('正在检索文档...');
   });
 
   it('真实 reasoning_content 到达后，应替换掉前置阶段提示而不是混入最终思考', async () => {
