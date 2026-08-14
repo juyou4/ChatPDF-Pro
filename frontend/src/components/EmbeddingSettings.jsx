@@ -44,22 +44,31 @@ const GlassInput = ({ icon: Icon, placeholder, value, onChange, type = "text", d
   </div>
 );
 
-const GlassSelect = ({ value, onChange, children, disabled = false, ...props }) => (
-  <select
-    value={value}
-    onChange={onChange}
-    disabled={disabled}
-    className={`w-full rounded-[14px] border border-gray-200 bg-white px-3.5 py-3 text-[13px] font-medium text-gray-700 outline-none transition-colors focus:border-[#FFA07A]/50 focus:ring-2 focus:ring-[#FFA07A]/25 ${disabled ? 'cursor-not-allowed bg-gray-100 opacity-60' : ''}`}
-    {...props}
-  >
-    {children}
-  </select>
-)
+/**
+ * 保留 <option> 子元素的写法，内部转成 SoftSelect 的 options 数组，
+ * 这样 7 个调用点不必逐个改造结构。
+ */
+const GlassSelect = ({ value, onChange, children, disabled = false, 'aria-label': ariaLabel }) => {
+  const options = React.Children.toArray(children)
+    .filter(child => React.isValidElement(child))
+    .map(child => ({ value: child.props.value, label: child.props.children }))
+
+  return (
+    <SoftSelect
+      size="sm"
+      value={value}
+      options={options}
+      disabled={disabled}
+      ariaLabel={ariaLabel}
+      onChange={next => onChange?.({ target: { value: next } })}
+    />
+  )
+}
 
 const Tag = ({ text, active, onClick }) => (
   <span 
     onClick={onClick}
-    className={`${active ? 'bg-[#FFF4EF] text-[#B85F47] border-[#FFDCCF]' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300 hover:bg-gray-50'} border text-[12px] font-semibold px-3.5 py-1.5 rounded-[10px] cursor-pointer transition-colors`}
+    className={`${active ? 'bg-[#FFF4EF] text-[#B85F47] border-[#FFDCCF]' : 'bg-gray-50 text-gray-500 border-transparent hover:bg-gray-100 hover:text-gray-700'} border text-[12px] font-semibold px-3.5 py-1.5 rounded-[10px] cursor-pointer transition-colors`}
   >
     {text}
   </span>
@@ -162,7 +171,7 @@ const ProviderItem = ({ provider, isActive, onClick, onDelete, isDeleting = fals
         </p>
       </div>
       <span
-        className={`relative z-10 ml-2 h-2 w-2 shrink-0 rounded-full ${provider.enabled ? 'bg-green-400' : 'bg-gray-300'}`}
+        className={`relative z-10 ml-2 h-2 w-2 shrink-0 rounded-full ${provider.enabled ? 'bg-[#3FBE7C] ring-2 ring-[#3FBE7C]/20' : 'bg-gray-300'}`}
         title={provider.enabled ? '已启用' : '未启用'}
         aria-label={provider.enabled ? '已启用' : '未启用'}
       />
@@ -189,6 +198,7 @@ import { useProvider } from '../contexts/ProviderContext'
 import { useModel } from '../contexts/ModelContext'
 import { useDefaults } from '../contexts/DefaultsContext'
 import ProviderAvatar from './ProviderAvatar'
+import SoftSelect from './SoftSelect'
 import { fetchModelsFromProvider } from '../services/modelService'
 
 /**
@@ -364,6 +374,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
     providers[0]?.id || null
   )
   const [providerSearch, setProviderSearch] = useState('')
+  const [providerApiKeyVisible, setProviderApiKeyVisible] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState(null)
   const [collapsedTypes, setCollapsedTypes] = useState({ chat: true, embedding: true, rerank: true, image: true })
@@ -422,6 +433,11 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
       setActiveProviderId(providers[0].id)
     }
   }, [providers, activeProvider])
+
+  // 切换服务时收起密钥明文，避免上一个服务的 Key 继续暴露。
+  useEffect(() => {
+    setProviderApiKeyVisible(false)
+  }, [activeProviderId])
 
   const filteredProviders = useMemo(() => {
     const normalizedSearch = providerSearch.trim().toLowerCase()
@@ -1029,7 +1045,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                 </span>
               )}
             </div>
-            <p className="mt-1 text-[11px] text-gray-500 font-mono break-all line-clamp-2" title={model.id}>
+            <p className="mt-1 truncate text-[11px] text-gray-500 font-mono" title={model.id}>
               {model.id}
             </p>
             <div className="mt-2 flex items-center gap-1.5 flex-wrap">
@@ -1420,22 +1436,19 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                           </div>
                           <div className="grid grid-cols-1 gap-3 sm:grid-cols-[150px_minmax(0,1fr)]">
                             <LabeledField label="模型类型">
-                              <div className="relative">
-                                <select
-                                  aria-label="自定义模型类型"
-                                  value={customProviderForm.modelType}
-                                  onChange={e => handleCustomModelTypeChange(e.target.value)}
-                                  disabled={customProviderForm.protocol === 'anthropic'}
-                                  className="w-full appearance-none rounded-[14px] border border-gray-200 bg-white px-4 py-3 pr-10 text-[14px] font-semibold text-gray-700 outline-none transition-colors focus:border-[#FFA07A]/50 focus:ring-2 focus:ring-[#FFA07A]/25"
-                                >
-                                  <option value="chat">Chat</option>
-                                  {customProviderForm.protocol !== 'anthropic' && <>
-                                    <option value="embedding">Embedding</option>
-                                    <option value="rerank">Rerank</option>
-                                  </>}
-                                </select>
-                                <ChevronDown size={15} className="pointer-events-none absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
-                              </div>
+                              <SoftSelect
+                                ariaLabel="自定义模型类型"
+                                value={customProviderForm.modelType}
+                                onChange={handleCustomModelTypeChange}
+                                disabled={customProviderForm.protocol === 'anthropic'}
+                                options={customProviderForm.protocol === 'anthropic'
+                                  ? [{ value: 'chat', label: 'Chat' }]
+                                  : [
+                                    { value: 'chat', label: 'Chat' },
+                                    { value: 'embedding', label: 'Embedding' },
+                                    { value: 'rerank', label: 'Rerank' },
+                                  ]}
+                              />
                             </LabeledField>
                             <LabeledField label="模型 ID">
                               <div className="flex min-w-0 gap-2">
@@ -1778,17 +1791,27 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                   {/* API Settings Card */}
                   <div className="settings-card bg-white p-6 border border-gray-200/90 space-y-4 shrink-0">
                     <div className="space-y-1.5">
-                      <label className="text-[13px] font-bold text-gray-700 ml-1">API Key</label>
+                      <label className="text-[12px] font-semibold text-gray-600 ml-1">API Key</label>
                       <GlassInput 
                         icon={Key} 
-                        type="password"
+                        type={providerApiKeyVisible ? 'text' : 'password'}
                         placeholder="sk-... (多个 Key 用逗号分隔)" 
                         value={activeProvider?.apiKey || ''}
                         onChange={e => handleProviderUpdate('apiKey', e.target.value)}
+                        trailing={(
+                          <button
+                            type="button"
+                            onClick={() => setProviderApiKeyVisible(value => !value)}
+                            aria-label={providerApiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
+                            className="flex h-8 w-8 items-center justify-center rounded-[9px] text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700"
+                          >
+                            {providerApiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                          </button>
+                        )}
                       />
                     </div>
                     <div className="space-y-1.5 mt-2">
-                      <label className="text-[13px] font-bold text-gray-700 ml-1">API 地址</label>
+                      <label className="text-[12px] font-semibold text-gray-600 ml-1">API 地址</label>
                       <GlassInput 
                         icon={Link2} 
                         placeholder="https://api.openai.com/v1" 
@@ -1798,7 +1821,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                     </div>
                     <div className="grid grid-cols-1 gap-3 pt-1 md:grid-cols-2">
                       <div className="space-y-1.5">
-                        <label className="text-[13px] font-bold text-gray-700 ml-1">API Key 请求头</label>
+                        <label className="text-[12px] font-semibold text-gray-600 ml-1">API Key 请求头</label>
                         <GlassInput
                           placeholder="Authorization"
                           value={activeProvider?.apiConfig?.apiKeyHeader || ''}
@@ -1806,7 +1829,10 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                         />
                       </div>
                       <div className="space-y-1.5">
-                        <label className="text-[13px] font-bold text-gray-700 ml-1">API Key 前缀</label>
+                        <span className="flex items-baseline justify-between gap-2 ml-1">
+                          <label className="text-[12px] font-semibold text-gray-600">API Key 前缀</label>
+                          <span className="text-[10px] font-medium text-gray-400">末尾需留空格</span>
+                        </span>
                         <GlassInput
                           placeholder="Bearer "
                           value={activeProvider?.apiConfig?.apiKeyPrefix ?? ''}
@@ -1818,7 +1844,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                       <button
                         onClick={handleTest}
                         disabled={!activeProvider || testing}
-                        className="accent-cta flex-1 disabled:opacity-60 disabled:cursor-not-allowed text-[14px] font-bold py-3 rounded-full flex items-center justify-center gap-2"
+                        className="accent-cta flex-1 disabled:opacity-60 disabled:cursor-not-allowed text-[14px] font-bold py-3 rounded-[14px] flex items-center justify-center gap-2"
                       >
                         {testing ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} className="fill-current" />}
                         <span>测试连接</span>
@@ -1826,7 +1852,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                       <button 
                         onClick={handleSyncModels}
                         disabled={!activeProvider || isFetching}
-                        className="flex-1 bg-white hover:bg-gray-50 disabled:opacity-70 transition-colors text-gray-700 text-[14px] font-bold py-3 rounded-[14px] border border-gray-200 flex items-center justify-center gap-2"
+                        className="flex-1 bg-white hover:bg-gray-50 active:bg-gray-100 disabled:opacity-60 disabled:cursor-not-allowed transition-colors text-gray-700 text-[14px] font-bold py-3 rounded-[14px] border border-gray-200 flex items-center justify-center gap-2"
                       >
                         <RefreshCw size={16} className={isFetching ? "animate-spin" : ""} />
                         {isFetching ? '同步中...' : '同步模型'}
@@ -1853,30 +1879,41 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                     <h3 className="text-[15px] font-bold text-gray-900 mb-4 shrink-0">手动新增模型</h3>
                     <div className="space-y-4 pr-2">
                       <div className="flex gap-4 shrink-0">
-                        <div className="flex-[2]">
+                        <div className="flex-[2] space-y-1.5">
+                          {/* 「必填」跟在标签后面而不是靠 justify-between 推到列尾：
+                              推到列尾会紧贴右侧「类型」的标签，看起来像在修饰「类型」。 */}
+                          <label className="ml-1 block text-[12px] font-semibold text-gray-600">
+                            模型 ID
+                            <span className="ml-1.5 text-[10px] font-medium text-[#C2705A]">必填</span>
+                          </label>
                           <GlassInput 
                             placeholder="模型 ID (如 gpt-4)" 
                             value={addModelForm.id}
                             onChange={e => setAddModelForm({ ...addModelForm, id: e.target.value })}
                           />
                         </div>
-                        <div className="flex-1 relative">
-                          <select 
-                            className="w-full bg-white border border-gray-200 rounded-[14px] px-4 py-3 text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#FFA07A]/25 appearance-none cursor-pointer"
+                        <div className="flex-1 space-y-1.5">
+                          <label className="block text-[12px] font-semibold text-gray-600 ml-1">类型</label>
+                          <SoftSelect
+                            ariaLabel="新增模型类型"
                             value={addModelForm.type}
-                            onChange={e => setAddModelForm({ ...addModelForm, type: e.target.value })}
-                          >
-                            <option value="chat">Chat</option>
-                            <option value="embedding">Embedding</option>
-                            <option value="rerank">Rerank</option>
-                            <option value="image">Image</option>
-                          </select>
-                          <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none rotate-90" />
+                            onChange={next => setAddModelForm({ ...addModelForm, type: next })}
+                            options={[
+                              { value: 'chat', label: 'Chat' },
+                              { value: 'embedding', label: 'Embedding' },
+                              { value: 'rerank', label: 'Rerank' },
+                              { value: 'image', label: 'Image' },
+                            ]}
+                          />
                         </div>
                       </div>
-                      <div className="shrink-0">
-                        <GlassInput 
-                          placeholder="显示名称 (可选)" 
+                      <div className="shrink-0 space-y-1.5">
+                        <label className="ml-1 block text-[12px] font-semibold text-gray-600">
+                          显示名称
+                          <span className="ml-1.5 text-[10px] font-medium text-gray-400">可选，留空则用模型 ID</span>
+                        </label>
+                        <GlassInput
+                          placeholder="例如 GPT-4 Turbo"
                           value={addModelForm.name}
                           onChange={e => setAddModelForm({ ...addModelForm, name: e.target.value })}
                         />
@@ -1894,7 +1931,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                       )}
                       
                       <div className="space-y-2 pt-1 shrink-0 pb-2">
-                        <label className="text-[13px] font-bold text-gray-700 ml-1">标签 (可选)</label>
+                        <label className="text-[12px] font-semibold text-gray-600 ml-1">标签 (可选)</label>
                         <div className="flex flex-wrap gap-2.5">
                           {TAG_OPTIONS.map(tag => (
                             <Tag 
@@ -1917,13 +1954,13 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                     <div className="pt-4 shrink-0">
                       <button
                         onClick={handleAddModel}
-                        className="accent-cta w-full text-[14px] font-bold py-3 rounded-full flex items-center justify-center gap-2"
+                        className="w-full flex items-center justify-center gap-2 rounded-[14px] border border-[#F3B39D] bg-[#FFF4EF] py-3 text-[14px] font-bold text-[#A8533D] transition-colors hover:border-[#EC9A7F] hover:bg-[#FFEDE4] active:bg-[#FCE1D4]"
                       >
                         <Plus size={18} />
                         <span>保存模型</span>
                       </button>
                       {addSuccess && (
-                        <div className="mt-2 text-center text-[12px] text-green-600 font-medium animate-pulse">
+                        <div className="mt-2 text-center text-[12px] font-medium text-[#4F7F63]">
                           {addSuccess}
                         </div>
                       )}
@@ -2000,9 +2037,8 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                               <span className="text-[14px] font-bold text-gray-800 whitespace-nowrap">{meta.label}</span>
                               <span className="text-[11px] font-medium text-[#B85F47] bg-[#FFA07A]/10 px-1.5 py-0.5 rounded-full">{list.length}</span>
                             </div>
-                            <div className="flex items-center gap-2 min-w-0 ml-2">
-                              <CheckCircle2 size={12} className="text-gray-400 shrink-0" />
-                              <span className="text-[11px] text-gray-500 font-medium truncate max-w-[160px]" title={defaultLabel}>默认: {defaultLabel}</span>
+                            {/* 默认模型已由下方模型行的「默认」徽章标示，组头再放一次会被挤成「默认 ...」。 */}
+                            <div className="flex items-center gap-2 shrink-0 ml-2" title={`默认: ${defaultLabel}`}>
                               <ChevronDown size={14} className={`text-gray-400 shrink-0 transition-transform ${isCollapsed ? '-rotate-90' : ''}`} />
                             </div>
                           </button>
@@ -2025,9 +2061,10 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                                           </div>
                                           <div className="flex flex-col flex-1 min-w-0 py-0.5">
                                             <div className="flex flex-wrap items-center gap-1.5 mb-1">
-                                              <h4 className="text-[13px] font-bold text-gray-800 break-words line-clamp-2 leading-snug" title={model.name || model.id}>{model.name || model.id}</h4>
+                                              {/* 不用 break-words：长模型名会在词内断开，把 "v2" 这类尾巴孤立到下一行。 */}
+                                              <h4 className="text-[13px] font-bold text-gray-800 text-pretty line-clamp-2 leading-snug" title={model.name || model.id}>{model.name || model.id}</h4>
                                               {model.tags?.map(tag => (
-                                                <span key={tag} className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-blue-50 text-blue-600 border border-blue-100">
+                                                <span key={tag} className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-gray-100 text-gray-500 border border-gray-200/70">
                                                   {TAG_LABELS[tag] || tag}
                                                 </span>
                                               ))}
@@ -2039,7 +2076,8 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                                             </div>
                                             <div className="flex items-start gap-1.5 mt-0.5">
                                                {isDefaultModel(model.type, model.id) && <span className="text-[10px] bg-[#FFA07A]/10 text-[#B85F47] px-1.5 py-0.5 rounded-sm font-bold shrink-0 mt-px">默认</span>}
-                                               <p className="text-[11px] text-gray-400 font-medium break-all line-clamp-2 leading-snug" title={model.id}>{model.id}</p>
+                                               {/* ID 是次要信息：单行省略号比 break-all 的逐字符断行可读得多，完整值在 title 里。 */}
+                                               <p className="min-w-0 flex-1 truncate text-[11px] font-medium text-gray-400" title={model.id}>{model.id}</p>
                                             </div>
                                           </div>
                                         </div>

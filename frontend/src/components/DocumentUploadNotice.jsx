@@ -1,6 +1,10 @@
 import React from 'react';
-import { Check, Loader2, ScanText, TriangleAlert } from 'lucide-react';
+import { Check, Loader2, TriangleAlert } from 'lucide-react';
 import MinerUScanLoader from './MinerUScanLoader';
+
+// 卡片整体是暖色（边框 #E7E1D9、文字 #625D56、进度条 #D97A5D），
+// 成功态沿用项目既有的 #538F6C 而不是 Tailwind 的 emerald：后者偏冷，贴在奶油底上会发灰。
+const SUCCESS_TILE = 'bg-[#538F6C]/10 text-[#4B8262] dark:bg-[#538F6C]/20 dark:text-[#9DC8AF]';
 
 const STATUS_PRESENTATION = {
   processing: {
@@ -9,8 +13,9 @@ const STATUS_PRESENTATION = {
     animate: false,
   },
   complete: {
-    Icon: ScanText,
-    iconClass: 'text-emerald-600 dark:text-emerald-400',
+    // 用 Check 而不是 ScanText：后者是"正在扫描"的意象，配「解析完成」的标题自相矛盾。
+    Icon: Check,
+    iconClass: 'text-[#4B8262] dark:text-[#9DC8AF]',
     animate: false,
   },
   warning: {
@@ -105,44 +110,91 @@ export default function DocumentUploadNotice({ notice, liveParseStatus = null })
   const pageCount = Number(notice?.pageCount || 0);
   const items = Array.isArray(notice?.items) ? notice.items : [];
 
+  const effectiveItems = items.map((item) => {
+    const isMinerUItem = isMinerUStatusItem(item);
+    const merged = isMinerUItem && liveParseStatus ? { ...item, ...liveParseStatus } : item;
+    return { item, merged, isMinerUItem };
+  });
+
+  // 全部成功后这张卡会永久留在聊天记录里，展开形态等于反复说一遍"成功了"。
+  // 终态收成一行，进行中、警告和失败仍保持完整形态。
+  const allComplete = effectiveItems.length > 0
+    && effectiveItems.every(({ merged }) => merged?.status === 'complete');
+  const summary = allComplete
+    ? (effectiveItems.find(({ isMinerUItem }) => isMinerUItem) || effectiveItems[effectiveItems.length - 1]).merged
+    : null;
+
   return (
     <section
       aria-label="文档上传状态"
-      aria-live="polite"
       className="w-full max-w-[760px] overflow-hidden rounded-[18px] border border-[#E7E1D9] bg-white/95 shadow-[0_10px_28px_rgba(76,60,43,0.07)] dark:border-white/10 dark:bg-[#20201F] dark:shadow-none"
     >
-      <header className="flex items-start gap-3 px-[18px] py-4">
-        <span className="mt-0.5 flex h-8 w-8 flex-none items-center justify-center rounded-[10px] bg-emerald-50 text-emerald-600 dark:bg-emerald-400/10 dark:text-emerald-300">
-          <Check className="h-4 w-4" strokeWidth={2.2} aria-hidden="true" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-baseline gap-2.5">
-            <h2 className="flex-none text-[14px] font-semibold text-[#262421] dark:text-gray-100">
+      {allComplete ? (
+        <header className="flex items-center gap-3 px-[18px] py-3">
+          <span className={`flex h-8 w-8 flex-none items-center justify-center rounded-[10px] ${SUCCESS_TILE}`}>
+            <Check className="h-4 w-4" strokeWidth={2.2} aria-hidden="true" />
+          </span>
+          <div className="flex min-w-0 flex-1 items-baseline gap-2">
+            <h2 className="flex-none text-[13.5px] font-semibold text-[#262421] dark:text-gray-100">
               文档已上传
             </h2>
             {pageCount > 0 && (
-              <span className="text-[12px] tabular-nums text-[#8A8279] dark:text-gray-400">
+              <span className="flex-none text-[12px] tabular-nums text-[#8A8279] dark:text-gray-400">
                 {pageCount} 页
               </span>
             )}
+            <span aria-hidden="true" className="flex-none text-[#CFC7BD] dark:text-gray-600">·</span>
+            <p className="truncate text-[12.5px] text-[#625D56] dark:text-gray-300" title={filename}>
+              {filename}
+            </p>
           </div>
-          <p
-            className="mt-0.5 truncate text-[12.5px] leading-5 text-[#625D56] dark:text-gray-300"
-            title={filename}
-          >
-            {filename}
-          </p>
-        </div>
-      </header>
+          {summary?.title && (
+            <span
+              className={`flex-none rounded-full px-2.5 py-1 text-[11px] font-semibold ${SUCCESS_TILE}`}
+              // 收起后只显示一个概要标记，完整清单留在 title 里，避免隐瞒其他已完成项。
+              title={effectiveItems.map(({ merged }) => merged?.title).filter(Boolean).join(' · ')}
+            >
+              {summary.title}
+            </span>
+          )}
+        </header>
+      ) : (
+        <header className="flex items-start gap-3 px-[18px] py-4">
+          <span className={`mt-0.5 flex h-8 w-8 flex-none items-center justify-center rounded-[10px] ${SUCCESS_TILE}`}>
+            <Check className="h-4 w-4" strokeWidth={2.2} aria-hidden="true" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-baseline gap-2.5">
+              <h2 className="flex-none text-[14px] font-semibold text-[#262421] dark:text-gray-100">
+                文档已上传
+              </h2>
+              {pageCount > 0 && (
+                <span className="text-[12px] tabular-nums text-[#8A8279] dark:text-gray-400">
+                  {pageCount} 页
+                </span>
+              )}
+            </div>
+            <p
+              className="mt-0.5 truncate text-[12.5px] leading-5 text-[#625D56] dark:text-gray-300"
+              title={filename}
+            >
+              {filename}
+            </p>
+          </div>
+        </header>
+      )}
 
-      {items.length > 0 && (
-        <div className="border-t border-[#EEE9E3] bg-[#FCFBF9]/80 px-[18px] py-3.5 dark:border-white/10 dark:bg-white/[0.025]">
+      {!allComplete && items.length > 0 && (
+        // 分隔只留 border-t：原来的 bg-[#FCFBF9]/80 叠在 bg-white/95 上几乎不可见，
+        // 却和边框、外层卡片边框一起构成一条边界三层装置。
+        // aria-live 收窄到这里：挂在整个 section 上时，进度条每跳一个百分点
+        // 都会把文件名和页数一起重播一遍。
+        <div
+          aria-live="polite"
+          className="border-t border-[#EEE9E3] px-[18px] py-3.5 dark:border-white/10"
+        >
           <div className="space-y-3">
-            {items.map((item, index) => {
-              const isMinerUItem = isMinerUStatusItem(item);
-              const effectiveItem = isMinerUItem && liveParseStatus
-                ? { ...item, ...liveParseStatus }
-                : item;
+            {effectiveItems.map(({ item, merged: effectiveItem, isMinerUItem }, index) => {
               // 上传消息会被持久化，旧的 processing 只能当作历史快照。
               // 只有当前文档的实时状态明确仍在处理时才播放动画。
               const isLiveMinerUProcessing = Boolean(

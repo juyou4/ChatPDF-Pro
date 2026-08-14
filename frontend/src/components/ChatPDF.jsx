@@ -4945,7 +4945,7 @@ const ChatPDF = () => {
       return {
         status: 'complete',
         title: 'MinerU 解析完成',
-        description: '结构化结果已发布，阅读、速览、大纲、翻译和问答已切换到同一路线。',
+        description: '阅读、速览、大纲、翻译和问答已全部就绪。',
       };
     }
     if (resolvedDocumentParseState.state === 'awaiting_publish') {

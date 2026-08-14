@@ -2594,33 +2594,35 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                             ? `pdf-note-jump-highlight absolute pointer-events-none z-10 ${darkMode ? 'pdf-note-jump-highlight--dark' : ''}`
                                             : `absolute pointer-events-none z-10 ${
                                                 activeHighlightIsCitation
-                                                    ? 'rounded-[5px] border border-amber-500/70 bg-amber-300/[0.18]'
+                                                    ? ''
                                                     : 'rounded-md border border-purple-500/70 bg-purple-400/[0.16]'
                                             }`
                                         }
-                                        style={activeHighlightIsNote ? undefined : {
-                                            boxShadow: activeHighlightIsCitation
-                                                ? '0 1px 4px rgba(180, 83, 9, 0.12)'
-                                                : '0 1px 4px rgba(126, 34, 206, 0.12)',
-                                            ...(activeHighlightIsCitation && rect.connectsPrevious ? {
-                                                borderTopWidth: 0,
-                                                borderTopLeftRadius: 2,
-                                                borderTopRightRadius: 2,
-                                            } : {}),
-                                            ...(activeHighlightIsCitation && rect.connectsNext ? {
-                                                borderBottomWidth: 0,
-                                                borderBottomLeftRadius: 2,
-                                                borderBottomRightRadius: 2,
-                                            } : {}),
+                                        style={activeHighlightIsNote ? undefined : activeHighlightIsCitation ? {
+                                            // 逐行矩形的外投影会落到下一行顶部，多行引用因此出现横向接缝。
+                                            // 引用只用底色表意，收尾行画一条内嵌细线作落地边。
+                                            // 沿用品牌赭红：引用高亮 4 秒即消失，与聊天侧 [n] 角标同色才接得上动作。
+                                            background: 'rgba(226, 116, 82, 0.30)',
+                                            borderTopLeftRadius: rect.connectsPrevious ? 0 : 2,
+                                            borderTopRightRadius: rect.connectsPrevious ? 0 : 2,
+                                            borderBottomLeftRadius: rect.connectsNext ? 0 : 2,
+                                            borderBottomRightRadius: rect.connectsNext ? 0 : 2,
+                                            boxShadow: rect.connectsNext ? undefined : 'inset 0 -1px 0 rgba(154, 75, 54, 0.34)',
+                                        } : {
+                                            boxShadow: '0 1px 4px rgba(126, 34, 206, 0.12)',
                                         }}
                                     >
                                         {/* 只在第一个矩形上显示标签 */}
                                         {idx === 0 && !activeHighlightIsNote && (
-                                            <div className={`absolute -top-4 right-0 px-1.5 py-0.5 text-[10px] font-medium text-white rounded-md shadow-sm ${
-                                                activeHighlightIsCitation
-                                                    ? 'bg-amber-600/95'
-                                                    : 'bg-purple-500'
-                                            }`}>
+                                            <div
+                                                className={`absolute -top-4 right-0 px-1.5 py-0.5 text-[10px] font-medium rounded-md ${
+                                                    activeHighlightIsCitation ? '' : 'bg-purple-500 text-white shadow-sm'
+                                                }`}
+                                                style={activeHighlightIsCitation ? {
+                                                    background: 'rgba(247, 221, 211, 0.95)',
+                                                    color: '#7A3927',
+                                                } : undefined}
+                                            >
                                                 {activeHighlightIsCitation ? '引用' : '匹配'}
                                             </div>
                                         )}
