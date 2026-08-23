@@ -535,6 +535,15 @@ export const CHAT_MODELS: Model[] = [
         tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
+    {
+        id: 'deepseek-v4-flash-vision-exp',
+        name: 'DeepSeek V4 Flash Vision Exp',
+        providerId: 'deepseek',
+        type: 'chat',
+        metadata: { description: 'DeepSeek 实验性多模态视觉模型；纯文本能力与 V4 Flash 持平，支持图片描述、截图识字和图表分析' },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
     // ── Moonshot (Kimi) ──
     {
         id: 'kimi-k3',
@@ -915,6 +924,7 @@ const LATEST_SYSTEM_MODEL_IDS = new Set([
     'qwen3.7-flash',
     'deepseek-v4-flash',
     'deepseek-v4-pro',
+    'deepseek-v4-flash-vision-exp',
     'kimi-k3',
     'kimi-k2.7-code',
     'kimi-k2.6',

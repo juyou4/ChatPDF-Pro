@@ -64,6 +64,7 @@ from services.academic_answer_contract import (
     build_compact_academic_contract_prompt,
     build_critic_evidence_brief,
     derive_answer_certainty,
+    fill_supported_citation_markers,
     postprocess_critic_result,
 )
 from services.paper_metadata_service import (
@@ -133,7 +134,10 @@ from services.modal_asset_service import (
     looks_like_visual_query,
 )
 from services.modal_visual_evidence_service import analyze_modal_visual_evidence
-from services.chat_visual_attachment_service import build_chat_visual_attachments
+from services.chat_visual_attachment_service import (
+    build_chat_visual_attachments,
+    question_requests_visual_attachment,
+)
 from services.document_parse_state import (
     artifact_parse_identity,
     is_parse_prepared,
@@ -5403,7 +5407,9 @@ async def _build_answer_visual_attachments_for_response(
 ) -> list[dict]:
     """Materialize only trusted visual evidence used by the final answer."""
     citations = retrieval_meta.get("citations") if isinstance(retrieval_meta, dict) else None
-    if not isinstance(citations, list) or not any(
+    if not isinstance(citations, list):
+        citations = []
+    has_visual_citation = any(
         isinstance(citation, dict)
         and any(
             citation.get(key) not in (None, "", [], {})
@@ -5417,7 +5423,8 @@ async def _build_answer_visual_attachments_for_response(
             )
         )
         for citation in citations
-    ):
+    )
+    if not has_visual_citation and not question_requests_visual_attachment(request.question):
         return []
     try:
         visual_evidence = committed_visual_evidence_for_document(doc)
@@ -15414,6 +15421,29 @@ def _prepare_answer_and_citations_for_display(
         }
     else:
         claim_alignment = raw_claim_alignment
+        fill_result = fill_supported_citation_markers(
+            str(claim_alignment.get("answer") or rewritten_answer),
+            list(claim_alignment.get("citations") or projected),
+            min_score=alignment_min_score,
+        )
+        if int(fill_result.get("filled_count") or 0) > 0:
+            filled_refs = {
+                int(ref)
+                for item in (fill_result.get("fills") or [])
+                for ref in (item.get("refs") or [])
+            }
+            claim_alignment = {
+                **claim_alignment,
+                "answer": fill_result.get("answer") or claim_alignment.get("answer"),
+                "selected_refs": sorted(
+                    set(claim_alignment.get("selected_refs") or []) | filled_refs
+                ),
+            }
+            if answer_guard is not None:
+                answer_guard["citation_marker_fill"] = {
+                    "filled_count": fill_result.get("filled_count"),
+                    "fills": fill_result.get("fills") or [],
+                }
     selected_refs = set(claim_alignment.get("selected_refs") or [])
     aligned_projected = [
         citation
@@ -20444,6 +20474,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                 is_risky = bool(
                                     enriched.get("has_hallucination")
                                     or enriched.get("citation_risk")
+                                    or enriched.get("overreach_risk")
                                     or enriched.get("claim_verifier_fallback")
                                 )
                                 payload = {
@@ -20452,6 +20483,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                         "has_hallucination": False,
                                         "citation_risk": False,
                                         "citation_risk_level": "none",
+                                        "overreach_risk": False,
                                         "issues": [],
                                         "suggestion": "",
                                         "critic_source": enriched.get("critic_source"),
@@ -20502,6 +20534,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                             is_risky = bool(
                                 enriched.get("has_hallucination")
                                 or enriched.get("citation_risk")
+                                or enriched.get("overreach_risk")
                             )
                             payload = {
                                 "critic": enriched if is_risky else {
@@ -20509,6 +20542,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                     "has_hallucination": False,
                                     "citation_risk": False,
                                     "citation_risk_level": "none",
+                                    "overreach_risk": False,
                                     "issues": [],
                                     "suggestion": "",
                                     "critic_source": enriched.get("critic_source"),

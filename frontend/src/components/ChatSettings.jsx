@@ -75,7 +75,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
                             </div>
                             <div>
                                 <div className="text-[17px] font-bold text-gray-900 tracking-tight">对话设置</div>
-                                <div className="text-[12px] text-gray-500 font-medium">调整模型生成参数，优化对话体验</div>
+                                <div className="text-[12px] text-gray-500 font-medium">生成参数和对话显示</div>
                             </div>
                         </div>
                     </div>
@@ -85,7 +85,7 @@ const ChatSettings = ({ isOpen, onClose }) => {
                         <div className="settings-card bg-white p-5 border border-gray-200/90 space-y-6">
                             {/* 历史轮数 (无开关) */}
                             <SettingSliderWithInput
-                                label="历史轮数" tooltip="每次请求会附带的最近对话轮数。超过范围的历史不会直接发送；它不是模型总上下文窗口，也不是摘要压缩开关。"
+                                label="历史轮数" tooltip="每次请求带上最近几轮对话"
                                 value={contextCount} onChange={(v) => setContextCount(Math.round(v))}
                                 min={0} max={50} step={1} precision={0}
                             />

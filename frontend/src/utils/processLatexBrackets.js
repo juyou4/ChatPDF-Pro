@@ -25,6 +25,9 @@ const MATH_COMMAND_HINTS = new Set([
   'uparrow', 'downarrow', 'left', 'right'
 ]);
 
+// 单独一行、没有 $$ 包裹的目标函数（如 \min_{x} L = ...）
+const DISPLAY_LATEX_LINE_RE = /\\(?:min|max|sum|prod|int|lim|frac|mathbb|mathcal|begin)\{?/;
+
 const normalizeLatexEscapes = (expr) => {
   if (!expr) return expr;
   // 把过度转义的命令 \\times / \\frac 还原为 \times / \frac
@@ -77,9 +80,40 @@ const autoWrapStandaloneLatexFragments = (content) => {
       ) {
         return seg;
       }
-      return seg.replace(STANDALONE_LATEX_COMMAND_REGEX, (m) => maybeWrapLatexCommand(m));
+      return splitMathSegments(wrapDisplayLatexLines(seg))
+        .map((part) => {
+          if (!part) return part;
+          if (
+            (part.startsWith('$$') && part.endsWith('$$')) ||
+            (part.startsWith('$') && part.endsWith('$'))
+          ) {
+            return part;
+          }
+          return part.replace(STANDALONE_LATEX_COMMAND_REGEX, (m) => maybeWrapLatexCommand(m));
+        })
+        .join('');
     })
     .join('');
+};
+
+const wrapDisplayLatexLines = (content) => {
+  if (!content || !DISPLAY_LATEX_LINE_RE.test(content)) return content;
+  const lines = content.split('\n');
+  let inFence = false;
+  return lines.map((line) => {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      return line;
+    }
+    if (inFence) return line;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('$$') || trimmed.startsWith('$')) return line;
+    if (!DISPLAY_LATEX_LINE_RE.test(trimmed)) return line;
+    // 夹在中文叙述里的命令不要整行当成块级公式
+    if (/[\u4e00-\u9fff]/.test(trimmed)) return line;
+    const indent = line.match(/^\s*/)?.[0] || '';
+    return `${indent}$$${normalizeLatexEscapes(trimmed)}$$`;
+  }).join('\n');
 };
 
 /**

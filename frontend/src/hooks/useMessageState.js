@@ -1079,6 +1079,8 @@ export function useMessageState({
   numExpandContextChunk = 1,
   enableBlurReveal = false,
   blurIntensity = 'medium',
+  enableMathHydration = true,
+  enableSingleDollarMath = true,
   globalSettings = {},
 } = {}) {
   // ========== 消息核心状态 ==========
@@ -1194,6 +1196,9 @@ export function useMessageState({
     smoothFlush: true,
     sequencedReveal: enableBlurReveal,
     paragraphPauseMs: 180,
+    enableMathHydration,
+    enableSingleDollarMath,
+    enableMarkdownCommit: enableBlurReveal,
   });
 
   const thinkingStreamProfile = resolveThinkingStreamProfile();
@@ -1203,20 +1208,14 @@ export function useMessageState({
     frameChars: thinkingStreamProfile.frameChars,
     flushChars: thinkingStreamProfile.flushChars,
     smoothFlush: true,
+    enableMathHydration,
+    enableSingleDollarMath,
   });
 
   const interruptActiveRequest = useCallback(({ staleIdentity = false } = {}) => {
     const targetMessageId = activeStreamMsgIdRef.current || streamingMessageId;
-    const renderedContent = String(
-      contentStream.contentRef?.current?.textContent
-      || contentStream.getFinalText?.()
-      || ''
-    );
-    const renderedThinking = String(
-      thinkingStream.contentRef?.current?.textContent
-      || thinkingStream.getFinalText?.()
-      || ''
-    );
+    const renderedContent = String(contentStream.getFinalText?.() || '');
+    const renderedThinking = String(thinkingStream.getFinalText?.() || '');
 
     requestEpochRef.current += 1;
     streamingAbortRef.current.cancelled = true;
@@ -1636,6 +1635,8 @@ export function useMessageState({
       cheap_model_provider: cheapModelProvider ? cheapModelProvider : null,
       cheap_model_endpoint: cheapModelEndpoint ? cheapModelEndpoint : null,
     };
+
+    setScreenshots?.([]);
 
     streamCitationsRef.current = null;
     streamCitationBindingsRef.current = null;
@@ -2568,7 +2569,7 @@ export function useMessageState({
       if (isRequestCurrent()) setIsLoading(false);
     }
   }, [
-    docId, parseIdentityReady, screenshots, selectedText, messages, streamSpeed, enableVectorSearch,
+    docId, parseIdentityReady, screenshots, setScreenshots, selectedText, messages, streamSpeed, enableVectorSearch,
     enableGraphRAG, enableAgentRetrieval, forceAgentRetrieval,
     enableJiebaBM25, numExpandContextChunk,
     getChatCredentials, getVisualCredentials, getProviderById, contentStream, thinkingStream,
@@ -2674,6 +2675,8 @@ export function useMessageState({
     // ref 直写模式：暴露 contentRef 供组件直接挂载 DOM 元素
     streamingContentRef: contentStream.contentRef,
     streamingThinkingRef: thinkingStream.contentRef,
+    subscribeContentCommittedPrefix: contentStream.subscribeCommittedPrefix,
+    subscribeContentDisplayedText: contentStream.subscribeDisplayedText,
 
     // Refs
     abortControllerRef,

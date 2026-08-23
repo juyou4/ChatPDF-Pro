@@ -15,7 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { motion } from 'framer-motion';
-import { buildCriticDetailLines, getFullDocumentSummaryCoverage, hasCitationRisk, locateTextInElement } from '../utils/answerCriticUtils';
+import { buildCriticDetailLines, getFullDocumentSummaryCoverage, hasCitationRisk, hasOverreachRisk, locateTextInElement } from '../utils/answerCriticUtils';
 import { shouldStreamAssistantContent } from '../utils/messageRenderUtils';
 import AnswerCriticNotice from './AnswerCriticNotice';
 import AssistantModelIdentity from './AssistantModelIdentity';
@@ -355,6 +355,8 @@ function ChatMessageRowInner({
     confirmRegenerateMessage,
     streamingThinkingRef,
     streamingContentRef,
+    subscribeContentCommittedPrefix,
+    subscribeContentDisplayedText,
     handleCitationClick,
     handleDocumentAwareCitationClick,
     copyMessage,
@@ -403,6 +405,17 @@ function ChatMessageRowInner({
       || !msg.content.trim()
     )
   );
+  const showLowRelevanceNotice = msg.maxRelevanceScore !== null && msg.maxRelevanceScore !== undefined && msg.maxRelevanceScore >= 0 && msg.maxRelevanceScore < 0.3 && !msg.isStreaming;
+  const showCriticHallucination = Boolean(msg.answerCritic && !msg.isStreaming && msg.answerCritic.has_hallucination);
+  const showCriticCitation = Boolean(msg.answerCritic && !msg.isStreaming && !msg.answerCritic.has_hallucination && hasCitationRisk(msg.answerCritic));
+  const showCriticOverreach = Boolean(
+    msg.answerCritic
+    && !msg.isStreaming
+    && !msg.answerCritic.has_hallucination
+    && !hasCitationRisk(msg.answerCritic)
+    && hasOverreachRisk(msg.answerCritic),
+  );
+  const showProcessRail = shouldShowThinking || showLowRelevanceNotice || showCriticHallucination || showCriticCitation || showCriticOverreach;
   const shouldStreamContent = isStreamingCurrentMessage;
   const isEmbeddingIdentityConflict = msg.type === 'assistant' && msg.embeddingIdentityConflict === true;
   const selectedEmbeddingConfig = isEmbeddingIdentityConflict
@@ -445,28 +458,62 @@ function ChatMessageRowInner({
             darkMode={darkMode}
           />
         )}
-        {shouldShowThinking && (
-          <ThinkingBlock
-            content={msg.thinking}
-            isStreaming={isStreamingCurrentMessage}
-            answerStarted={Boolean(msg.answerStarted)}
-            answerGenerating={Boolean(msg.answerGenerating)}
-            darkMode={darkMode}
-            thinkingMs={msg.thinkingMs || 0}
-            streamingRef={isStreamingCurrentMessage ? streamingThinkingRef : undefined}
-            retrievalProgress={msg.retrievalProgress || []}
-            agentTrace={msg.agentTrace || null}
-            liveMessageId={isStreamingCurrentMessage ? msg.id : null}
-            reasoningResolution={msg.reasoningResolution || null}
-            thinkingLive={Boolean(msg.thinkingLive)}
-            webSearchActivity={hasWebSearchActivity ? {
-              sources: msg.webSearchSources || [],
-              reads: msg.webSearchReads || [],
-              status: msg.webSearchStatus || null,
-              audit: msg.webSearchAudit || null,
-              query: msg.webSearchQuery || '',
-            } : null}
-          />
+        {showProcessRail && (
+          <div className="assistant-process-rail">
+            {shouldShowThinking && (
+              <ThinkingBlock
+                content={msg.thinking}
+                isStreaming={isStreamingCurrentMessage}
+                answerStarted={Boolean(msg.answerStarted)}
+                answerGenerating={Boolean(msg.answerGenerating)}
+                darkMode={darkMode}
+                thinkingMs={msg.thinkingMs || 0}
+                streamingRef={isStreamingCurrentMessage ? streamingThinkingRef : undefined}
+                retrievalProgress={msg.retrievalProgress || []}
+                agentTrace={msg.agentTrace || null}
+                liveMessageId={isStreamingCurrentMessage ? msg.id : null}
+                reasoningResolution={msg.reasoningResolution || null}
+                thinkingLive={Boolean(msg.thinkingLive)}
+                webSearchActivity={hasWebSearchActivity ? {
+                  sources: msg.webSearchSources || [],
+                  reads: msg.webSearchReads || [],
+                  status: msg.webSearchStatus || null,
+                  audit: msg.webSearchAudit || null,
+                  query: msg.webSearchQuery || '',
+                } : null}
+              />
+            )}
+            {showLowRelevanceNotice && (
+              <div className="mb-1 px-2.5 py-2 rounded-[10px] bg-amber-50/90 border border-amber-200/80 text-amber-800 text-xs flex items-center gap-1.5 dark:bg-amber-300/[0.08] dark:border-amber-300/20 dark:text-amber-50">
+                <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" /></svg>
+                <span>检索到的内容与您的问题相关性较低，回答可能不够准确，请谨慎参考。</span>
+              </div>
+            )}
+            {showCriticHallucination && (
+              <AnswerCriticNotice
+                critic={msg.answerCritic}
+                variant="hallucination"
+                detailLines={criticDetailLines}
+                onLocateClaim={handleLocateClaim}
+              />
+            )}
+            {showCriticCitation && (
+              <AnswerCriticNotice
+                critic={msg.answerCritic}
+                variant="citation"
+                detailLines={criticDetailLines}
+                onLocateClaim={handleLocateClaim}
+              />
+            )}
+            {showCriticOverreach && (
+              <AnswerCriticNotice
+                critic={msg.answerCritic}
+                variant="overreach"
+                detailLines={criticDetailLines}
+                onLocateClaim={handleLocateClaim}
+              />
+            )}
+          </div>
         )}
         {msg.hasImage && (
           <div className="mb-2 rounded-lg overflow-hidden border border-white/20">
@@ -474,28 +521,6 @@ function ChatMessageRowInner({
               <ImageIcon className="w-3 h-3" /> Image attached
             </div>
           </div>
-        )}
-        {msg.maxRelevanceScore !== null && msg.maxRelevanceScore !== undefined && msg.maxRelevanceScore >= 0 && msg.maxRelevanceScore < 0.3 && !msg.isStreaming && (
-          <div className="mb-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-xs flex items-center gap-1.5">
-            <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" /></svg>
-            <span>检索到的内容与您的问题相关性较低，回答可能不够准确，请谨慎参考。</span>
-          </div>
-        )}
-        {msg.answerCritic && !msg.isStreaming && msg.answerCritic.has_hallucination && (
-          <AnswerCriticNotice
-            critic={msg.answerCritic}
-            variant="hallucination"
-            detailLines={criticDetailLines}
-            onLocateClaim={handleLocateClaim}
-          />
-        )}
-        {msg.answerCritic && !msg.isStreaming && !msg.answerCritic.has_hallucination && hasCitationRisk(msg.answerCritic) && (
-          <AnswerCriticNotice
-            critic={msg.answerCritic}
-            variant="citation"
-            detailLines={criticDetailLines}
-            onLocateClaim={handleLocateClaim}
-          />
         )}
         {msg.answerGenerating && isStreamingCurrentMessage && !(msg.content && String(msg.content).trim()) && (
           enableBlurReveal ? (
@@ -582,7 +607,9 @@ function ChatMessageRowInner({
               blurIntensity={blurIntensity}
               citations={msg.citations || null}
               onCitationClick={handleDocumentAwareCitationClick}
-              streamingRef={shouldStreamContent ? streamingContentRef : undefined}
+              streamingRef={shouldStreamContent && enableBlurReveal ? streamingContentRef : undefined}
+              subscribeCommittedPrefix={shouldStreamContent && enableBlurReveal ? subscribeContentCommittedPrefix : undefined}
+              subscribeDisplayedText={shouldStreamContent && !enableBlurReveal ? subscribeContentDisplayedText : undefined}
               webSearchSources={msg.webSearchSources || null}
               suppressInitialDots={
                 Boolean(msg.answerGenerating)

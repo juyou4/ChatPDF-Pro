@@ -1,38 +1,37 @@
 import React, { useId, useState } from 'react';
 import { ChevronDown, ChevronUp, LocateFixed, Quote, TriangleAlert } from 'lucide-react';
 import {
+  formatEvidenceRefs,
   getCriticConfidenceTier,
   getCriticIssueTypeMeta,
   sanitizeCriticText,
   shouldShowCriticConfidence,
 } from '../utils/answerCriticUtils';
 
+const NOTICE_TONE = {
+  title: 'text-[#3f3a35] dark:text-gray-100',
+  body: 'text-[#4a453f] dark:text-gray-300',
+  muted: 'text-[#8a827b] dark:text-gray-400',
+  rule: 'border-[#e6e1db] dark:border-white/10',
+  focus: 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#cfc6bd]/70 dark:focus-visible:ring-white/20',
+};
+
 const CRITIC_NOTICE_VARIANTS = {
   hallucination: {
     title: '答案需核对',
-    description: '自审发现部分内容可能超出当前证据，请谨慎参考。',
+    description: '部分内容可能超出当前证据，请谨慎参考。',
     icon: TriangleAlert,
-    container: 'border-[#eadbd4] bg-[#fffdfc] text-[#423d3a] dark:border-[#FFA07A]/18 dark:bg-white/[0.025] dark:text-gray-200',
-    summary: 'hover:bg-[#fff8f4] dark:hover:bg-[#FFA07A]/[0.045]',
-    iconBox: 'border-[#f0d2c3] bg-[#fff3ed] text-[#b85f47] dark:border-[#FFA07A]/20 dark:bg-[#FFA07A]/10 dark:text-[#ffc7b4]',
-    detail: 'text-[#655c57] dark:text-gray-300',
-    muted: 'text-[#8c6b5c] dark:text-[#e7aa93]',
-    dot: 'bg-[#cf8063]',
-    divider: 'border-[#f0e3dc] dark:border-white/10',
-    action: 'border-[#ead2c6] bg-[#fff8f4] text-[#a9533c] hover:border-[#dfbba9] hover:bg-[#fff0e8] dark:border-[#FFA07A]/20 dark:bg-[#FFA07A]/10 dark:text-[#ffc7b4] dark:hover:bg-[#FFA07A]/15',
   },
   citation: {
     title: '引用待补充',
-    description: '部分事实陈述缺少引用编号 [n]，请结合证据面板核对。',
+    description: '部分事实陈述还缺少引用编号。',
+    fullSummaryDescription: '有章节结论还没绑到阅读证据。',
     icon: Quote,
-    container: 'border-[#e8dfd2] bg-[#fffefb] text-[#403d38] dark:border-amber-300/15 dark:bg-white/[0.025] dark:text-gray-200',
-    summary: 'hover:bg-[#fffaf1] dark:hover:bg-amber-300/[0.045]',
-    iconBox: 'border-[#ecd9b9] bg-[#fff8e9] text-[#b97830] dark:border-amber-300/15 dark:bg-amber-300/10 dark:text-amber-200',
-    detail: 'text-[#625d55] dark:text-gray-300',
-    muted: 'text-[#8a735c] dark:text-amber-200/70',
-    dot: 'bg-[#d49a55]',
-    divider: 'border-[#eee5d9] dark:border-white/10',
-    action: 'border-[#e6d6bd] bg-[#fffaf1] text-[#9c652c] hover:border-[#dac09a] hover:bg-[#fff4df] dark:border-amber-300/15 dark:bg-amber-300/10 dark:text-amber-200 dark:hover:bg-amber-300/15',
+  },
+  overreach: {
+    title: '结论过强',
+    description: '部分表述超出当前证据支持范围。',
+    icon: TriangleAlert,
   },
 };
 
@@ -57,11 +56,14 @@ const AnswerCriticNotice = ({ critic, variant, detailLines, onLocateClaim }) => 
   const showSuggestion = Boolean(suggestion) && !lines.some((line) => line.text === suggestion);
   const showConfidence = shouldShowCriticConfidence(critic);
   const tier = showConfidence ? getCriticConfidenceTier(critic.confidence) : null;
-  const Icon = style.icon;
+  const NoticeIcon = typeof style.icon === 'function' ? style.icon : Quote;
   const visibleLines = showAllLines ? lines : lines.slice(0, CRITIC_VISIBLE_DETAIL_LINES);
   const collapsedCount = Math.max(0, lines.length - CRITIC_VISIBLE_DETAIL_LINES);
   const hasDetails = lines.length > 0 || showSuggestion;
   const issueCount = lines.length + (showSuggestion ? 1 : 0);
+  const headerDescription = variant === 'citation' && critic.answer_mode === 'full_document_summary'
+    ? (style.fullSummaryDescription || style.description)
+    : style.description;
 
   const toggleDetails = () => {
     if (!hasDetails) return;
@@ -73,7 +75,7 @@ const AnswerCriticNotice = ({ critic, variant, detailLines, onLocateClaim }) => 
     <aside
       aria-label={style.title}
       data-variant={variant}
-      className={`mb-2 overflow-hidden rounded-[10px] border text-xs ${style.container}`}
+      className="text-[12.5px]"
     >
       <button
         type="button"
@@ -81,32 +83,39 @@ const AnswerCriticNotice = ({ critic, variant, detailLines, onLocateClaim }) => 
         disabled={!hasDetails}
         aria-expanded={hasDetails ? detailsOpen : undefined}
         aria-controls={hasDetails ? detailsId : undefined}
-        className={`flex min-h-9 w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#FFA07A]/35 disabled:cursor-default ${style.summary}`}
+        className={`-ml-1 flex w-full items-start gap-2 rounded-[8px] px-1 py-1 text-left transition-colors duration-200 hover:bg-[#f6f3f1] disabled:cursor-default dark:hover:bg-white/[0.03] ${NOTICE_TONE.focus}`}
       >
-        <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-[6px] border ${style.iconBox}`}>
-          <Icon size={12} strokeWidth={2} aria-hidden="true" />
-        </span>
-        <h4 className="shrink-0 text-[12px] font-semibold leading-5 text-[#363330] dark:text-gray-100">
-          {style.title}
-        </h4>
-        <span className={`min-w-0 flex-1 truncate text-[11px] ${style.muted}`}>
-          {style.description}
-        </span>
-        {issueCount > 0 && (
-          <span className={`shrink-0 text-[10.5px] tabular-nums ${style.muted}`}>
-            {issueCount} 项
+        <NoticeIcon
+          size={14}
+          strokeWidth={1.8}
+          className={`mt-[3px] shrink-0 ${NOTICE_TONE.muted}`}
+          aria-hidden="true"
+        />
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <h4 className={`text-[13px] font-medium leading-5 ${NOTICE_TONE.title}`}>
+              {style.title}
+            </h4>
+            {issueCount > 0 && (
+              <span className={`text-[11px] tabular-nums ${NOTICE_TONE.muted}`}>
+                {issueCount} 项
+              </span>
+            )}
+            {showConfidence && (
+              <span className={`text-[11px] tabular-nums ${NOTICE_TONE.muted}`}>
+                核对 {(critic.confidence * 100).toFixed(0)}% · {tier.label}
+              </span>
+            )}
           </span>
-        )}
-        {showConfidence && (
-          <span className={`shrink-0 text-[10.5px] font-medium tabular-nums ${tier.className}`}>
-            核对 {(critic.confidence * 100).toFixed(0)}% · {tier.label}
+          <span className={`mt-0.5 block text-[12px] leading-5 ${NOTICE_TONE.muted}`}>
+            {headerDescription}
           </span>
-        )}
+        </span>
         {hasDetails && (
           <ChevronDown
-            size={13}
-            strokeWidth={2}
-            className={`shrink-0 transition-transform duration-300 ${detailsOpen ? 'rotate-180' : ''} ${style.muted}`}
+            size={14}
+            strokeWidth={1.8}
+            className={`mt-1 shrink-0 transition-transform duration-300 ${detailsOpen ? 'rotate-180' : ''} ${NOTICE_TONE.muted}`}
             aria-hidden="true"
           />
         )}
@@ -118,57 +127,64 @@ const AnswerCriticNotice = ({ critic, variant, detailLines, onLocateClaim }) => 
           className="grid grid-rows-[1fr] opacity-100 transition-[grid-template-rows,opacity] duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
         >
           <div className="min-h-0 overflow-hidden">
-            <div className={`mx-2.5 border-t pb-2.5 pt-2 ${style.divider}`}>
+            <div className={`ml-[18px] border-l pb-1 pl-3.5 pt-2 ${NOTICE_TONE.rule}`}>
               {visibleLines.length > 0 && (
-                <ul className={`space-y-1.5 leading-[1.55] ${style.detail}`}>
-            {visibleLines.map((line) => {
-              const typeMeta = line.issueType ? getCriticIssueTypeMeta(line.issueType) : null;
-              return (
-                    <li key={line.text} className="grid grid-cols-[6px_minmax(0,1fr)] gap-1.5">
-                  <span className={`mt-[7px] h-1 w-1 rounded-full ${style.dot}`} aria-hidden="true" />
-                  <div className="min-w-0">
-                    {typeMeta && (
-                      <span className={`mr-1.5 text-[10.5px] font-semibold ${typeMeta.className}`}>
-                        {typeMeta.label}
-                      </span>
-                    )}
-                    <span>{line.text}</span>
-                    {line.claimSpan && (
-                      <button
-                        type="button"
-                        onClick={() => onLocateClaim && onLocateClaim(line.claimSpan)}
-                        disabled={!onLocateClaim}
-                        title={line.claimSpan}
-                        className={`ml-2 inline-flex items-center gap-1 rounded-[6px] border px-1.5 py-0.5 text-[10.5px] font-medium transition-[background-color,border-color,transform] duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FFA07A]/35 active:scale-[0.98] disabled:cursor-default disabled:opacity-[0.55] ${style.action}`}
-                      >
-                        <LocateFixed size={11} strokeWidth={2} aria-hidden="true" />
-                        定位原句
-                      </button>
-                    )}
-                  </div>
-                </li>
-              );
-            })}
+                <ul className={`space-y-2.5 leading-6 ${NOTICE_TONE.body}`}>
+                  {visibleLines.map((line) => {
+                    const typeMeta = line.issueType ? getCriticIssueTypeMeta(line.issueType) : null;
+                    const evidenceRefs = formatEvidenceRefs(line.evidenceRefs);
+                    return (
+                      <li key={line.text} className="min-w-0">
+                        {typeMeta && (
+                          <span className={`mr-1.5 text-[11.5px] font-medium ${NOTICE_TONE.title}`}>
+                            {typeMeta.label}
+                          </span>
+                        )}
+                        <span className="line-clamp-3" title={line.text}>{line.text}</span>
+                        {(line.claimSpan || evidenceRefs) && (
+                          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                            {evidenceRefs && (
+                              <span className={`text-[11.5px] tabular-nums ${NOTICE_TONE.muted}`}>
+                                应对 {evidenceRefs}
+                              </span>
+                            )}
+                            {line.claimSpan && (
+                              <button
+                                type="button"
+                                onClick={() => onLocateClaim && onLocateClaim(line.claimSpan)}
+                                disabled={!onLocateClaim}
+                                title={line.claimSpan}
+                                className={`inline-flex items-center gap-1 text-[11.5px] transition-colors duration-200 hover:text-[#3f3a35] active:translate-y-px disabled:cursor-default disabled:opacity-[0.55] dark:hover:text-gray-100 ${NOTICE_TONE.muted} ${NOTICE_TONE.focus}`}
+                              >
+                                <LocateFixed size={12} strokeWidth={1.8} aria-hidden="true" />
+                                定位原句
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
               {lines.length > CRITIC_VISIBLE_DETAIL_LINES && (
-          <button
-            type="button"
+                <button
+                  type="button"
                   onClick={() => setShowAllLines((current) => !current)}
                   aria-expanded={showAllLines}
-                  className={`mt-1.5 inline-flex items-center gap-1 text-[10.5px] font-medium transition-[color,transform] duration-200 hover:text-[#8c4d2f] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#FFA07A]/35 active:translate-y-px dark:hover:text-[#ffc7b4] ${style.muted}`}
-          >
+                  className={`mt-2 inline-flex items-center gap-1 text-[11.5px] transition-colors duration-200 hover:text-[#3f3a35] active:translate-y-px dark:hover:text-gray-100 ${NOTICE_TONE.muted} ${NOTICE_TONE.focus}`}
+                >
                   {showAllLines ? '收起问题' : `查看其余 ${collapsedCount} 项`}
                   {showAllLines
-              ? <ChevronUp size={12} strokeWidth={2} aria-hidden="true" />
-              : <ChevronDown size={12} strokeWidth={2} aria-hidden="true" />}
-          </button>
+                    ? <ChevronUp size={12} strokeWidth={1.8} aria-hidden="true" />
+                    : <ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" />}
+                </button>
               )}
               {showSuggestion && (
-                <div className={`mt-2 flex gap-2 border-t pt-2 leading-[1.55] ${style.detail} ${style.divider}`}>
-            <span className={`shrink-0 text-[10.5px] font-semibold ${style.muted}`}>建议</span>
-            <span>{suggestion}</span>
-          </div>
+                <div className={`mt-2.5 flex gap-2 border-t pt-2.5 leading-6 ${NOTICE_TONE.body} ${NOTICE_TONE.rule}`}>
+                  <span className={`shrink-0 text-[11px] ${NOTICE_TONE.muted}`}>建议</span>
+                  <span className="line-clamp-4" title={suggestion}>{suggestion}</span>
+                </div>
               )}
             </div>
           </div>

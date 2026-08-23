@@ -89,7 +89,7 @@ const BACKEND_OPTIONS = [
   {
     value: 'auto',
     label: '自动选择',
-    description: '根据可用性自动选择最佳引擎',
+    description: '自动选可用引擎',
   },
   {
     value: 'tesseract',
@@ -824,7 +824,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     文档解析
                   </div>
                   <div className="text-[12px] font-medium text-gray-500">
-                    先选上传路线，再只配置这条路线需要的内容
+                    先选上传路线，再配这条路线要用的项
                   </div>
                 </div>
               </div>
@@ -848,7 +848,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                   <div>
                     <div id="parse-route-heading" className="text-sm font-semibold text-gray-800">上传路线</div>
                     <p className="text-[12px] leading-5 text-gray-500 mt-1">
-                      阅读、总结、大纲、翻译、速览和问答都会沿用这一条。已上传的文档不会跟着改。
+                      之后上传的文档都走这条路线，已上传的不受影响。
                     </p>
                   </div>
                   <span className="shrink-0 rounded-lg bg-gray-100 px-2 py-1 text-[10px] font-semibold text-gray-500">
@@ -893,8 +893,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         </div>
                         <p className="mt-1.5 text-[11px] leading-5 text-gray-500">
                           {isMinerU
-                            ? '适合论文、扫描件和复杂版面，公式表格更完整。'
-                            : '适合文字层完整的普通 PDF，扫描页可在下方补识别。'}
+                            ? '论文和扫描件更合适，公式表格更完整。'
+                            : '适合文字层完整的普通 PDF。'}
                         </p>
                       </button>
                     )
@@ -909,7 +909,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                       <div>
                         <div id="mineru-settings-heading" className="text-sm font-semibold text-gray-800">MinerU 连接</div>
                         <p className="text-[11px] leading-5 text-gray-500 mt-1">
-                          深度解析会把当前 PDF 发到 MinerU。连好一次后，解析增强可单独保存。
+                          深度解析会把 PDF 发到 MinerU。
                         </p>
                       </div>
                       {mineruConfigured && (
@@ -1102,7 +1102,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     <div className="mb-4">
                       <div className="text-sm font-semibold text-gray-800">解析增强</div>
                       <p className="text-[11px] leading-5 text-gray-500 mt-1">
-                        只作用于 MinerU 深度解析。扫描件即使关掉 OCR，本地抽字很差时仍会自动打开。
+                        仅 MinerU 深度解析生效。扫描件抽字很差时仍会自动开 OCR。
                       </p>
                     </div>
                     <div className="space-y-2">
@@ -1195,7 +1195,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     <div className="mb-4">
                       <div id="local-ocr-heading" className="text-sm font-semibold text-gray-800">扫描页补字</div>
                       <p className="text-[11px] leading-5 text-gray-500 mt-1">
-                        只给本地解析补识别，不是另一条上传路线。默认自动即可。
+                        给本地解析补识别，默认自动即可。
                       </p>
                     </div>
 

@@ -32,7 +32,7 @@ _NEGATIVE_DIRECTION_RE = re.compile(
 )
 _CAUSAL_RE = re.compile(
     r"\b(?:because|therefore|thus|hence|caus(?:e|al|ed)|leads? to|results? in|due to)\b"
-    r"|(?:因此|从而|导致|造成|使得|由于|归因于|因而|说明)"
+    r"|(?:因此|从而|导致|造成|使得|由于|归因于|因而|说明|解决了|攻克了|突破了)"
 )
 _LIMITATION_RE = re.compile(
     r"\b(?:limitation|limitations|constraint|constrain(?:ed|s)?|caveat|cannot generalize|future work)\b"
@@ -42,6 +42,15 @@ _SUPERLATIVE_RE = re.compile(
     r"\b(?:best|worst|highest|lowest|largest|smallest|state[- ]of[- ]the[- ]art|significant(?:ly)?)\b"
     r"|(?:最高|最低|最大|最小|最佳|最差|显著|领先|唯一|首次)"
 )
+_OVERCLAIM_EXTRA_RE = re.compile(
+    r"(?:解决了|攻克了|突破了|核心难题|根本问题|表明|证明|"
+    r"\b(?:solved|demonstrate[sd]?|proves?)\b)",
+    re.IGNORECASE,
+)
+# 因果/最高级只有证据对得很实时才允许补标，避免把「解决了核心难题」
+# 这种升华句贴上一个只共享了几个方法词的 chunk。
+OVERCLAIM_ATTACH_MIN_SCORE = 0.45
+SUGGEST_CITATION_MIN_SCORE = 0.18
 _COMPARISON_OP_RE = re.compile(
     r"\b(?:better\s+than|worse\s+than|higher\s+than|lower\s+than|"
     r"greater\s+than|less\s+than|outperform(?:s|ed)?|underperform(?:s|ed)?)\b"
@@ -348,6 +357,23 @@ def _evidence_is_complementary(claim: str, first: dict, second: dict) -> bool:
         if first_hits and second_hits and first_hits == second_hits:
             return False
     return True
+
+
+def is_overclaim_text(text: str) -> bool:
+    """Causal / superlative / breakthrough wording that must not get a weak cite."""
+    value = strip_inline_citations(text)
+    if not value.strip():
+        return False
+    return bool(
+        _CAUSAL_RE.search(value)
+        or _SUPERLATIVE_RE.search(value)
+        or _OVERCLAIM_EXTRA_RE.search(value)
+    )
+
+
+def attach_inline_refs(text: str, refs: list[int]) -> str:
+    """Public wrapper: keep sentence wording, only add or strip ``[n]`` markers."""
+    return _attach_refs(text, refs)
 
 
 def _is_conservative_claim(claim: str) -> bool:
@@ -763,6 +789,7 @@ def align_answer_citations(
     replacements: list[tuple[int, int, str]] = []
     bindings: list[dict[str, Any]] = []
     unsupported_count = 0
+    overclaim_unattached_count = 0
     # 同一段证据被反复拿来支撑不同结论会制造虚假的高覆盖率。独占键刻意带上
     # 该结论涉及的数字集合：一张表可以合法支撑多个**不同数值**的结论，按整块
     # 一刀切会误杀正当的一表多用。这里只标记不删除——误判独占不应让正确证据
@@ -788,6 +815,9 @@ def align_answer_citations(
             continue
         scored = rank_claim_evidence(claim["claim_text"], normalized)
         qualified = [row for row in scored if row[0] >= max(0.0, float(min_score))]
+        if is_overclaim_text(claim["claim_text"]):
+            attach_floor = max(float(min_score), OVERCLAIM_ATTACH_MIN_SCORE)
+            qualified = [row for row in qualified if row[0] >= attach_floor]
         chosen = qualified[:1]
         if len(qualified) > 1 and max_refs_per_claim > 1:
             first_score, _first_ref, first_item = qualified[0]
@@ -804,6 +834,8 @@ def align_answer_citations(
         refs = [int(row[1]) for row in chosen]
         if not refs:
             unsupported_count += 1
+            if is_overclaim_text(claim["claim_text"]):
+                overclaim_unattached_count += 1
         selected_refs.update(refs)
         span_records = []
         claim_number_key = frozenset(_claim_numbers(claim["claim_text"]))
@@ -870,5 +902,6 @@ def align_answer_citations(
             "min_claim_support_score": round(float(min_score), 4),
             "max_refs_per_claim": max(1, int(max_refs_per_claim)),
             "reused_span_count": reused_span_count,
+            "overclaim_unattached_count": overclaim_unattached_count,
         },
     }

@@ -78,7 +78,8 @@ _REASONING_ON_CONTROLS = {
 _LATEST_MODEL_IDS = {
     "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     "qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash",
-    "deepseek-v4-flash", "deepseek-v4-pro", "kimi-k3", "kimi-k2.7-code", "kimi-k2.6",
+    "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp",
+    "kimi-k3", "kimi-k2.7-code", "kimi-k2.6",
     "glm-5.2", "MiniMax-M3",
     "mimo-v2.5-pro", "mimo-v2.5",
     "claude-opus-5", "claude-fable-5", "claude-sonnet-5",
@@ -331,6 +332,7 @@ async def get_models():
         "deepseek": {
             "deepseek-v4-flash": "DeepSeek V4 Flash",
             "deepseek-v4-pro": "DeepSeek V4 Pro",
+            "deepseek-v4-flash-vision-exp": "DeepSeek V4 Flash Vision Exp",
         },
         "moonshot": {
             "kimi-k3": "Kimi K3",

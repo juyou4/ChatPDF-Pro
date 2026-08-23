@@ -36,6 +36,8 @@ export const VISION_CAPABLE_RULES = {
   doubao: /^(doubao-1\.5-pro|doubao-seed)/i,
   // Moonshot：moonshot-v1 / Kimi K2、K3 多模态系列支持图片输入
   moonshot: /^(moonshot-v1|kimi-k[23])/i,
+  // DeepSeek：目前仅 V4 Flash Vision 实验模型接受图片，普通 V4 Flash / Pro 会 400
+  deepseek: /deepseek-v4-flash-vision/i,
 }
 
 /**

@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ArrowRight,
   ArrowUpDown,
@@ -33,6 +34,8 @@ import {
   X,
 } from 'lucide-react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+import { MorphIcon } from 'morphicons/react';
+import { ArrowUp as ArrowUpIcon, Pause as PauseIcon } from 'lucide';
 import pdfFiletypeIcon from '../assets/images/pdf-filetype.svg';
 import { supportsVision } from '../utils/visionDetectorUtils';
 import ScreenshotPreview from './ScreenshotPreview';
@@ -178,68 +181,17 @@ const getUsageTokenSummary = (usage) => {
   return { prompt, completion, total, estimated: Boolean(usage.estimated), cost: usage.cost || null };
 };
 
-const SendIcon = () => (
-  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true" focusable="false">
-    <path d="m6.998 10.247l.435.76c.277.485.415.727.415.993s-.138.508-.415.992l-.435.761c-1.238 2.167-1.857 3.25-1.375 3.788c.483.537 1.627.037 3.913-.963l6.276-2.746c1.795-.785 2.693-1.178 2.693-1.832s-.898-1.047-2.693-1.832L9.536 7.422c-2.286-1-3.43-1.5-3.913-.963s.137 1.62 1.375 3.788Z" />
-  </svg>
+const SendPauseIconSwap = ({ isPaused }) => (
+  <span className="chat-send-icon-swap" data-state={isPaused ? 'pause' : 'send'} aria-hidden="true">
+    <MorphIcon
+      icon={isPaused ? PauseIcon : ArrowUpIcon}
+      size={16}
+      strokeWidth={2.15}
+      spring="snappy"
+      reducedMotion="user"
+    />
+  </span>
 );
-
-const PauseIcon = () => (
-  <svg className="glass-btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true" focusable="false">
-    <rect x="7" y="6" width="4" height="12" rx="2" />
-    <rect x="13" y="6" width="4" height="12" rx="2" />
-  </svg>
-);
-
-const ICON_SWAP_VISIBLE = { opacity: 1, filter: 'blur(0px)', scale: 1 };
-const ICON_SWAP_HIDDEN = { opacity: 0, filter: 'blur(3px)', scale: 0.28 };
-
-const getIconSwapTransition = (visible, reduceMotion) => {
-  if (reduceMotion) return { duration: 0 };
-
-  if (!visible) {
-    return {
-      opacity: { duration: 0.12, ease: [0.4, 0, 1, 1] },
-      filter: { duration: 0.14, ease: [0.4, 0, 1, 1] },
-      scale: { duration: 0.14, ease: [0.4, 0, 1, 1] },
-    };
-  }
-
-  return {
-    opacity: { duration: 0.2, delay: 0.045, ease: [0.22, 1, 0.36, 1] },
-    filter: { duration: 0.24, delay: 0.035, ease: [0.22, 1, 0.36, 1] },
-    scale: { type: 'spring', stiffness: 520, damping: 28, mass: 0.5, delay: 0.035 },
-  };
-};
-
-const SendPauseIconSwap = ({ isPaused }) => {
-  const reduceMotion = useReducedMotion();
-  const sendVisible = !isPaused;
-  const pauseVisible = isPaused;
-
-  return (
-    <span className="chat-send-icon-swap" data-state={isPaused ? 'pause' : 'send'} aria-hidden="true">
-      <motion.span
-        className="chat-send-icon-swap__icon ml-0.5"
-        data-icon="send"
-        initial={false}
-        animate={sendVisible ? ICON_SWAP_VISIBLE : ICON_SWAP_HIDDEN}
-        transition={getIconSwapTransition(sendVisible, reduceMotion)}
-      >
-        <SendIcon />
-      </motion.span>
-      <motion.span
-        className="chat-send-icon-swap__icon"
-        data-icon="pause"
-        initial={false}
-        animate={pauseVisible ? ICON_SWAP_VISIBLE : ICON_SWAP_HIDDEN}
-        transition={getIconSwapTransition(pauseVisible, reduceMotion)}
-      >
-        <PauseIcon />
-      </motion.span>
-    </span>
-  );
-};
 
 const SummaryIcon = ({ className = '' }) => (
   <svg
@@ -708,7 +660,7 @@ const SETTINGS_SECTIONS = [
   { id: 'common', label: '常用', description: '模型与主要工作配置', Icon: Settings },
   { id: 'reading', label: '阅读', description: '翻译、速览与阅读行为', Icon: ReadingDocumentIcon },
   { id: 'retrieval', label: '检索', description: '召回、证据与代理策略', Icon: ListFilter },
-  { id: 'interface', label: '界面', description: '显示、动效与工具栏', Icon: SlidersHorizontal },
+  { id: 'interface', label: '界面', description: '字号、工具栏与回答呈现', Icon: SlidersHorizontal },
   { id: 'storage', label: '存储', description: '文件位置与缓存管理', Icon: Database },
 ];
 
@@ -741,10 +693,32 @@ const SettingsFeatureRow = ({ Icon, title, description, checked, onChange, statu
         <h4 className={`text-[13px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{title}</h4>
         {statusLabel ? <span className="settings-feature-status" data-tone={statusTone}>{statusLabel}</span> : null}
       </div>
-      <p className={`mt-1 text-[11px] leading-[1.55] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>{description}</p>
+      <p className={`mt-1 text-[11px] leading-snug ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>{description}</p>
     </div>
     <SettingsSwitch checked={checked} onChange={onChange} label={title} darkMode={darkMode} />
   </div>
+);
+
+const SettingsCheckRow = ({ title, description, hint, checked, onChange, darkMode }) => (
+  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
+    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${checked ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
+      {checked && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
+    </div>
+    <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{title}</h4>
+          {hint ? <span className="settings-feature-status" data-tone="muted">{hint}</span> : null}
+        </div>
+        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="hidden" />
+      </div>
+      {description ? (
+        <p className={`mt-0.5 text-[12px] leading-snug font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+          {description}
+        </p>
+      ) : null}
+    </div>
+  </label>
 );
 
 const ChatPDF = () => {
@@ -777,6 +751,8 @@ const ChatPDF = () => {
     cheapModel, setCheapModel,
     cheapModelProvider, setCheapModelProvider,
     setCheapModelEndpoint,
+    mathEngine,
+    mathEnableSingleDollar,
   } = useChatParams();
   const {
     aiAutoProcess,
@@ -3903,6 +3879,7 @@ const ChatPDF = () => {
   });
   const {
     screenshots,
+    setScreenshots,
     isSelectingArea, setIsSelectingArea,
     handleAreaSelected, handleSelectionCancel,
     handleScreenshotAction, handleScreenshotClose,
@@ -3922,6 +3899,7 @@ const ChatPDF = () => {
     documentSourceHash: documentParseManifest?.source_hash || '',
     parseIdentityReady: !isDocumentParseIdentityHydrating,
     screenshots,
+    setScreenshots,
     selectedText,
     getChatCredentials,
     getVisualCredentials,
@@ -3938,6 +3916,8 @@ const ChatPDF = () => {
     numExpandContextChunk,
     enableBlurReveal,
     blurIntensity,
+    enableMathHydration: mathEngine !== 'none',
+    enableSingleDollarMath: mathEnableSingleDollar !== false,
     globalSettings,
   });
   const {
@@ -3956,6 +3936,8 @@ const ChatPDF = () => {
     // ref 直写模式：流式输出期间直接更新 DOM
     streamingContentRef,
     streamingThinkingRef,
+    subscribeContentCommittedPrefix,
+    subscribeContentDisplayedText,
   } = messageState;
   const hasEmbeddingDependentChatFeatures = enableVectorSearch
     || enableGraphRAG
@@ -4917,6 +4899,8 @@ const ChatPDF = () => {
     confirmRegenerateMessage,
     streamingThinkingRef,
     streamingContentRef,
+    subscribeContentCommittedPrefix,
+    subscribeContentDisplayedText,
     handleCitationClick,
     handleDocumentAwareCitationClick,
     copyMessage,
@@ -4941,6 +4925,8 @@ const ChatPDF = () => {
     docInfo?.total_pages,
     docInfo?.data?.total_pages,
     confirmRegenerateMessage,
+    subscribeContentCommittedPrefix,
+    subscribeContentDisplayedText,
     handleCitationClick,
     handleDocumentAwareCitationClick,
     copyMessage,
@@ -6468,14 +6454,14 @@ const ChatPDF = () => {
                   <div className="mb-2.5 flex items-end justify-between gap-4 px-1">
                     <div>
                       <h3 id="current-models-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>当前工作配置</h3>
-                      <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>主模型负责生成，检索模型负责找到并筛选文档证据</p>
+                      <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>对话、嵌入和重排各用各的模型</p>
                     </div>
                     <button
                       type="button"
                       onClick={handleOpenEmbeddingSettings}
                       onPointerEnter={preloadEmbeddingSettings}
                       onFocus={preloadEmbeddingSettings}
-                      title="配置服务商、密钥和默认模型"
+                      title="配置服务商和默认模型"
                       aria-label="打开模型服务管理"
                       className="model-service-cta"
                     >
@@ -6543,72 +6529,44 @@ const ChatPDF = () => {
                     大纲/总结/预翻译/速览是产品核心能力，不应藏在三级深度 */}
                 {settingsSection === 'reading' && (
                 <div className={`settings-card p-5 border space-y-3 mt-2 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
-                  <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                    <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${aiAutoProcess ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
-                      {aiAutoProcess && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
-                    </div>
-                    <div className="flex flex-col flex-1">
-                      <div className="flex items-center justify-between">
-                        <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>智能阅读</h4>
-                        <input type="checkbox" checked={aiAutoProcess} onChange={e => setAiAutoProcess(e.target.checked)} className="hidden" />
-                      </div>
-                      <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                        控制文档打开后是否自动生成 AI 阅读辅助；关闭后打开文档零模型调用
-                      </p>
-                    </div>
-                  </label>
+                  <SettingsCheckRow
+                    title="智能阅读"
+                    description="关闭后打开文档不调用模型"
+                    checked={aiAutoProcess}
+                    onChange={setAiAutoProcess}
+                    darkMode={darkMode}
+                  />
 
                   <div className={`space-y-3 pt-1 ${aiAutoProcess ? '' : 'opacity-50 pointer-events-none'}`}>
-                    <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                      <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${autoOutlineSummary ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
-                        {autoOutlineSummary && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
-                      </div>
-                      <div className="flex flex-col flex-1">
-                        <div className="flex items-center justify-between">
-                          <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>自动生成大纲与总结</h4>
-                          <input type="checkbox" checked={autoOutlineSummary} onChange={e => setAutoOutlineSummary(e.target.checked)} className="hidden" />
-                        </div>
-                        <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                          打开文档后自动生成左侧 AI 总结和章节大纲；关闭后只读取已有缓存
-                        </p>
-                      </div>
-                    </label>
-
-                    <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                      <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${enableHoverPretranslate ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
-                        {enableHoverPretranslate && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
-                      </div>
-                      <div className="flex flex-col flex-1">
-                        <div className="flex items-center justify-between">
-                          <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>自动预翻译全文</h4>
-                          <input type="checkbox" checked={enableHoverPretranslate} onChange={e => setAutoPretranslate(e.target.checked)} className="hidden" />
-                        </div>
-                        <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                          提前缓存正文、标题和图注翻译，悬浮时直接显示；会产生较多模型调用
-                        </p>
-                      </div>
-                    </label>
-
-                    <label className="settings-row flex items-start space-x-3.5 group cursor-pointer p-1 rounded-2xl">
-                      <div className={`w-5 h-5 rounded-[6px] flex items-center justify-center shrink-0 mt-0.5 transition-transform group-hover:scale-105 ${blockSummary ? 'bg-[#F0653A] text-white shadow-[0_4px_12px_rgba(240,101,58,0.28)] settings-check-pop' : 'border-2 border-gray-300 bg-transparent'}`}>
-                        {blockSummary && <Check size={13} strokeWidth={3.5} className="settings-check-mark" />}
-                      </div>
-                      <div className="flex flex-col flex-1">
-                        <div className="flex items-center justify-between">
-                          <h4 className={`text-[14px] font-semibold leading-snug ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>逐段要点</h4>
-                          <input type="checkbox" checked={blockSummary} onChange={e => setBlockSummary(e.target.checked)} className="hidden" />
-                        </div>
-                        <p className={`text-[12px] mt-0.5 leading-relaxed font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                          翻译正文段落时额外生成一句话要点，显示在译文上方和悬浮窗里；每段多一次模型调用，标题和图注不生成
-                        </p>
-                      </div>
-                    </label>
+                    <SettingsCheckRow
+                      title="大纲与总结"
+                      description="打开后生成左侧总结和大纲"
+                      checked={autoOutlineSummary}
+                      onChange={setAutoOutlineSummary}
+                      darkMode={darkMode}
+                    />
+                    <SettingsCheckRow
+                      title="预翻译全文"
+                      description="提前译好，悬浮即可查看"
+                      hint="较耗额度"
+                      checked={enableHoverPretranslate}
+                      onChange={setAutoPretranslate}
+                      darkMode={darkMode}
+                    />
+                    <SettingsCheckRow
+                      title="逐段要点"
+                      description="正文每段多一句要点"
+                      hint="每段多一次"
+                      checked={blockSummary}
+                      onChange={setBlockSummary}
+                      darkMode={darkMode}
+                    />
 
                     <div className="settings-inset p-3.5 rounded-[14px]">
                       <div className="flex items-center justify-between gap-3">
                         <div>
                           <div className={`text-[12px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>预翻译并发</div>
-                          <div className={`text-[11px] mt-0.5 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>限速模型建议 3-6，付费高速模型可用 8-16</div>
+                          <div className={`text-[11px] mt-0.5 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>限速模型用 3–6，高速模型可更高</div>
                         </div>
                         <span className="text-[12px] font-bold text-[#B85F47] tabular-nums">{pretranslateConcurrency}</span>
                       </div>
@@ -6638,15 +6596,15 @@ const ChatPDF = () => {
                         buttonClassName="py-1.5 text-[11px] font-bold text-center rounded-[9px]"
                         indicatorClassName="rounded-[9px]"
                       />
-                      <p className={`mt-2 text-[11px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>速览仍然按需触发，不会因这个选项自动消耗 token</p>
+                      <p className={`mt-2 text-[11px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>只改速览深度，不会自动开始生成</p>
                     </div>
 
                     <div className="settings-inset p-3.5 rounded-[14px]">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className={`text-[12px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>图表理解模型</div>
-                          <p className={`mt-0.5 text-[11px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                            用于速览图表解读与高风险表格核验；未配置视觉能力时只保留定位和裁剪结果
+                          <p className={`mt-0.5 text-[11px] leading-snug ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                            解读图表、核验表格
                           </p>
                         </div>
                         <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${visualPolicyReady ? 'bg-emerald-500/10 text-emerald-600' : 'bg-[#FBE9E2] text-[#B85F47]'}`}>
@@ -6694,9 +6652,9 @@ const ChatPDF = () => {
                         />
                       </div>
                       <div className={`mt-3 rounded-[11px] border px-3 py-2.5 ${darkMode ? 'border-white/10 bg-black/15' : 'border-[#eadfd9] bg-[#fffaf7]'}`}>
-                        <div className={`text-[10px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>表格图片核验使用</div>
-                        <div className={`mt-1 text-[11px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                          上方的图表理解模型负责读取表格截图；下方的检索辅助模型不会接收图片。
+                        <div className={`text-[10px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>表格核验</div>
+                        <div className={`mt-1 text-[11px] leading-snug ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                          表格截图走上方视觉模型，不走检索辅助模型
                         </div>
                       </div>
                     </div>
@@ -6708,13 +6666,13 @@ const ChatPDF = () => {
                 <section className="px-1" aria-labelledby="display-font-size-heading">
                   <div className="mb-2.5 px-1">
                     <h3 id="display-font-size-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>显示与字号</h3>
-                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>分别调整内容阅读和应用界面的文字大小</p>
+                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>内容和界面分开调</p>
                   </div>
                   <div className={`settings-card divide-y overflow-hidden ${darkMode ? 'settings-card-dark divide-[#373b44] bg-[#24272e] border-[#373b44]' : 'divide-gray-100 bg-white border-gray-200/90'}`}>
                     <div className="grid grid-cols-[1fr_300px] items-center gap-5 px-5 py-[18px]">
                       <div className="min-w-0">
                         <div className={`text-[13px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>内容字号</div>
-                        <p className={`mt-1 text-[11px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>回答、思考过程、检索轨迹、总结、大纲、翻译与笔记</p>
+                        <p className={`mt-1 text-[11px] leading-snug ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>回答、总结、大纲、翻译等正文</p>
                       </div>
                       <SettingsSegmentedControl
                         ariaLabel="内容字号"
@@ -6734,7 +6692,7 @@ const ChatPDF = () => {
                     <div className="grid grid-cols-[1fr_300px] items-center gap-5 px-5 py-[18px]">
                       <div className="min-w-0">
                         <div className={`text-[13px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>界面字号</div>
-                        <p className={`mt-1 text-[11px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>侧栏、工具栏、按钮、状态信息和设置文字</p>
+                        <p className={`mt-1 text-[11px] leading-snug ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>侧栏、按钮和设置</p>
                       </div>
                       <SettingsSegmentedControl
                         ariaLabel="界面字号"
@@ -6791,13 +6749,13 @@ const ChatPDF = () => {
                   <section className="px-1" aria-labelledby="retrieval-foundation-heading">
                     <div className="mb-2.5 px-1">
                       <h3 id="retrieval-foundation-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>基础召回</h3>
-                      <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>语义召回与中文关键词召回共同参与排序</p>
+                      <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>语义检索和关键词一起用</p>
                     </div>
                     <div className={`settings-card divide-y overflow-hidden ${darkMode ? 'settings-card-dark divide-[#373b44] bg-[#24272e] border-[#373b44]' : 'divide-gray-100 bg-white border-gray-200/90'}`}>
                       <SettingsFeatureRow
                         Icon={ListFilter}
                         title="向量检索"
-                        description="使用嵌入索引召回语义相近段落"
+                        description="按语义找相近段落"
                         checked={enableVectorSearch}
                         onChange={setEnableVectorSearch}
                         statusLabel={enableVectorSearch ? '工作中' : '已关闭'}
@@ -6807,7 +6765,7 @@ const ChatPDF = () => {
                       <SettingsFeatureRow
                         Icon={Type}
                         title="jieba 中文分词"
-                        description="改善 BM25 对中文术语和短语的关键词命中"
+                        description="提高中文关键词命中"
                         checked={enableJiebaBM25}
                         onChange={setEnableJiebaBM25}
                         statusLabel={enableJiebaBM25 ? '工作中' : '已关闭'}
@@ -6820,13 +6778,13 @@ const ChatPDF = () => {
                   <section className="px-1" aria-labelledby="retrieval-structure-heading">
                     <div className="mb-2.5 px-1">
                       <h3 id="retrieval-structure-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>结构增强</h3>
-                      <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>复杂问题使用图谱上下文或多轮检索计划</p>
+                      <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>复杂问题用图谱或多轮检索</p>
                     </div>
                     <div className={`settings-card overflow-hidden ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
                       <SettingsFeatureRow
                         Icon={Brain}
                         title="GraphRAG 知识图谱"
-                        description="按文档提取实体关系和社区摘要，补充全局证据"
+                        description="从文档抽出实体和关系"
                         checked={enableGraphRAG}
                         onChange={setEnableGraphRAG}
                         statusLabel={graphRagStatusLabel}
@@ -6852,7 +6810,7 @@ const ChatPDF = () => {
                               ) : graphragStatus === 'error' ? (
                                 <span className="text-red-500">{graphragError || '构建失败，请重试'}</span>
                               ) : (
-                                <span className={darkMode ? 'text-gray-500' : 'text-gray-500'}>当前文档尚未构建，预计需要 30 秒至数分钟</span>
+                                <span className={darkMode ? 'text-gray-500' : 'text-gray-500'}>尚未构建，大约要几十秒到几分钟</span>
                               )}
                             </div>
                             <button
@@ -6871,7 +6829,7 @@ const ChatPDF = () => {
                         <SettingsFeatureRow
                           Icon={Sparkles}
                           title="检索代理 (Agentic RAG)"
-                          description="对综述、比较和章节解释等复杂问题组合多种检索工具"
+                          description="复杂问题自动组合多种检索"
                           checked={enableAgentRetrieval}
                           onChange={setEnableAgentRetrieval}
                           statusLabel={agentModeLabel}
@@ -6897,7 +6855,7 @@ const ChatPDF = () => {
                           <div className={`mt-3 flex items-center justify-between border-t pt-3 ${darkMode ? 'border-white/[0.07]' : 'border-[#ebe4df]'}`}>
                             <div className="min-w-0 pr-4">
                               <div className={`text-[11px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>全部问题使用 Agent</div>
-                              <div className={`mt-0.5 text-[10px] ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>用于专项评估，日常阅读建议保持按需触发</div>
+                              <div className={`mt-0.5 text-[10px] ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>日常阅读建议保持按需</div>
                             </div>
                             <SettingsSwitch checked={forceAgentRetrieval} onChange={setForceAgentRetrieval} label="全部问题使用 Agent" darkMode={darkMode} />
                           </div>
@@ -6923,7 +6881,7 @@ const ChatPDF = () => {
                               <h3 id="retrieval-tuning-heading" className={`text-[13px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>会话级检索调优</h3>
                               <span className="settings-feature-status" data-tone="muted">高级</span>
                             </div>
-                            <p className={`mt-1 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>仅覆盖当前会话，不改后端默认配置</p>
+                            <p className={`mt-1 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>只改当前会话</p>
                           </div>
                         </div>
                         <ChevronDown className={`h-4 w-4 shrink-0 text-gray-400 transition-transform duration-200 ${showRetrievalTuning ? 'rotate-180' : ''}`} />
@@ -6940,29 +6898,29 @@ const ChatPDF = () => {
                           >
                             <div className={`border-t px-5 pb-5 pt-3 ${darkMode ? 'border-[#373b44]' : 'border-gray-100'}`}>
                               <TriStateToggle
-                                title="numeric_table 专项增强"
-                                desc="表格数值比较查询的专项检索增强"
+                                title="表格数值增强"
+                                desc="比较表格数字时加强检索"
                                 value={overrideNumericTable}
                                 onChange={setOverrideNumericTable}
                                 darkMode={darkMode}
                               />
                               <TriStateToggle
-                                title="BM25 同义词扩展"
-                                desc="扩展近义表达，减少术语表述差异造成的漏召回"
+                                title="同义词扩展"
+                                desc="换种说法也能搜到"
                                 value={overrideBM25Synonyms}
                                 onChange={setOverrideBM25Synonyms}
                                 darkMode={darkMode}
                               />
                               <TriStateToggle
-                                title="LLM 查询改写"
-                                desc="多轮对话中消解指代和省略"
+                                title="查询改写"
+                                desc="补全指代和省略"
                                 value={overrideLLMQueryRewrite}
                                 onChange={setOverrideLLMQueryRewrite}
                                 darkMode={darkMode}
                               />
                               <TriStateToggle
                                 title="答案自审"
-                                desc="回答完成后检查证据一致性"
+                                desc="检查回答是否对得上证据"
                                 value={overrideAnswerCritic}
                                 onChange={setOverrideAnswerCritic}
                                 darkMode={darkMode}
@@ -6978,7 +6936,7 @@ const ChatPDF = () => {
                                 <div className="flex items-center justify-between gap-3">
                                   <div>
                                     <div className={`text-[11px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>检索辅助模型</div>
-                                    <div className={`mt-0.5 text-[10px] leading-relaxed ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>从当前对话服务商已配置的聊天模型中选择，用于查询改写、命名和自审；不参与表格图片核验</div>
+                                    <div className={`mt-0.5 text-[10px] leading-snug ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>用于改写、命名和自审，不看图片</div>
                                   </div>
                                   <span className={`shrink-0 text-[10px] ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>可选</span>
                                 </div>
@@ -6989,8 +6947,8 @@ const ChatPDF = () => {
                                     options={cheapModelOptions}
                                     unavailableLabel={cheapModelUnavailableLabel}
                                   />
-                                  <p className={`mt-1.5 text-[10px] leading-relaxed ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>
-                                    留空时跟随后端配置；只显示当前对话服务商的可用模型，以确保凭据与实际调用一致。要新增模型，请先在“模型服务”中完成配置。
+                                  <p className={`mt-1.5 text-[10px] leading-snug ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>
+                                    留空则跟随后端。只列出当前服务商的模型。
                                   </p>
                                 </div>
                               </div>
@@ -7003,45 +6961,24 @@ const ChatPDF = () => {
                 </>
                 )}
 
-                {/* Interface feature toggles */}
                 {settingsSection === 'interface' && (
-                <section className="px-1" aria-labelledby="interface-effects-heading">
+                <section className="px-1" aria-labelledby="reading-toolbar-heading">
                   <div className="mb-2.5 px-1">
-                    <h3 id="interface-effects-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>交互反馈</h3>
-                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>截图入口与回答呈现效果</p>
+                    <h3 id="reading-toolbar-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>阅读工具栏</h3>
+                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>截图、搜索和工具尺寸</p>
                   </div>
-                  <div className={`settings-card divide-y overflow-hidden ${darkMode ? 'settings-card-dark divide-[#373b44] bg-[#24272e] border-[#373b44]' : 'divide-gray-100 bg-white border-gray-200/90'}`}>
+                  <div className={`settings-card overflow-hidden ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
                     <SettingsFeatureRow
                       Icon={Scan}
-                      title="截图分析"
-                      description="保留区域截图入口，并将视觉内容作为当前问题上下文"
+                      title="区域截图"
+                      description="框选页面区域，随问题一起发给模型"
                       checked={enableScreenshot}
                       onChange={setEnableScreenshot}
                       statusLabel={enableScreenshot ? '已启用' : '已关闭'}
                       statusTone={enableScreenshot ? 'ready' : 'muted'}
                       darkMode={darkMode}
                     />
-                    <SettingsFeatureRow
-                      Icon={Sparkles}
-                      title="模糊渐显效果"
-                      description="流式回答的新内容由模糊逐渐过渡为清晰"
-                      checked={enableBlurReveal}
-                      onChange={setEnableBlurReveal}
-                      statusLabel={enableBlurReveal ? '已启用' : '已关闭'}
-                      statusTone={enableBlurReveal ? 'accent' : 'muted'}
-                      darkMode={darkMode}
-                    />
-                  </div>
-                </section>
-                )}
-                {/* Toolbar and Storage Settings Area */}
-                {(settingsSection === 'interface' || settingsSection === 'storage') && (
-                <div className={`settings-card p-5 border space-y-4 mt-4 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
-                  {/* Toolbar Settings */}
-                  {settingsSection === 'interface' && (
-                  <div className="space-y-3">
-                    <h3 className={`text-[13px] font-bold tracking-wider uppercase ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>工具栏配置</h3>
-                    <div className="space-y-3">
+                    <div className={`space-y-3.5 px-5 pt-4 pb-5 ${darkMode ? 'border-t border-[#373b44]' : 'border-t border-gray-100'}`}>
                       <div className="flex flex-col gap-1.5">
                         <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>默认搜索引擎</label>
                         <CustomSelect
@@ -7062,7 +6999,7 @@ const ChatPDF = () => {
                           </div>
                         )}
                       </div>
-                      <div className="flex flex-col gap-1.5 pt-1">
+                      <div className="flex flex-col gap-1.5">
                         <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>工具栏尺寸</label>
                         <CustomSelect
                           value={toolbarSize}
@@ -7076,10 +7013,62 @@ const ChatPDF = () => {
                       </div>
                     </div>
                   </div>
-                  )}
+                </section>
+                )}
 
-                  {/* Storage Info */}
-                  {settingsSection === 'storage' && (
+                {settingsSection === 'interface' && (
+                <section className="px-1" aria-labelledby="answer-presentation-heading">
+                  <div className="mb-2.5 px-1">
+                    <h3 id="answer-presentation-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>回答呈现</h3>
+                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>出字速度和渐显效果</p>
+                  </div>
+                  <div className={`settings-card overflow-hidden ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
+                    <SettingsFeatureRow
+                      Icon={Sparkles}
+                      title="模糊渐显"
+                      description="新字先模糊再变清晰"
+                      checked={enableBlurReveal}
+                      onChange={setEnableBlurReveal}
+                      statusLabel={enableBlurReveal ? '已启用' : '已关闭'}
+                      statusTone={enableBlurReveal ? 'accent' : 'muted'}
+                      darkMode={darkMode}
+                    />
+                    <div className={`space-y-3.5 px-5 pt-4 pb-5 ${darkMode ? 'border-t border-[#373b44]' : 'border-t border-gray-100'}`}>
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>流式输出速度</label>
+                        <CustomSelect
+                          value={streamSpeed}
+                          onChange={setStreamSpeed}
+                          options={[
+                            { value: 'fast', label: '即时' },
+                            { value: 'normal', label: '平滑（推荐）' },
+                            { value: 'slow', label: '逐字' },
+                            { value: 'off', label: '关闭流式' }
+                          ]}
+                        />
+                        <p className="text-[11px] text-gray-500">流结束后会稍微加快收尾</p>
+                      </div>
+                      {enableBlurReveal && (
+                        <div className="flex flex-col gap-1.5">
+                          <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>模糊强度</label>
+                          <CustomSelect
+                            value={blurIntensity}
+                            onChange={setBlurIntensity}
+                            options={[
+                              { value: 'light', label: '轻度' },
+                              { value: 'medium', label: '中度' },
+                              { value: 'strong', label: '明显' }
+                            ]}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </section>
+                )}
+
+                {settingsSection === 'storage' && (
+                <div className={`settings-card p-5 border space-y-4 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
                   <div>
                     <h3 className={`text-[13px] font-bold tracking-wider uppercase mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>存储信息</h3>
                     {storageInfo ? (
@@ -7120,7 +7109,7 @@ const ChatPDF = () => {
                                 当前文档 AI 缓存
                               </div>
                               <div className={`mt-0.5 text-[11px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
-                                清理总结、大纲、速览和悬浮翻译缓存
+                                清理总结、大纲、速览和翻译缓存
                               </div>
                             </div>
                             <button
@@ -7143,19 +7132,16 @@ const ChatPDF = () => {
                       <div className="text-[12px] text-gray-500 py-2">加载中...</div>
                     )}
                   </div>
-                  )}
                 </div>
                 )}
 
-                {/* Advanced Configuration Section */}
-                {(settingsSection === 'retrieval' || settingsSection === 'interface') && (
+                {settingsSection === 'retrieval' && (
                 <div className={`settings-card p-5 border space-y-4 mt-4 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
                   <h3 className={`text-[13px] font-bold tracking-wider uppercase mb-1 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                    {settingsSection === 'retrieval' ? '检索参数' : '交互效果'}
+                    检索参数
                   </h3>
                   
                   <div className="space-y-3">
-                    {settingsSection === 'retrieval' && (
                     <div className="flex flex-col gap-1.5">
                       <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>邻居上下文扩展</label>
                       <CustomSelect
@@ -7163,49 +7149,16 @@ const ChatPDF = () => {
                         onChange={setNumExpandContextChunk}
                         options={[
                           { value: 0, label: '关闭' },
-                          { value: 1, label: '±1 块（前后各 1 个）' },
-                          { value: 2, label: '±2 块（前后各 2 个）' },
-                          { value: 3, label: '±3 块（前后各 3 个）' },
+                          { value: 1, label: '±1 块' },
+                          { value: 2, label: '±2 块' },
+                          { value: 3, label: '±3 块' },
                         ]}
                       />
-                      <p className="text-[11px] text-gray-500 mt-0.5">命中 chunk 前后各扩展 N 个邻居块作为上下文</p>
+                      <p className="text-[11px] text-gray-500 mt-0.5">命中段前后各带上几块</p>
                     </div>
-                    )}
-
-                    {settingsSection === 'interface' && (
-                    <div className="flex flex-col gap-1.5 pt-2 border-t border-gray-200/50 mt-2">
-                      <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>流式输出速度</label>
-                        <CustomSelect
-                          value={streamSpeed}
-                          onChange={setStreamSpeed}
-                          options={[
-                          { value: 'fast', label: '即时（紧跟模型输出）' },
-                          { value: 'normal', label: '平滑（推荐）' },
-                          { value: 'slow', label: '逐字（更明显的打字感）' },
-                          { value: 'off', label: '关闭流式（直接显示）' }
-                        ]}
-                      />
-                      <p className="text-[11px] text-gray-500 mt-0.5">保持逐字节奏，流结束后只适度加速收尾</p>
-                    </div>
-                    )}
-
-                    {settingsSection === 'interface' && enableBlurReveal && (
-                      <div className="flex flex-col gap-1.5 pt-2 border-t border-gray-200/50 mt-2">
-                        <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>模糊效果强度</label>
-                        <CustomSelect
-                          value={blurIntensity}
-                          onChange={setBlurIntensity}
-                          options={[
-                            { value: 'light', label: '轻度（2px · 0.24 秒）' },
-                            { value: 'medium', label: '中度（4.5px · 0.34 秒）' },
-                            { value: 'strong', label: '明显（7px · 0.44 秒）' }
-                          ]}
-                        />
-                      </div>
-                    )}
                   </div>
 
-                  {settingsSection === 'retrieval' && lastCallInfo && (
+                  {lastCallInfo && (
                     <div className={`mt-4 p-3.5 rounded-[14px] border text-[12px] ${darkMode ? 'bg-[#1d2026] border-[#353941]' : 'bg-gray-50 border-gray-200'}`}>
                       <div className="flex justify-between items-center mb-1.5">
                         <span className="text-gray-500">调用来源</span>
@@ -7258,28 +7211,28 @@ const ChatPDF = () => {
                 <section className="px-1" aria-labelledby="more-settings-heading">
                   <div className="mb-2.5 px-1">
                     <h3 id="more-settings-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>详细设置</h3>
-                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>关键状态直接可见，点击进入完整配置</p>
+                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>点击进入完整配置</p>
                   </div>
                   <div className="grid grid-cols-3 gap-3">
                     {[
                       {
                         Icon: Type,
                         label: '全局设置',
-                        desc: '字体、记忆、联网与配置管理',
+                        desc: '字体、记忆和联网',
                         meta: `${Math.round((globalScale || 1) * 100)}% 界面 · 记忆${enableMemory ? '开启' : '关闭'}`,
                         onClick: () => { setShowSettings(false); setShowGlobalSettings(true); },
                       },
                       {
                         Icon: SlidersHorizontal,
                         label: '对话设置',
-                        desc: '发送、消息、公式与代码显示',
+                        desc: '发送、消息和公式',
                         meta: `${sendShortcut === 'Ctrl+Enter' ? 'Ctrl + Enter' : 'Enter'} 发送 · ${streamOutput ? '流式' : '整段'} · ${messageStyle === 'bubble' ? '气泡' : '简洁'}`,
                         onClick: () => { setShowSettings(false); setShowChatSettings(true); },
                       },
                       {
                         Icon: ScanText,
                         label: '解析设置',
-                        desc: '主路线、OCR、表格与视觉策略',
+                        desc: '上传路线和 OCR',
                         meta: selectedParseRoute === 'local' ? '本地全程 · 设备内处理' : 'MinerU 全程 · 结构化解析',
                         onClick: () => { setShowSettings(false); setShowOCRSettings(true); },
                       },
@@ -7423,99 +7376,151 @@ const FeedbackModal = ({ onSubmit, onClose }) => {
   );
 };
 
-// 自定义下拉选择组件
+// 下拉挂到 body，避免被 settings-card 的 overflow-hidden / 滚动容器裁切
+const SELECT_MENU_MAX_HEIGHT = 240;
+const SELECT_MENU_GAP = 6;
+const SELECT_VIEWPORT_PAD = 8;
+
+const getSelectMenuStyle = (trigger, optionCount) => {
+  const rect = trigger.getBoundingClientRect();
+  const estimatedHeight = Math.min(SELECT_MENU_MAX_HEIGHT, optionCount * 42 + 16);
+  const spaceBelow = window.innerHeight - rect.bottom - SELECT_VIEWPORT_PAD;
+  const spaceAbove = rect.top - SELECT_VIEWPORT_PAD;
+  const opensUpward = spaceBelow < Math.min(estimatedHeight, 160) && spaceAbove > spaceBelow;
+  const available = (opensUpward ? spaceAbove : spaceBelow) - SELECT_MENU_GAP;
+  const maxHeight = Math.max(96, Math.min(SELECT_MENU_MAX_HEIGHT, available));
+  const left = Math.max(
+    SELECT_VIEWPORT_PAD,
+    Math.min(rect.left, window.innerWidth - rect.width - SELECT_VIEWPORT_PAD)
+  );
+
+  return {
+    opensUpward,
+    style: {
+      position: 'fixed',
+      left,
+      width: rect.width,
+      zIndex: 80,
+      maxHeight,
+      ...(opensUpward
+        ? { bottom: window.innerHeight - rect.top + SELECT_MENU_GAP, top: 'auto' }
+        : { top: rect.bottom + SELECT_MENU_GAP, bottom: 'auto' }),
+    },
+  };
+};
+
 const CustomSelect = ({ value, onChange, options, unavailableLabel }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [opensUpward, setOpensUpward] = useState(false);
+  const [menuPlacement, setMenuPlacement] = useState(null);
   const containerRef = useRef(null);
+  const menuRef = useRef(null);
+
+  const selectedOption = options.find(opt => opt.value === value);
+  const selectedLabel = selectedOption?.label || unavailableLabel || '请选择';
+  const opensUpward = Boolean(menuPlacement?.opensUpward);
+  const menuStyle = menuPlacement?.style;
+
+  const updateMenuPosition = useCallback(() => {
+    const trigger = containerRef.current;
+    if (!trigger) return;
+    setMenuPlacement(getSelectMenuStyle(trigger, options.length));
+  }, [options.length]);
 
   useEffect(() => {
     const handleClickOutside = (event) => {
-      if (containerRef.current && !containerRef.current.contains(event.target)) {
-        setIsOpen(false);
-      }
+      if (containerRef.current?.contains(event.target)) return;
+      if (menuRef.current?.contains(event.target)) return;
+      setIsOpen(false);
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const selectedOption = options.find(opt => opt.value === value);
-  const selectedLabel = selectedOption?.label || unavailableLabel || '请选择';
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    updateMenuPosition();
+
+    const handleReposition = () => updateMenuPosition();
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') setIsOpen(false);
+    };
+
+    window.addEventListener('resize', handleReposition);
+    document.addEventListener('scroll', handleReposition, true);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('resize', handleReposition);
+      document.removeEventListener('scroll', handleReposition, true);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen, updateMenuPosition]);
 
   const toggleMenu = () => {
     if (isOpen) {
       setIsOpen(false);
       return;
     }
-
     const trigger = containerRef.current;
     if (trigger) {
-      const triggerRect = trigger.getBoundingClientRect();
-      let boundary = null;
-      let ancestor = trigger.parentElement;
-      while (ancestor) {
-        const overflowY = window.getComputedStyle(ancestor).overflowY;
-        if (overflowY === 'auto' || overflowY === 'scroll') {
-          boundary = ancestor.getBoundingClientRect();
-          break;
-        }
-        ancestor = ancestor.parentElement;
-      }
-
-      const menuHeight = Math.min(240, options.length * 42 + 12);
-      const safeBoundary = boundary || {
-        top: 8,
-        bottom: window.innerHeight - 8,
-      };
-      const roomAbove = triggerRect.top - safeBoundary.top - 8;
-      const roomBelow = safeBoundary.bottom - triggerRect.bottom - 8;
-      setOpensUpward(roomBelow < Math.min(menuHeight, 160) && roomAbove > roomBelow);
+      setMenuPlacement(getSelectMenuStyle(trigger, options.length));
     }
-
     setIsOpen(true);
   };
+
+  const menuNode = (
+    <AnimatePresence>
+      {isOpen && menuStyle && (
+        <motion.div
+          ref={menuRef}
+          initial={{ opacity: 0, y: opensUpward ? 5 : -5, scale: 0.95 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: opensUpward ? 5 : -5, scale: 0.95 }}
+          transition={{ duration: 0.15 }}
+          style={menuStyle}
+          className="p-1.5 bg-white/95 dark:bg-[#1a1d21]/95 backdrop-blur-xl border border-gray-100 dark:border-white/10 rounded-[16px] shadow-[0_8px_30px_rgb(0,0,0,0.12)] overflow-y-auto"
+        >
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => {
+                onChange(option.value);
+                setIsOpen(false);
+              }}
+              className={`w-full text-left px-3 py-2.5 rounded-[10px] text-[13px] transition-colors flex items-center justify-between ${
+                value === option.value
+                  ? 'bg-[#FFA07A]/10 text-[#B85F47] font-semibold'
+                  : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/50 dark:hover:bg-white/5'
+              }`}
+            >
+              {option.label}
+              {value === option.value && <Check size={14} className="text-[#B85F47]" />}
+            </button>
+          ))}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
 
   return (
     <div className="relative w-full" ref={containerRef}>
       <button
+        type="button"
         onClick={toggleMenu}
-        className="w-full flex items-center justify-between p-2.5 rounded-[12px] bg-white/50 dark:bg-black/20 border border-gray-200 dark:border-white/10 text-sm hover:border-[#FFA07A]/50 transition-all outline-none"
+        aria-expanded={isOpen}
+        aria-haspopup="listbox"
+        className={`w-full flex items-center justify-between p-2.5 rounded-[12px] bg-white/50 dark:bg-black/20 border text-sm transition-all outline-none ${
+          isOpen
+            ? 'border-[#FFA07A] shadow-[0_0_0_3px_rgba(255,160,122,0.14)]'
+            : 'border-gray-200 dark:border-white/10 hover:border-[#FFA07A]/50'
+        }`}
       >
         <span className="min-w-0 flex-1 truncate pr-3 text-left text-gray-700 dark:text-gray-300 font-medium" title={selectedLabel}>
           {selectedLabel}
         </span>
         <ChevronDown size={14} className={`text-gray-500 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} />
       </button>
-
-      <AnimatePresence>
-        {isOpen && (
-          <motion.div
-            initial={{ opacity: 0, y: opensUpward ? 5 : -5, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: opensUpward ? 5 : -5, scale: 0.95 }}
-            transition={{ duration: 0.15 }}
-            className={`absolute z-50 w-full p-1.5 bg-white/90 dark:bg-[#1a1d21]/95 backdrop-blur-xl border border-gray-100 dark:border-white/10 rounded-[16px] shadow-[0_8px_30px_rgb(0,0,0,0.08)] max-h-60 overflow-y-auto ${opensUpward ? 'bottom-full mb-1.5' : 'top-full mt-1.5'}`}
-          >
-            {options.map((option) => (
-              <button
-                key={option.value}
-                onClick={() => {
-                  onChange(option.value);
-                  setIsOpen(false);
-                }}
-                className={`w-full text-left px-3 py-2.5 rounded-[10px] text-[13px] transition-colors flex items-center justify-between ${
-                  value === option.value
-                    ? 'bg-[#FFA07A]/10 text-[#B85F47] font-semibold'
-                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/50 dark:hover:bg-white/5'
-                }`}
-              >
-                {option.label}
-                {value === option.value && <Check size={14} className="text-[#B85F47]" />}
-              </button>
-            ))}
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {typeof document !== 'undefined' ? createPortal(menuNode, document.body) : menuNode}
     </div>
   );
 };

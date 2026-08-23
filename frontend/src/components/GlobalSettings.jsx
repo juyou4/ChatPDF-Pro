@@ -158,7 +158,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                             <div className="space-y-4">
                                 <div>
                                     <h3 className="text-[17px] font-bold text-gray-900">全局字体设置</h3>
-                                    <p className="text-[13px] text-gray-500 mt-1">选择用于界面与助手的标题、正文配对字体。</p>
+                                    <p className="text-[13px] text-gray-500 mt-1">界面和助手的标题、正文字体</p>
                                 </div>
 
                                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -201,7 +201,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                 <div className="settings-card bg-white rounded-[20px] p-2 pl-4 mt-2 flex items-center justify-between gap-3">
                                     <div className="flex-1 min-w-0">
                                         <div className="text-[13px] font-bold text-gray-800 truncate">自定义 Google 字体</div>
-                                        <div className="text-[11px] text-gray-500 truncate">输入任何 Google Font 名称以自动加载。</div>
+                                        <div className="text-[11px] text-gray-500 truncate">输入 Google Font 名称即可加载</div>
                                     </div>
                                     <div className="flex items-center gap-1.5 bg-white pl-3 pr-1.5 py-1.5 rounded-2xl border border-gray-200/70 w-[200px] sm:w-[240px] flex-shrink-0">
                                         <ExternalLink className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
@@ -234,7 +234,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         </div>
                                         <div>
                                             <h3 className="text-[14px] font-bold text-gray-900">智能记忆系统</h3>
-                                            <p className="text-[12px] text-gray-500">AI 将记住你的对话偏好和重要信息</p>
+                                            <p className="text-[12px] text-gray-500">记住偏好和重要信息</p>
                                         </div>
                                     </div>
                                     <div className="flex items-center gap-3">
@@ -251,7 +251,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         </div>
                                         <div>
                                             <h3 className="text-[14px] font-bold text-gray-900">论文订阅库</h3>
-                                            <p className="text-[12px] text-gray-500">按订阅追踪新论文，反馈会调整后续相关性排序</p>
+                                            <p className="text-[12px] text-gray-500">按订阅追踪新论文</p>
                                         </div>
                                     </div>
                                     <button onClick={() => setShowPaperLibraryPanel(true)} className="text-[12px] font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-xl transition-colors">
@@ -262,7 +262,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                     <div className="mt-4 space-y-3">
                                         <MemoryOverrideSlider
                                             label="记忆检索条数"
-                                            desc="每轮最多召回多少条历史记忆。调高更全面，也更占上下文。"
+                                            desc="每轮最多带几条记忆"
                                             value={memoryTopK}
                                             onChange={setMemoryTopK}
                                             min={1}
@@ -272,7 +272,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         />
                                         <MemoryOverrideSlider
                                             label="记忆注入预算"
-                                            desc="记忆最多占用的 token 数。中文按每字 1 token 估算，调低会先丢弃低优先层。"
+                                            desc="记忆最多占用多少 token"
                                             value={memoryInjectionBudget}
                                             onChange={setMemoryInjectionBudget}
                                             min={100}
@@ -284,9 +284,8 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                             <div className="flex items-start justify-between gap-3">
                                                 <div className="min-w-0 flex-1">
                                                     <div className="text-[13px] font-bold text-gray-800">共享 / 演示模式</div>
-                                                    <div className="text-[11px] text-gray-500 mt-0.5 leading-relaxed">
-                                                        开启后个人画像与跨文档对话摘要不会进入上下文，只保留当前文档的事实。
-                                                        录屏、答辩或把会话分享给他人时使用。
+                                                    <div className="text-[11px] text-gray-500 mt-0.5 leading-snug">
+                                                        只保留当前文档事实，适合录屏或分享
                                                     </div>
                                                 </div>
                                                 <ToggleSwitch
@@ -350,7 +349,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         {needsApiKey && (
                                             <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80 space-y-2">
                                                 <div className="flex items-center justify-between px-1">
-                                                    <span className="text-[12px] font-bold text-gray-700">API Key API 密钥</span>
+                                                    <span className="text-[12px] font-bold text-gray-700">API 密钥</span>
                                                     {currentSearchProvider.url && (
                                                         <a href={currentSearchProvider.url} target="_blank" rel="noreferrer" className="text-[11px] text-emerald-600 group flex items-center gap-1 hover:text-emerald-700">
                                                             获取 Key <ExternalLink className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
@@ -374,7 +373,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                         <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80 flex items-center justify-between gap-3">
                                             <div className="min-w-0 px-1">
                                                 <div className="text-[12px] font-bold text-gray-700">附加文档上下文</div>
-                                                <div className="text-[11px] text-gray-500 mt-0.5">向搜索服务发送文件名和相关选中文本</div>
+                                                <div className="text-[11px] text-gray-500 mt-0.5">搜索时带上文件名和选中文本</div>
                                             </div>
                                             <ToggleSwitch
                                                 checked={webSearchIncludeDocumentContext}

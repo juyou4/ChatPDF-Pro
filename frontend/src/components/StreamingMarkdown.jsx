@@ -24,6 +24,8 @@ import { visit } from 'unist-util-visit';
 import CitationLink from './CitationLink';
 import WebCitationLink from './WebCitationLink';
 import { processLatexBrackets } from '../utils/processLatexBrackets.js';
+import remarkDisableConstructs from '../utils/remarkDisableConstructs.js';
+import { getCommittedPrefix, getStreamedSourceText, hydrateStreamingMath } from '../utils/streamingMath';
 import { useChatParams } from '../contexts/ChatParamsContext';
 
 // 模型回答、网页摘录和文档文本都属于不可信输入。保留现有的 cite/
@@ -34,7 +36,28 @@ const UNSAFE_MARKDOWN_TAGS = new Set([
   'picture', 'script', 'source', 'style', 'svg', 'video',
 ]);
 
-const CHATPDF_MARKDOWN_SCHEMA = {
+const withoutClassName = (attrs = []) => (
+  attrs.filter((item) => item !== 'className' && !(Array.isArray(item) && item[0] === 'className'))
+);
+
+// remark-math 会先变成 .math-inline / .math-display，rehype-katex 靠这些 class 找节点。
+// 之前 span 的 className 只放行 blur-reveal，模糊关闭走整篇 ReactMarkdown 时公式会被洗掉。
+const MATH_CLASS_NAME = [
+  'className',
+  'math',
+  'math-inline',
+  'math-display',
+  'language-math',
+  'katex',
+  'katex-html',
+  'katex-mathml',
+  'katex-error',
+  'katex-display',
+  'blur-reveal-animate',
+  /^(blur-stagger-[0-8]|katex.*|math.*)$/,
+];
+
+export const CHATPDF_MARKDOWN_SCHEMA = {
   ...defaultSchema,
   tagNames: [...new Set([...(defaultSchema.tagNames || []), 'cite', 'wsource'])]
     .filter((tag) => !UNSAFE_MARKDOWN_TAGS.has(tag)),
@@ -42,12 +65,14 @@ const CHATPDF_MARKDOWN_SCHEMA = {
     ...defaultSchema.attributes,
     cite: [...(defaultSchema.attributes?.cite || []), 'dataRef', 'data-ref'],
     wsource: [...(defaultSchema.attributes?.wsource || []), 'dataIdx', 'data-idx'],
-    span: [
-      ...(defaultSchema.attributes?.span || []),
-      ['className', 'blur-reveal-animate', /^blur-stagger-[0-8]$/],
-    ],
+    span: [...withoutClassName(defaultSchema.attributes?.span), MATH_CLASS_NAME],
+    div: [...withoutClassName(defaultSchema.attributes?.div), MATH_CLASS_NAME],
+    code: [...withoutClassName(defaultSchema.attributes?.code), MATH_CLASS_NAME],
   },
 };
+
+// 与 Cherry Studio 一致：只有正文里真有 HTML 才走 raw。cite / wsource 是我们自己注入的。
+const MARKDOWN_HTML_RE = /<(cite|wsource|style|p|div|span|b|i|strong|em|ul|ol|li|table|tr|td|th|thead|tbody|h[1-6]|blockquote|pre|code|br|hr|details|summary)\b/i;
 
 const safeExternalHref = (href) => {
   if (typeof href !== 'string' || !href.trim()) return null;
@@ -323,7 +348,11 @@ const CollapsiblePre = ({ children, ...props }) => {
 };
 
 export const isRefDirectWriteStreaming = (props) => (
-  Boolean(props?.isStreaming && props?.streamingRef != null)
+  Boolean(
+    props?.isStreaming
+    && props?.streamingRef != null
+    && (props?.enableBlurReveal || typeof props?.subscribeDisplayedText !== 'function')
+  )
 );
 
 export const streamingMarkdownAreEqual = (prevProps, nextProps) => {
@@ -339,15 +368,19 @@ export const streamingMarkdownAreEqual = (prevProps, nextProps) => {
     (prevProps.streamingRef != null) === (nextProps.streamingRef != null) &&
     prevProps.citations === nextProps.citations &&
     prevProps.webSearchSources === nextProps.webSearchSources &&
-    prevProps.suppressInitialDots === nextProps.suppressInitialDots
+    prevProps.suppressInitialDots === nextProps.suppressInitialDots &&
+    prevProps.subscribeCommittedPrefix === nextProps.subscribeCommittedPrefix &&
+    prevProps.subscribeDisplayedText === nextProps.subscribeDisplayedText
   );
 };
 
 const StreamingMarkdown = React.memo(
-  ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null, streamingRef = null, webSearchSources = null, suppressInitialDots = false, hydrateDirectWriteContent = true }) => {
+  ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null, streamingRef = null, webSearchSources = null, suppressInitialDots = false, hydrateDirectWriteContent = true, subscribeCommittedPrefix = null, subscribeDisplayedText = null }) => {
     const containerRef = useRef(null);
     const previousAnimatedLengthRef = useRef(0);
     const [hasDirectWriteContent, setHasDirectWriteContent] = useState(false);
+    const [committedPrefix, setCommittedPrefix] = useState('');
+    const [liveDisplayedText, setLiveDisplayedText] = useState('');
     const { codeCollapsible, codeWrappable, codeShowLineNumbers, mathEngine, mathEnableSingleDollar } = useChatParams();
     const [mathjaxReady, setMathjaxReady] = useState(!!_rehypeMathjaxSvg);
 
@@ -358,14 +391,38 @@ const StreamingMarkdown = React.memo(
       }
     }, [mathEngine]);
 
-    // ref 直写模式：流式输出期间通过 streamingRef 直接更新 DOM，
-    // 不经过 React 状态更新和 ReactMarkdown 渲染
-    const isRefDirectWrite = isStreaming && streamingRef != null;
+    // 模糊开启，或思考区这种没有全文订阅的流，继续 ref 直写。
+    // 正文关闭模糊时走 Cherry Studio 路线：每帧 ReactMarkdown。
+    const isRefDirectWrite = Boolean(
+      isStreaming
+      && streamingRef != null
+      && (enableBlurReveal || typeof subscribeDisplayedText !== 'function')
+    );
+
+    useEffect(() => {
+      if (!isRefDirectWrite || typeof subscribeCommittedPrefix !== 'function') {
+        setCommittedPrefix('');
+        return undefined;
+      }
+      return subscribeCommittedPrefix(setCommittedPrefix);
+    }, [isRefDirectWrite, subscribeCommittedPrefix]);
+
+    useEffect(() => {
+      if (isRefDirectWrite || typeof subscribeDisplayedText !== 'function') {
+        setLiveDisplayedText('');
+        return undefined;
+      }
+      return subscribeDisplayedText(setLiveDisplayedText);
+    }, [isRefDirectWrite, subscribeDisplayedText]);
 
     const processedContent = useMemo(() => {
-      // ref 直写模式下不需要处理内容（由 DOM 直接显示纯文本）
+      // ref 直写模式下整篇正文仍走 DOM 尾巴；已完成的标题/段落另见 processedCommitted
       if (isRefDirectWrite) return '';
-      let text = content || '';
+      let text = (
+        isStreaming && typeof subscribeDisplayedText === 'function'
+          ? liveDisplayedText
+          : (content || '')
+      );
       if (mathEngine !== 'none') {
         text = processLatexBrackets(text);
       }
@@ -376,18 +433,37 @@ const StreamingMarkdown = React.memo(
         text = processWebSearchCitationRefs(text, webSearchSources);
       }
       return text;
-    }, [content, citations, webSearchSources, isStreaming, isRefDirectWrite, mathEngine]);
+    }, [content, citations, webSearchSources, isStreaming, isRefDirectWrite, liveDisplayedText, mathEngine, subscribeDisplayedText]);
+
+    const processedCommitted = useMemo(() => {
+      if (!isRefDirectWrite || !committedPrefix) return '';
+      let text = committedPrefix;
+      if (mathEngine !== 'none') {
+        text = processLatexBrackets(text);
+      }
+      if (citations && citations.length > 0) {
+        text = processCitationRefs(text, citations);
+      }
+      if (webSearchSources && webSearchSources.length > 0) {
+        text = processWebSearchCitationRefs(text, webSearchSources);
+      }
+      return text;
+    }, [citations, committedPrefix, isRefDirectWrite, mathEngine, webSearchSources]);
 
     const shouldUseSingleDollarMath = React.useMemo(() => {
       if (mathEnableSingleDollar) return true;
       // 用户关闭单 $ 时，仅在明显 LaTeX 片段场景下兜底开启，避免公式整体失效
-      return /(^|[^\\])\$[^$\n]*\\[A-Za-z]{2,}[^$\n]*\$/m.test(processedContent || '');
-    }, [mathEnableSingleDollar, processedContent]);
+      return /(^|[^\\])\$[^$\n]*\\[A-Za-z]{2,}[^$\n]*\$/m.test(processedContent || processedCommitted || '');
+    }, [mathEnableSingleDollar, processedCommitted, processedContent]);
 
     // 基础 remark 插件数组缓存：配置不变时保持引用稳定，
     // 避免 ReactMarkdown 因插件引用变化而重新初始化（需求 6.3）
     const baseRemarkPlugins = React.useMemo(() => {
-      const plugins = [remarkGfm];
+      const plugins = [
+        [remarkGfm, { singleTilde: false }],
+        // Cherry Studio：关掉缩进代码块，公式行前导空格不会变成 <pre><code>
+        remarkDisableConstructs(['codeIndented']),
+      ];
       if (mathEngine !== 'none') {
         plugins.push([remarkMath, { singleDollarTextMath: shouldUseSingleDollarMath }]);
       }
@@ -424,8 +500,13 @@ const StreamingMarkdown = React.memo(
       isStreaming,
     ]);
 
-      const rehypePlugins = React.useMemo(() => {
-      const plugins = [rehypeRaw, [rehypeSanitize, CHATPDF_MARKDOWN_SCHEMA]];
+    const rehypePlugins = React.useMemo(() => {
+      const plugins = [];
+      const markdownSource = processedContent || processedCommitted || '';
+      // Cherry Studio：没有 HTML 就不走 raw/sanitize，避免洗掉 math class。
+      if (MARKDOWN_HTML_RE.test(markdownSource)) {
+        plugins.push(rehypeRaw, [rehypeSanitize, CHATPDF_MARKDOWN_SCHEMA]);
+      }
       if (mathEngine === 'KaTeX') {
         plugins.push([rehypeKatex, { strict: false, trust: false, output: 'html' }]);
       } else if (mathEngine === 'MathJax' && _rehypeMathjaxSvg) {
@@ -435,7 +516,7 @@ const StreamingMarkdown = React.memo(
       }
       plugins.push(rehypeHighlight);
       return plugins;
-    }, [mathEngine, mathjaxReady]);
+    }, [mathEngine, mathjaxReady, processedCommitted, processedContent]);
 
     useEffect(() => {
       if (!content || content.length === 0) {
@@ -452,8 +533,10 @@ const StreamingMarkdown = React.memo(
       : '';
     const showWaitingDots = !suppressInitialDots && isStreaming && (
       isRefDirectWrite
-        ? !hasDirectWriteContent && (!content || content.trim().length === 0)
-        : (!content || content.trim().length === 0)
+        ? !hasDirectWriteContent && !committedPrefix && (!content || content.trim().length === 0)
+        : !String(
+          (typeof subscribeDisplayedText === 'function' ? liveDisplayedText : content) || ''
+        ).trim()
     );
 
     useEffect(() => {
@@ -472,11 +555,24 @@ const StreamingMarkdown = React.memo(
       // 思考正文不能靠这个回填：首包「好的」会把后续 token 写到被卸掉的节点上。
       if (
         hydrateDirectWriteContent
-        && (el.textContent || '').trim().length === 0
+        && !getStreamedSourceText(el).trim()
         && content
         && content.trim().length > 0
       ) {
-        el.textContent = content;
+        const committed = getCommittedPrefix(content, {
+          enableMath: mathEngine !== 'none',
+          enableSingleDollar: mathEnableSingleDollar !== false,
+        });
+        const tail = content.slice(committed.length);
+        el.textContent = tail;
+        if (mathEngine !== 'none') {
+          hydrateStreamingMath(el, tail, {
+            enableSingleDollar: Boolean(
+              mathEnableSingleDollar
+              || /(^|[^\\])\$[^$\n]*\\[A-Za-z]{2,}[^$\n]*\$/m.test(content)
+            ),
+          });
+        }
       }
 
       let observer = null;
@@ -492,7 +588,7 @@ const StreamingMarkdown = React.memo(
       observer.observe(el, { childList: true, subtree: true, characterData: true });
 
       return () => observer.disconnect();
-    }, [isRefDirectWrite, streamingRef, content, hydrateDirectWriteContent]);
+    }, [isRefDirectWrite, streamingRef, content, hydrateDirectWriteContent, mathEngine, mathEnableSingleDollar]);
 
     const citationMap = useMemo(() => {
       if (!citations || citations.length === 0) return null;
@@ -619,13 +715,23 @@ const StreamingMarkdown = React.memo(
         className={`prose prose-sm max-w-full dark:prose-invert message-content leading-7 ${streamingClass}`}
       >
         {isRefDirectWrite ? (
-          // ref 直写模式：流式输出期间显示纯文本容器，
-          // useSmoothStream 通过 streamingRef 直接写入 textContent，
-          // 避免触发 React 状态更新和 ReactMarkdown 重渲染（需求 4.2）
+          // 已完成的标题/段落用 Markdown 渲染；当前行仍走 ref 直写 + 闭合公式水合。
           <div className="relative min-h-[20px]">
+            <div className="streaming-md-committed">
+              {processedCommitted ? (
+                <ReactMarkdown
+                  remarkPlugins={baseRemarkPlugins}
+                  rehypePlugins={rehypePlugins}
+                  components={markdownComponents}
+                >
+                  {processedCommitted}
+                </ReactMarkdown>
+              ) : null}
+            </div>
             <div
+              key="streaming-md-tail"
               ref={streamingRef}
-              className={`whitespace-pre-wrap break-words${enableBlurReveal ? ` blur-intensity-${blurIntensity}` : ''}`}
+              className={`streaming-md-tail whitespace-pre-wrap break-words${enableBlurReveal ? ` blur-intensity-${blurIntensity}` : ''}`}
             />
             {showWaitingDots && (
               <div className="streaming-dots absolute left-0 top-0">

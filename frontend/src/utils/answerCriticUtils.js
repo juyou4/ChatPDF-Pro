@@ -22,12 +22,12 @@ export const sanitizeCriticText = (value) => {
 
 // issue 分类 → 展示样式。未知类型回落到 other，避免后端新增枚举时前端崩掉。
 export const CRITIC_ISSUE_TYPE_META = {
-  hallucination: { label: '无据论断', className: 'text-red-700' },
-  unsupported_number: { label: '数值无依据', className: 'text-red-700' },
-  missing_citation: { label: '缺少引用', className: 'text-amber-700' },
-  wrong_citation: { label: '引用不匹配', className: 'text-amber-700' },
-  overreach: { label: '结论过强', className: 'text-orange-700' },
-  other: { label: '其他问题', className: 'text-slate-600' },
+  hallucination: { label: '无据论断', className: 'text-[#5c564f]' },
+  unsupported_number: { label: '数值无依据', className: 'text-[#5c564f]' },
+  missing_citation: { label: '缺少引用', className: 'text-[#5c564f]' },
+  wrong_citation: { label: '引用不匹配', className: 'text-[#5c564f]' },
+  overreach: { label: '结论过强', className: 'text-[#5c564f]' },
+  other: { label: '其他问题', className: 'text-[#5c564f]' },
 };
 
 export const getCriticIssueTypeMeta = (issueType) => (
@@ -49,6 +49,9 @@ export const buildCriticDetailLines = (critic) => {
       text: item && typeof item === 'object' ? item.text : item,
       issueType: item && typeof item === 'object' ? item.issue_type : undefined,
       claimSpan: item && typeof item === 'object' ? item.claim_span : '',
+      evidenceRefs: item && typeof item === 'object' && Array.isArray(item.evidence_refs)
+        ? item.evidence_refs
+        : [],
     }))
     : (Array.isArray(critic.issues) ? critic.issues : []).map((text) => ({ text }));
 
@@ -63,6 +66,7 @@ export const buildCriticDetailLines = (critic) => {
       text,
       issueType: candidate?.issueType,
       claimSpan: sanitizeCriticText(candidate?.claimSpan),
+      evidenceRefs: Array.isArray(candidate?.evidenceRefs) ? candidate.evidenceRefs : [],
     });
   });
   return lines;
@@ -76,6 +80,25 @@ export const hasCitationRisk = (critic) => {
   if (!critic || typeof critic !== 'object') return false;
   if (typeof critic.citation_risk === 'boolean') return critic.citation_risk;
   return Number(critic?.citation_coverage?.uncited_factual_count || 0) > 0;
+};
+
+export const hasOverreachRisk = (critic) => {
+  if (!critic || typeof critic !== 'object') return false;
+  if (typeof critic.overreach_risk === 'boolean') return critic.overreach_risk;
+  const details = Array.isArray(critic.issue_details) ? critic.issue_details : [];
+  return details.some((item) => item && item.issue_type === 'overreach');
+};
+
+export const formatEvidenceRefs = (refs) => {
+  if (!Array.isArray(refs) || refs.length === 0) return '';
+  const markers = [];
+  refs.forEach((value) => {
+    const ref = Number(value);
+    if (!Number.isInteger(ref) || ref <= 0) return;
+    const marker = `[${ref}]`;
+    if (!markers.includes(marker)) markers.push(marker);
+  });
+  return markers.join('');
 };
 
 /**

@@ -4,7 +4,7 @@
 1. 按 intent.task 生成科学文体指令
 2. 拒答哨兵（cannot answer）与句级引用约束
 3. 确定性标签 Certain / Partial / Unsure / Refused
-4. 对 critic 结果做学术向后处理（缺引用 claim 检测）
+4. 对 critic 结果做学术向后处理：缺引用与过强结论分流，高分句只补 [n]
 
 不负责检索；只约束「怎么写答案」与「怎么标可信度」。
 """
@@ -60,12 +60,32 @@ _CITATION_PROTOCOL_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 粗略「事实 claim」信号：含数字、方法/指标词、比较词时更需要引用
-_FACTUAL_CLAIM_RE = re.compile(
+# 正文里是否还有可独立成答的内容（拒答判定）。比「必须引用」更宽：
+# 方法概述也可以算有实质，不能因为没写数字就被当成整题拒答。
+_SUBSTANCE_RE = re.compile(
     r"(?:\d+(?:\.\d+)?%?|"
     r"准确率|精度|召回|提升|下降|优于|低于|高于|表明|证明|提出|采用|达到|"
     r"accuracy|precision|recall|f1|bleu|outperform|propose|achieve|show|demonstrate|"
     r"method|model|dataset|baseline|ablation)",
+    re.IGNORECASE,
+)
+
+# 必须带 [n] 的事实：数值（去掉图表编号后）和显式比较。
+# 不再把「提出/采用/method/准确率」单独当成缺引用。
+_MUST_CITE_RE = re.compile(
+    r"(?:\d+(?:\.\d+)?%?|"
+    r"提升|下降|优于|低于|高于|"
+    r"outperform)",
+    re.IGNORECASE,
+)
+
+# 只把真正过强的升华句标成 overclaim。alignment 里的 is_overclaim_text
+# 更宽（含「说明/因此」），那只用来阻止弱证据补标，不能拿来弹横幅。
+_STRONG_OVERCLAIM_RE = re.compile(
+    r"(?:解决了|攻克了|突破了|核心难题|根本问题|"
+    r"最高|最低|最佳|最差|显著|唯一|首次|"
+    r"导致|造成|归因于|"
+    r"\b(?:best|worst|state[- ]of[- ]the[- ]art|significant(?:ly)?|solved)\b)",
     re.IGNORECASE,
 )
 
@@ -290,7 +310,7 @@ def _answer_has_grounded_substance(answer: str) -> bool:
             continue
         if _TRANSITION_RE.match(cleaned):
             continue
-        if _FACTUAL_CLAIM_RE.search(_STRUCTURAL_REF_RE.sub(" ", cleaned)):
+        if _SUBSTANCE_RE.search(_STRUCTURAL_REF_RE.sub(" ", cleaned)):
             factual += 1
     return factual >= 1
 
@@ -468,37 +488,173 @@ def _full_document_summary_coverage(retrieval_meta: Optional[dict]) -> dict[str,
     return dict(value) if isinstance(value, dict) else {}
 
 
+def classify_citation_need(sentence: str) -> str:
+    """Return ``must_cite``, ``overclaim``, or ``none`` for one sentence."""
+    cleaned = str(sentence or "").strip()
+    if len(cleaned) < 8:
+        return "none"
+    if _CITATION_PROTOCOL_LINE_RE.match(cleaned):
+        return "none"
+    if _TRANSITION_RE.match(cleaned):
+        return "none"
+    probe = _STRUCTURAL_REF_RE.sub(" ", cleaned)
+    if _MUST_CITE_RE.search(probe):
+        return "must_cite"
+    if _STRONG_OVERCLAIM_RE.search(probe):
+        return "overclaim"
+    return "none"
+
+
+def _iter_uncited_sentences(answer: str) -> list[tuple[str, str]]:
+    text = strip_citation_protocol_block(answer)
+    if not text:
+        return []
+    parts = [part.strip() for part in split_sentences(text) if part.strip()]
+    if len(parts) <= 1 and len(text) > 80:
+        parts = [part.strip() for part in re.split(r"[。；;]\s*", text) if part.strip()]
+    classified: list[tuple[str, str]] = []
+    for sentence in parts:
+        kind = classify_citation_need(sentence)
+        if kind == "none":
+            continue
+        classified.append((sentence, kind))
+    return classified
+
+
+def suggest_citation_refs(
+    sentence: str,
+    citations: Optional[Sequence[dict]] = None,
+    bindings: Optional[Sequence[dict]] = None,
+    *,
+    min_score: float = 0.18,
+    limit: int = 2,
+) -> list[int]:
+    """Best authorized ``[n]`` for a sentence; empty when support is too weak."""
+    span = str(sentence or "").strip()
+    if not span:
+        return []
+    for item in bindings or []:
+        if not isinstance(item, dict):
+            continue
+        claim = str(item.get("claim_text") or "").strip()
+        refs = []
+        for raw in item.get("refs") or []:
+            try:
+                ref = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if ref > 0 and ref not in refs:
+                refs.append(ref)
+        if claim and refs and (claim in span or span in claim):
+            return refs[: max(1, int(limit))]
+    try:
+        from services.citation_alignment_service import rank_claim_evidence
+    except Exception:
+        return []
+    ranked = rank_claim_evidence(span, list(citations or []))
+    if not ranked or float(ranked[0][0]) < float(min_score):
+        return []
+    refs = []
+    for score, ref, _citation in ranked:
+        if float(score) < float(min_score):
+            break
+        if int(ref) not in refs:
+            refs.append(int(ref))
+        if len(refs) >= max(1, int(limit)):
+            break
+    return refs
+
+
+def fill_supported_citation_markers(
+    answer: str,
+    citations: Optional[Sequence[dict]] = None,
+    *,
+    min_score: float = 0.24,
+    overclaim_min_score: float = 0.45,
+) -> dict[str, Any]:
+    """Add ``[n]`` to high-support sentences only. Never rewrite the wording."""
+    text = str(answer or "")
+    if not text.strip() or not citations:
+        return {"answer": text, "filled_count": 0, "fills": []}
+    try:
+        from services.citation_alignment_service import (
+            OVERCLAIM_ATTACH_MIN_SCORE,
+            attach_inline_refs,
+            rank_claim_evidence,
+            _is_conservative_claim,
+        )
+    except Exception:
+        return {"answer": text, "filled_count": 0, "fills": []}
+
+    attach_floor = {
+        "must_cite": max(0.0, float(min_score)),
+        "overclaim": max(float(min_score), float(overclaim_min_score or OVERCLAIM_ATTACH_MIN_SCORE)),
+    }
+    fills: list[dict[str, Any]] = []
+    rewritten = text
+    # Replace from the end so earlier offsets stay valid.
+    targets: list[tuple[int, str, str]] = []
+    for sentence, kind in _iter_uncited_sentences(rewritten):
+        if _CITATION_RE.search(sentence):
+            continue
+        if _is_conservative_claim(sentence):
+            continue
+        start = rewritten.rfind(sentence)
+        if start < 0:
+            continue
+        targets.append((start, sentence, kind))
+    targets.sort(key=lambda item: item[0], reverse=True)
+
+    for start, sentence, kind in targets:
+        ranked = rank_claim_evidence(sentence, list(citations))
+        if not ranked:
+            continue
+        top_score, top_ref, _citation = ranked[0]
+        if float(top_score) < attach_floor[kind]:
+            continue
+        filled = attach_inline_refs(sentence, [int(top_ref)])
+        if filled == sentence:
+            continue
+        rewritten = rewritten[:start] + filled + rewritten[start + len(sentence):]
+        fills.append({
+            "sentence": sentence[:160],
+            "kind": kind,
+            "refs": [int(top_ref)],
+            "score": round(float(top_score), 4),
+        })
+    fills.reverse()
+    return {
+        "answer": rewritten,
+        "filled_count": len(fills),
+        "fills": fills,
+    }
+
+
 def analyze_citation_coverage(
     answer: str,
     *,
     answer_mode: str = "",
 ) -> dict[str, Any]:
-    """Deterministic check: factual sentences should carry [n]."""
+    """Deterministic check: numeric/comparison sentences should carry [n]."""
     text = strip_citation_protocol_block(answer)
+    empty = {
+        "sentence_count": 0,
+        "factual_sentence_count": 0,
+        "cited_factual_count": 0,
+        "uncited_factual_count": 0,
+        "uncited_samples": [],
+        "overclaim_sentence_count": 0,
+        "overclaim_uncited_count": 0,
+        "overclaim_samples": [],
+        "citation_ids": [],
+        "coverage": 1.0,
+        "answer_mode": answer_mode or "qa",
+    }
     if not text:
-        return {
-            "sentence_count": 0,
-            "factual_sentence_count": 0,
-            "cited_factual_count": 0,
-            "uncited_factual_count": 0,
-            "uncited_samples": [],
-            "citation_ids": [],
-            "coverage": 1.0,
-            "answer_mode": answer_mode or "qa",
-        }
+        return empty
 
     if is_cannot_answer(text):
-        return {
-            "sentence_count": 1,
-            "factual_sentence_count": 0,
-            "cited_factual_count": 0,
-            "uncited_factual_count": 0,
-            "uncited_samples": [],
-            "citation_ids": [],
-            "coverage": 1.0,
-            "refused": True,
-            "answer_mode": answer_mode or "qa",
-        }
+        return {**empty, "sentence_count": 1, "refused": True}
 
     parts = [p.strip() for p in split_sentences(text) if p.strip()]
     if len(parts) <= 1 and len(text) > 80:
@@ -512,23 +668,24 @@ def analyze_citation_coverage(
     factual = 0
     cited = 0
     uncited_samples: list[str] = []
+    overclaim = 0
+    overclaim_uncited = 0
+    overclaim_samples: list[str] = []
     for sentence in parts:
-        cleaned = sentence.strip()
-        if len(cleaned) < 8:
-            continue
-        if _CITATION_PROTOCOL_LINE_RE.match(cleaned):
-            continue
-        if _TRANSITION_RE.match(cleaned):
-            continue
-        # 先抹掉章节/图表编号再判事实信号：编号里的数字不是事实断言。
-        # 「表 3 显示准确率达到 95.2%」抹掉「表 3」后仍有 准确率/95.2，照样算事实句。
-        if not _FACTUAL_CLAIM_RE.search(_STRUCTURAL_REF_RE.sub(" ", cleaned)):
-            continue
-        factual += 1
-        if _CITATION_RE.search(cleaned):
-            cited += 1
-        elif len(uncited_samples) < 3:
-            uncited_samples.append(cleaned[:160])
+        kind = classify_citation_need(sentence)
+        has_cite = bool(_CITATION_RE.search(sentence))
+        if kind == "must_cite":
+            factual += 1
+            if has_cite:
+                cited += 1
+            elif len(uncited_samples) < 3:
+                uncited_samples.append(sentence[:160])
+        elif kind == "overclaim":
+            overclaim += 1
+            if not has_cite:
+                overclaim_uncited += 1
+                if len(overclaim_samples) < 3:
+                    overclaim_samples.append(sentence[:160])
 
     uncited = max(0, factual - cited)
     coverage = 1.0 if factual == 0 else round(cited / factual, 4)
@@ -538,6 +695,9 @@ def analyze_citation_coverage(
         "cited_factual_count": cited,
         "uncited_factual_count": uncited,
         "uncited_samples": uncited_samples,
+        "overclaim_sentence_count": overclaim,
+        "overclaim_uncited_count": overclaim_uncited,
+        "overclaim_samples": overclaim_samples,
         "citation_ids": citation_ids,
         "coverage": coverage,
         "answer_mode": answer_mode or "qa",
@@ -754,6 +914,61 @@ def _find_fabricated_quotes(answer: str, retrieval_meta: Optional[dict]) -> list
         return []
 
 
+def _citation_artifacts(retrieval_meta: Optional[dict]) -> tuple[list, list]:
+    meta = retrieval_meta if isinstance(retrieval_meta, dict) else {}
+    citations = meta.get("citations") if isinstance(meta.get("citations"), list) else []
+    guard = meta.get("answer_guard") if isinstance(meta.get("answer_guard"), dict) else {}
+    bindings = guard.get("citation_bindings")
+    if not isinstance(bindings, list):
+        bindings = meta.get("citation_bindings")
+    if not isinstance(bindings, list):
+        bindings = []
+    return list(citations), list(bindings)
+
+
+def _format_ref_markers(refs: Sequence[int]) -> str:
+    markers: list[str] = []
+    for raw in refs or []:
+        try:
+            ref = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if ref > 0 and f"[{ref}]" not in markers:
+            markers.append(f"[{ref}]")
+    return "".join(markers)
+
+
+def _reclassify_citation_issues(
+    issue_details: list[dict[str, Any]],
+    *,
+    uncited: int,
+) -> list[dict[str, Any]]:
+    """LLM 常把过强结论标成缺引用；按句重分类，主题句直接丢掉。"""
+    revised: list[dict[str, Any]] = []
+    for item in issue_details:
+        issue_type = str(item.get("issue_type") or "").strip().lower()
+        if issue_type != "missing_citation":
+            revised.append(item)
+            continue
+        span = str(item.get("claim_span") or "").strip()
+        kind = classify_citation_need(span) if span else ""
+        if span and kind == "none":
+            continue
+        if span and kind == "overclaim":
+            tip = span[:60]
+            revised.append({
+                **item,
+                "issue_type": "overreach",
+                "text": f"这句话结论偏强，当前证据撑不住：「{tip}」",
+                "evidence_refs": [],
+            })
+            continue
+        if not span and uncited <= 0:
+            continue
+        revised.append(item)
+    return revised
+
+
 def postprocess_critic_result(
     critique: Optional[dict],
     *,
@@ -783,7 +998,13 @@ def postprocess_critic_result(
             for item in raw_issues
             if str(item).strip()
         ]
-    issue_details = issue_details[:5]
+    # 留给确定性分流（过强结论 / 缺引用）至少两个名额。
+    issue_details = issue_details[:3]
+    uncited = int(coverage.get("uncited_factual_count") or 0)
+    overclaim_uncited = int(coverage.get("overclaim_uncited_count") or 0)
+    issue_details = _reclassify_citation_issues(issue_details, uncited=uncited)
+    citations, bindings = _citation_artifacts(retrieval_meta)
+
     unscoped_absence_claims = find_unscoped_document_absence_claims(answer)
     if unscoped_absence_claims:
         claim_span = unscoped_absence_claims[0][:160]
@@ -799,10 +1020,32 @@ def postprocess_critic_result(
                 "evidence_refs": [],
             })
 
-    uncited = int(coverage.get("uncited_factual_count") or 0)
+    if overclaim_uncited > 0 and not coverage.get("refused"):
+        sample = coverage.get("overclaim_samples") or []
+        tip = sample[0] if sample else ""
+        msg = f"有 {overclaim_uncited} 处结论偏强，当前证据撑不住"
+        if tip:
+            msg += f"：「{tip[:60]}」"
+        if all(
+            item.get("issue_type") != "overreach" or item.get("claim_span") != str(tip)[:160]
+            for item in issue_details
+        ):
+            issue_details.append({
+                "text": msg,
+                "issue_type": "overreach",
+                "claim_span": str(tip)[:160],
+                "evidence_refs": [],
+            })
+
+    missing_refs: list[int] = []
     if uncited > 0 and not coverage.get("refused"):
         sample = coverage.get("uncited_samples") or []
         tip = sample[0] if sample else ""
+        missing_refs = suggest_citation_refs(
+            tip,
+            citations,
+            bindings,
+        )
         msg = (
             f"有 {uncited} 处章节结论未绑定到阅读证据"
             if full_document_summary
@@ -810,14 +1053,28 @@ def postprocess_critic_result(
         )
         if tip:
             msg += f"：「{tip[:60]}」"
-        if all(item.get("text") != msg for item in issue_details):
-            issue_details.append({
-                "text": msg,
-                "issue_type": "missing_citation",
-                # 确定性检查知道确切是哪一句，直接作为前端定位锚点。
-                "claim_span": str(tip)[:160],
-                "evidence_refs": [],
-            })
+        if missing_refs:
+            msg += f"；应对 {_format_ref_markers(missing_refs)}"
+        issue_details = [
+            item for item in issue_details if item.get("issue_type") != "missing_citation"
+        ]
+        issue_details.append({
+            "text": msg,
+            "issue_type": "missing_citation",
+            "claim_span": str(tip)[:160],
+            "evidence_refs": missing_refs,
+        })
+    else:
+        for item in issue_details:
+            if item.get("issue_type") != "missing_citation":
+                continue
+            if item.get("evidence_refs"):
+                continue
+            item["evidence_refs"] = suggest_citation_refs(
+                str(item.get("claim_span") or ""),
+                citations,
+                bindings,
+            )
 
     # 引号承诺"原文照录"，因此必须逐字可查。这项检查是确定性的，不依赖 critic
     # 模型是否发现问题；引用编号合法不代表引号内容属实，后者是更危险的一类幻觉。
@@ -874,6 +1131,8 @@ def postprocess_critic_result(
         score = min(score, 6)
     elif citation_risk_level == "high":
         score = min(score, 5)
+    if overclaim_uncited > 0:
+        score = min(score, 6)
     score = max(0, min(10, score))
     if unscoped_absence_claims:
         score = min(score, 4)
@@ -882,11 +1141,14 @@ def postprocess_critic_result(
     if unscoped_absence_claims and not suggestion:
         suggestion = "\u8bf7\u5c06\u6574\u7bc7\u6587\u6863\u7684\u7f3a\u5931\u65ad\u8a00\u6539\u4e3a\u5f53\u524d\u8bc1\u636e\u8303\u56f4\uff0c\u6216\u8865\u5145\u660e\u786e\u7684\u539f\u6587\u5f15\u7528\u3002"
     elif uncited > 0 and not suggestion:
-        suggestion = (
-            "请为章节结论补齐阅读大纲中的证据块绑定。"
-            if full_document_summary
-            else "请为关键数值与结论句补充 [n] 引用，或改为拒答。"
-        )
+        if full_document_summary:
+            suggestion = "请为章节结论补齐阅读大纲中的证据块绑定。"
+        elif missing_refs:
+            suggestion = f"请为关键数值与比较句补标 {_format_ref_markers(missing_refs)}，或改为拒答。"
+        else:
+            suggestion = "请为关键数值与比较句补充 [n] 引用，或改为拒答。"
+    elif overclaim_uncited > 0 and not suggestion:
+        suggestion = "这句话结论偏强，当前证据撑不住，请弱化表述或改为拒答；不要为撑不住的句子补引用。"
 
     certainty = derive_answer_certainty(
         answer=answer,
@@ -903,18 +1165,24 @@ def postprocess_critic_result(
     # 复制进 reason，前端又分别渲染 reason 与 issues[0]，同一句话会显示两遍。
     reason = suggestion
 
+    overreach_risk = bool(
+        overclaim_uncited > 0
+        or unscoped_absence_claims
+        or any(str(item.get("issue_type") or "") == "overreach" for item in issue_details)
+    )
     return {
         "score": score,
         "has_hallucination": has_hallucination,
         "citation_risk": citation_risk_level != "none",
         "citation_risk_level": citation_risk_level,
+        "overreach_risk": overreach_risk,
         "issues": issues[:5],
         "issue_details": issue_details[:5],
         "suggestion": suggestion[:200],
         "reason": reason[:200],
         "confidence": round(score / 10.0, 3),
         "critic_source": critic_source,
-        "missing_citations": bool(base.get("missing_citations", False)),
+        "missing_citations": bool(uncited > 0 or base.get("missing_citations", False)),
         "citation_coverage": coverage,
         "certainty": certainty,
         "academic_contract": True,

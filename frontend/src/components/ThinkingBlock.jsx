@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo } from 'react'
-import { Copy, Check, ChevronDown, Lightbulb } from 'lucide-react'
+import { motion, useReducedMotion } from 'framer-motion'
+import { Copy, Check, ChevronDown, ChevronRight, Lightbulb } from 'lucide-react'
 import StreamingMarkdown from './StreamingMarkdown'
 import { useChatParams } from '../contexts/ChatParamsContext'
 import AgentTracePanel from './AgentTracePanel'
@@ -76,6 +77,67 @@ export const stripLeadingProcessStageLines = (content) => {
   return lines.slice(start).join('\n').replace(/^\n+/, '')
 }
 
+const PREVIEW_LINE_HEIGHT = 22
+const PREVIEW_MAX_LINES = 6
+const PREVIEW_TITLE_HEIGHT = 40
+const PREVIEW_BOTTOM_PAD = 10
+
+// 预览只展示完成句/完成行；最后一句若还在写，也保留，避免无换行的思考流看起来是空的。
+export const extractThinkingPreviewLines = (content, { isThinking = false } = {}) => {
+  const text = stripLeadingProcessStageLines(String(content || ''))
+  if (!text.trim()) return []
+
+  const pieces = []
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line) continue
+    const sentences = line
+      .split(/(?<=[。！？])|(?<=[.!?])\s+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+    if (sentences.length) pieces.push(...sentences)
+    else pieces.push(line)
+  }
+
+  return pieces
+}
+
+const getThinkingPreviewHeight = (lineCount) => {
+  if (lineCount < 1) return PREVIEW_TITLE_HEIGHT
+  const visible = Math.min(Math.max(lineCount, 1), PREVIEW_MAX_LINES)
+  return PREVIEW_TITLE_HEIGHT + visible * PREVIEW_LINE_HEIGHT + PREVIEW_BOTTOM_PAD
+}
+
+const ThinkingLivePreview = memo(({ lines }) => {
+  const reduceMotion = useReducedMotion()
+  const messages = Array.isArray(lines) ? lines : []
+  const visible = messages.slice(-PREVIEW_MAX_LINES)
+  const windowHeight = Math.max(visible.length, 1) * PREVIEW_LINE_HEIGHT
+
+  return (
+    <div className="thinking-preview-container" style={{ height: windowHeight }}>
+      <motion.div
+        className="thinking-preview-messages"
+        initial={false}
+        animate={{ y: 0 }}
+        transition={reduceMotion ? { duration: 0 } : { duration: 0.16, ease: 'easeOut' }}
+      >
+        {visible.map((message, index) => {
+          const isLast = index === visible.length - 1
+          return (
+            <div
+              key={`${messages.length - visible.length + index}-${message.slice(0, 12)}`}
+              className={`thinking-preview-line${isLast ? ' thinking-preview-line-live' : ''}`}
+            >
+              {message}
+            </div>
+          )
+        })}
+      </motion.div>
+    </div>
+  )
+})
+
 export const shouldHideRetrievalLog = ({
   answerStarted = false,
   hasRealThinking = false,
@@ -123,7 +185,7 @@ const ThinkingTimer = memo(({ isThinking, thinkingMs, activityOnly = false }) =>
   const hasMeasuredDuration = isThinking || Number(thinkingMs) > 0
 
   return (
-    <span className="whitespace-nowrap text-[13.5px] font-medium tabular-nums text-[#4a453f] dark:text-gray-200">
+    <span className="whitespace-nowrap text-[14px] font-medium tabular-nums text-[#4a453f] dark:text-gray-200">
       {isThinking
         ? `${activityOnly ? '正在检索与整理' : '正在思考'} · ${seconds} 秒`
         : hasMeasuredDuration
@@ -156,7 +218,9 @@ const ThinkingBlock = ({
   const [copied, setCopied] = useState(false)
   const [hasStreamingText, setHasStreamingText] = useState(false)
   const [thinkingRevealComplete, setThinkingRevealComplete] = useState(!isStreaming)
+  const [livePreviewText, setLivePreviewText] = useState('')
   const autoCollapsedRef = useRef(false)
+  const previewCollapsedRef = useRef(false)
   const { thoughtAutoCollapse } = useChatParams()
   const hasAgentTrace = Boolean(agentTrace && agentTrace.enabled)
   const hasWebSearchActivity = Boolean(webSearchActivity)
@@ -287,6 +351,14 @@ const ThinkingBlock = ({
   )
   const thinkingFinished = processFinished || streamedThinkingFinished
 
+  // 思考一开始就收到预览态，才能看到行向上滚的流式效果。
+  useEffect(() => {
+    if (!thoughtAutoCollapse || !hasRealThinking || !isThinkingPhase) return
+    if (previewCollapsedRef.current) return
+    previewCollapsedRef.current = true
+    setExpanded(false)
+  }, [hasRealThinking, isThinkingPhase, thoughtAutoCollapse])
+
   // 思考完成后自动折叠（受 thoughtAutoCollapse 设置控制）。
   // 只自动折叠一次：用户手动展开后不会被再次收起。
   useEffect(() => {
@@ -302,6 +374,7 @@ const ThinkingBlock = ({
   useLayoutEffect(() => {
     if (!isStreaming) {
       setHasStreamingText(false)
+      setLivePreviewText(visibleThinkingContent)
       setThinkingRevealComplete(Boolean(visibleThinkingContent.trim()))
       return undefined
     }
@@ -323,7 +396,10 @@ const ThinkingBlock = ({
       const detectRevealProgress = () => {
         if (cancelled) return false
         const renderedText = stripLeadingProcessStageLines(String(el.textContent || '')).trim()
-        if (renderedText) setHasStreamingText(true)
+        if (renderedText) {
+          setHasStreamingText(true)
+          setLivePreviewText(renderedText)
+        }
 
         const revealComplete = Boolean(
           answerStarted
@@ -366,6 +442,14 @@ const ThinkingBlock = ({
   const shouldMountTimeline = isStreaming || hasRealThinking
   // 流式期间必须挂着可见时间线，ref 才能写字。灯泡等有正文再出现。
   const showThinkingDetails = hasVisibleThinkingText || Boolean(thinkingLive) || isStreaming
+  const previewSource = (isStreaming && livePreviewText) ? livePreviewText : visibleThinkingContent
+  const previewLines = useMemo(
+    () => extractThinkingPreviewLines(previewSource, { isThinking: isProcessRunning }),
+    [isProcessRunning, previewSource]
+  )
+  const showTickerHeader = Boolean(isProcessRunning && hasRealThinking)
+  const showLiveTicker = Boolean(showTickerHeader && !expanded)
+  const tickerHeaderHeight = showLiveTicker ? getThinkingPreviewHeight(previewLines.length) : 38
   const showProcessBody = Boolean(
     showRetrievalDetails
     || hasVisibleThinkingText
@@ -381,62 +465,104 @@ const ThinkingBlock = ({
 
   return (
     <section
-      className={`group/thinking mb-4 mt-1 w-full max-w-[46rem] text-[13.5px] ${darkMode ? 'dark text-gray-300' : 'text-gray-600'}`}
+      className={`group/thinking w-full text-[13.5px] ${darkMode ? 'dark text-gray-300' : 'text-gray-600'}`}
       aria-label="思考过程"
     >
-      <button
-        type="button"
-        className={`-ml-1 flex min-h-9 max-w-full items-center gap-2.5 rounded-[9px] px-2 py-1.5 text-left transition-[background-color,transform] duration-200 active:scale-[0.995] focus-visible:outline-none focus-visible:ring-2 ${
-          darkMode
-            ? 'hover:bg-white/[0.04] focus-visible:ring-gray-100/35'
-            : 'hover:bg-[#f6f3f1] focus-visible:ring-[#cfc6bd]/70'
-        }`}
-        onClick={() => setExpanded((prev) => !prev)}
-        aria-expanded={expanded}
-      >
-        <span
-          className={`grid h-6 w-6 flex-shrink-0 place-items-center ${
-            isProcessRunning
-              ? darkMode ? 'text-gray-300' : 'text-[#5c564f]'
-              : darkMode ? 'text-gray-500' : 'text-[#8a827b]'
+      {showTickerHeader ? (
+        <button
+          type="button"
+          className={`thinking-block-header ml-0 w-full text-left focus-visible:outline-none focus-visible:ring-2 ${
+            expanded ? 'expanded' : ''
+          } ${
+            darkMode
+              ? 'dark focus-visible:ring-gray-100/35'
+              : 'focus-visible:ring-[#cfc6bd]/70'
           }`}
-          aria-hidden="true"
+          style={{ height: tickerHeaderHeight }}
+          onClick={() => setExpanded((prev) => !prev)}
+          aria-expanded={expanded}
         >
-          <CellsLoader active={isProcessRunning} />
-        </span>
-        <ThinkingTimer
-          isThinking={isProcessRunning}
-          thinkingMs={thinkingMs || 0}
-          activityOnly={reasoningOutputMissing || (!hasRealThinking && (showRetrievalDetails || hasAgentTrace || hasWebSearchActivity))}
-        />
-        {reasoningFallbackText && (
-          <span
-            className={`max-w-[18rem] truncate rounded-full px-2 py-0.5 text-[10.5px] font-normal ${darkMode ? 'bg-white/10 text-gray-300' : 'bg-[#efe8e1] text-[#5c564f]'}`}
-            title={reasoningFallbackText}
-          >
-            {reasoningOutputMissing ? '未返回思考文本' : '已按兼容档位执行'}
-          </span>
-        )}
-        {activeStageText && !expanded && (
-          <>
-            <span className={`h-3 w-px flex-shrink-0 ${darkMode ? 'bg-white/10' : 'bg-[#dedad7]'}`} aria-hidden="true" />
+          <div className="thinking-block-head-row">
             <span
-              className={`min-w-0 flex-1 truncate text-[12.5px] ${darkMode ? 'text-gray-300' : 'text-[#3f3a35]'}`}
-              title={activeStageText}
+              className={`thinking-block-icon ${
+                isProcessRunning
+                  ? darkMode ? 'text-gray-300' : 'text-[#5c564f]'
+                  : darkMode ? 'text-gray-500' : 'text-[#8a827b]'
+              }`}
+              aria-hidden="true"
             >
-              {activeStageText}
+              <CellsLoader active={isProcessRunning} />
             </span>
-          </>
-        )}
-        <ChevronDown
-          size={15}
-          strokeWidth={1.9}
-          className={`flex-shrink-0 transition-transform duration-300 ${
-            darkMode ? 'text-gray-500' : 'text-gray-400'
-          } ${expanded ? 'rotate-180' : ''}`}
-          aria-hidden="true"
-        />
-      </button>
+            <div className="thinking-block-title">
+              <ThinkingTimer
+                isThinking={isProcessRunning}
+                thinkingMs={thinkingMs || 0}
+                activityOnly={false}
+              />
+            </div>
+            <span className={`thinking-block-arrow ${expanded ? 'expanded' : ''}`} aria-hidden="true">
+              <ChevronRight size={18} strokeWidth={1.6} />
+            </span>
+          </div>
+          {previewLines.length > 0 && (
+            <ThinkingLivePreview lines={previewLines} />
+          )}
+        </button>
+      ) : (
+        <button
+          type="button"
+          className={`-ml-1 flex min-h-9 max-w-full items-center gap-2.5 rounded-[9px] px-2 py-1.5 text-left transition-[background-color,transform] duration-200 active:scale-[0.995] focus-visible:outline-none focus-visible:ring-2 ${
+            darkMode
+              ? 'hover:bg-white/[0.04] focus-visible:ring-gray-100/35'
+              : 'hover:bg-[#f6f3f1] focus-visible:ring-[#cfc6bd]/70'
+          }`}
+          onClick={() => setExpanded((prev) => !prev)}
+          aria-expanded={expanded}
+        >
+          <span
+            className={`grid h-6 w-6 flex-shrink-0 place-items-center ${
+              isProcessRunning
+                ? darkMode ? 'text-gray-300' : 'text-[#5c564f]'
+                : darkMode ? 'text-gray-500' : 'text-[#8a827b]'
+            }`}
+            aria-hidden="true"
+          >
+            <CellsLoader active={isProcessRunning} />
+          </span>
+          <ThinkingTimer
+            isThinking={isProcessRunning}
+            thinkingMs={thinkingMs || 0}
+            activityOnly={reasoningOutputMissing || (!hasRealThinking && (showRetrievalDetails || hasAgentTrace || hasWebSearchActivity))}
+          />
+          {reasoningFallbackText && (
+            <span
+              className={`max-w-[18rem] truncate rounded-full px-2 py-0.5 text-[10.5px] font-normal ${darkMode ? 'bg-white/10 text-gray-300' : 'bg-[#efe8e1] text-[#5c564f]'}`}
+              title={reasoningFallbackText}
+            >
+              {reasoningOutputMissing ? '未返回思考文本' : '已按兼容档位执行'}
+            </span>
+          )}
+          {activeStageText && !expanded && (
+            <>
+              <span className={`h-3 w-px flex-shrink-0 ${darkMode ? 'bg-white/10' : 'bg-[#dedad7]'}`} aria-hidden="true" />
+              <span
+                className={`min-w-0 flex-1 truncate text-[12.5px] ${darkMode ? 'text-gray-300' : 'text-[#3f3a35]'}`}
+                title={activeStageText}
+              >
+                {activeStageText}
+              </span>
+            </>
+          )}
+          <ChevronDown
+            size={15}
+            strokeWidth={1.9}
+            className={`flex-shrink-0 transition-transform duration-300 ${
+              darkMode ? 'text-gray-500' : 'text-gray-400'
+            } ${expanded ? 'rotate-180' : ''}`}
+            aria-hidden="true"
+          />
+        </button>
+      )}
 
       <div
         className={`grid transition-[grid-template-rows,opacity,visibility] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${
@@ -514,7 +640,7 @@ const ThinkingBlock = ({
                 >
                   <Lightbulb className="h-[15px] w-[15px]" strokeWidth={2.15} />
                 </span>
-                <div className={`prose prose-sm max-w-none text-[13.5px] leading-[1.7] ${darkMode ? 'prose-invert text-gray-200' : 'text-[#2c2723]'} ${hasRealThinking ? '' : 'hidden'}`}>
+                <div className={`thinking-stream-live prose prose-sm max-w-none text-[13.5px] leading-[1.7] ${darkMode ? 'prose-invert text-gray-200' : 'text-[#2c2723]'} ${hasRealThinking ? '' : 'hidden'}`}>
                   <StreamingMarkdown
                     content={visibleThinkingContent}
                     isStreaming={isStreaming}

@@ -48,11 +48,23 @@ function ScreenshotPreview({ screenshots = [], onAction, onClose }) {
   const rootRef = useRef(null)
   const stackButtonRef = useRef(null)
   const restoreFocusRef = useRef(false)
+  const prevCountRef = useRef(0)
+  // 提问/新截图后先锁住悬浮展开，避免布局一变又被 mouseenter 撑开
+  const ignoreHoverUntilLeaveRef = useRef(false)
 
-  const openPanel = useCallback(() => {
+  const openPanel = useCallback((options = {}) => {
+    const force = options === true || options.force === true
+    if (!force && ignoreHoverUntilLeaveRef.current) return
     clearTimeout(collapseTimerRef.current)
     restoreFocusRef.current = false
+    ignoreHoverUntilLeaveRef.current = false
     setExpanded(true)
+  }, [])
+
+  const collapsePanel = useCallback((lockHover = false) => {
+    clearTimeout(collapseTimerRef.current)
+    if (lockHover) ignoreHoverUntilLeaveRef.current = true
+    setExpanded(false)
   }, [])
 
   const scheduleCollapse = useCallback(() => {
@@ -66,7 +78,17 @@ function ScreenshotPreview({ screenshots = [], onAction, onClose }) {
   useEffect(() => () => clearTimeout(collapseTimerRef.current), [])
 
   useEffect(() => {
-    if (screenshots.length === 0) setExpanded(false)
+    const prevCount = prevCountRef.current
+    prevCountRef.current = screenshots.length
+    if (screenshots.length === 0) {
+      ignoreHoverUntilLeaveRef.current = false
+      setExpanded(false)
+      return
+    }
+    if (screenshots.length > prevCount) {
+      ignoreHoverUntilLeaveRef.current = true
+      setExpanded(false)
+    }
   }, [screenshots.length])
 
   useEffect(() => {
@@ -78,6 +100,7 @@ function ScreenshotPreview({ screenshots = [], onAction, onClose }) {
   const closePanel = useCallback((restoreFocus = false) => {
     clearTimeout(collapseTimerRef.current)
     restoreFocusRef.current = restoreFocus
+    ignoreHoverUntilLeaveRef.current = true
     setExpanded(false)
   }, [])
 
@@ -95,10 +118,16 @@ function ScreenshotPreview({ screenshots = [], onAction, onClose }) {
 
   const handleAction = useCallback(
     (actionKey, screenshotId) => {
+      collapsePanel(true)
       onAction?.(actionKey, screenshotId)
     },
-    [onAction]
+    [collapsePanel, onAction]
   )
+
+  const handleMouseLeave = useCallback(() => {
+    ignoreHoverUntilLeaveRef.current = false
+    scheduleCollapse()
+  }, [scheduleCollapse])
 
   if (!screenshots || screenshots.length === 0) return null
 
@@ -110,8 +139,8 @@ function ScreenshotPreview({ screenshots = [], onAction, onClose }) {
       ref={rootRef}
       data-testid="screenshot-preview"
       className="relative mx-1 mb-2 -mt-4"
-      onMouseEnter={openPanel}
-      onMouseLeave={scheduleCollapse}
+      onMouseEnter={() => openPanel()}
+      onMouseLeave={handleMouseLeave}
       onKeyDown={handleKeyDown}
       onBlur={handleBlur}
     >
@@ -123,7 +152,7 @@ function ScreenshotPreview({ screenshots = [], onAction, onClose }) {
             type="button"
             aria-label={`${screenshots.length} 张截图，悬浮或点击展开管理`}
             aria-expanded={false}
-            onClick={openPanel}
+            onClick={() => openPanel({ force: true })}
             className="flex cursor-pointer select-none items-end gap-2.5 rounded-[10px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D99178]/45 focus-visible:ring-offset-2"
           >
             {/* 堆叠完整落在容器盒内：悬浮判定不会因布局切换而丢失 */}

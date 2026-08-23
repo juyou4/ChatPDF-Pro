@@ -23,6 +23,7 @@ import fitz
 from PIL import Image
 
 from services.figure_render import crop_figure_image, render_panel_composite_image
+from services.modal_asset_service import search_modal_assets
 
 
 CHAT_VISUAL_ATTACHMENT_VERSION = "chat_visual_attachment.v1"
@@ -37,6 +38,16 @@ _VISUAL_REQUEST_RE = re.compile(
     r"figure|fig\.?|image|diagram|chart|plot|table)",
     re.IGNORECASE,
 )
+_EXPLICIT_VISUAL_REF_RE = re.compile(
+    r"(?:(?P<fig>(?<![A-Za-z0-9_])figure|(?<![A-Za-z0-9_])fig\.?|图)|"
+    r"(?P<tab>(?<![A-Za-z0-9_])table|(?<![A-Za-z0-9_])tab\.?|表))"
+    r"\s*[.:：#_-]*\s*(?P<num>[a-z]?\d+(?:[.\-]\d+)?[a-z]?)",
+    re.IGNORECASE,
+)
+_BARE_VISUAL_ID_RE = re.compile(
+    r"^(?:fig(?:ure)?|tab(?:le)?|图|表)?[_:\-\s#]*(?P<num>[a-z]?\d+(?:[.\-]\d+)?[a-z]?)$",
+    re.IGNORECASE,
+)
 _MAX_ATTACHMENTS = 2
 _MAX_RENDER_EDGE = 1800
 _MAX_RENDER_PIXELS = 6_000_000
@@ -45,6 +56,11 @@ _CACHE_LOCK = threading.RLock()
 
 class ChatVisualAttachmentError(ValueError):
     """A fixed-code error safe for route-level translation."""
+
+
+def question_requests_visual_attachment(question: str) -> bool:
+    """Return whether the user question itself asked to see a figure or table."""
+    return bool(_VISUAL_REQUEST_RE.search(str(question or "")))
 
 
 def build_chat_visual_attachments(
@@ -198,6 +214,20 @@ def _select_assets(
             entry["refs"].append(ref)
         entry["runtime_analyzed"] = entry["runtime_analyzed"] or runtime_analyzed
 
+    if question_requests_visual_attachment(question):
+        for asset in _match_question_assets(index, assets, question, bounded_limit):
+            asset_id = str(asset.get("asset_id") or "")
+            if not asset_id or asset_id in ranked:
+                continue
+            ranked[asset_id] = {
+                "asset": asset,
+                "refs": [],
+                "runtime_analyzed": False,
+                "position": 10**6 + len(ranked),
+            }
+            if len(ranked) >= bounded_limit:
+                break
+
     ordered = sorted(
         ranked.values(),
         key=lambda item: (
@@ -215,6 +245,79 @@ def _select_assets(
         )
         for item in ordered[:bounded_limit]
     ]
+
+
+def _match_question_assets(
+    index: dict,
+    assets: list[dict],
+    question: str,
+    max_items: int,
+) -> list[dict]:
+    """Locate the asked figure/table even when citations only carry surrounding text."""
+    requested = _question_visual_keys(question)
+    if requested:
+        matched = [
+            asset
+            for asset in assets
+            if _asset_visual_keys(asset) & requested
+        ]
+        matched.sort(
+            key=lambda asset: (
+                _positive_int(asset.get("page")),
+                str(asset.get("asset_id") or ""),
+            )
+        )
+        return matched[:max_items]
+
+    selected: list[dict] = []
+    seen: set[str] = set()
+    for asset in search_modal_assets(index, query=question, limit=max_items):
+        if not _displayable_asset(asset):
+            continue
+        asset_id = str(asset.get("asset_id") or "")
+        if not asset_id or asset_id in seen:
+            continue
+        seen.add(asset_id)
+        selected.append(asset)
+        if len(selected) >= max_items:
+            break
+    return selected
+
+
+def _question_visual_keys(question: str) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    for match in _EXPLICIT_VISUAL_REF_RE.finditer(str(question or "")):
+        number = _normalized_visual_number(match.group("num"))
+        if not number:
+            continue
+        keys.add(("table" if match.group("tab") else "figure", number))
+    return keys
+
+
+def _asset_visual_keys(asset: dict) -> set[tuple[str, str]]:
+    kind = str(asset.get("kind") or "").strip().lower()
+    if kind not in {"figure", "table"}:
+        return set()
+    keys: set[tuple[str, str]] = set()
+    blob = " ".join(
+        str(asset.get(field) or "")
+        for field in ("figure_id", "caption", "description", "text")
+    )
+    for match in _EXPLICIT_VISUAL_REF_RE.finditer(blob):
+        number = _normalized_visual_number(match.group("num"))
+        if not number:
+            continue
+        keys.add(("table" if match.group("tab") else "figure", number))
+    bare = _BARE_VISUAL_ID_RE.fullmatch(str(asset.get("figure_id") or "").strip())
+    if bare:
+        number = _normalized_visual_number(bare.group("num"))
+        if number:
+            keys.add((kind, number))
+    return keys
+
+
+def _normalized_visual_number(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower()).lstrip("0") or ""
 
 
 def _match_citation_asset(citation: dict, assets: list[dict]) -> dict | None:

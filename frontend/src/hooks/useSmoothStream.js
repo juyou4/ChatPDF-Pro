@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react'
+import { deleteSourceRange, getCommittedPrefix, getStreamedSourceText, hydrateStreamingMath } from '../utils/streamingMath'
 
 /**
  * 创建文本分割器
@@ -44,7 +45,10 @@ function splitChunk(chunk) {
  * @param {number} [options.flushChars=80] - 结束冲刷阶段每帧最多渲染字符数
  * @param {boolean} [options.sequencedReveal=false] - 以逐字、逐段的顺序展示内容
  * @param {number} [options.paragraphPauseMs=180] - 两个段落之间的停顿时间
- * @returns {{ addChunk: Function, reset: Function, replace: Function, flushNow: Function, contentRef: React.RefObject, getFinalText: Function, isFlushComplete: Function, getPendingChars: Function, waitForRevealComplete: Function }}
+ * @param {boolean} [options.enableMathHydration=true] - 是否把已闭合的公式替换成 KaTeX
+ * @param {boolean} [options.enableSingleDollarMath=true] - 是否识别单 $ 行内公式
+ * @param {boolean} [options.enableMarkdownCommit=false] - 是否把已完成的标题/段落交给 Markdown 渲染
+ * @returns {{ addChunk: Function, reset: Function, replace: Function, flushNow: Function, contentRef: React.RefObject, getFinalText: Function, isFlushComplete: Function, getPendingChars: Function, waitForRevealComplete: Function, subscribeCommittedPrefix: Function, subscribeDisplayedText: Function }}
  */
 export { splitChunk }
 
@@ -142,6 +146,9 @@ export const useSmoothStream = ({
   smoothFlush = false,
   sequencedReveal = false,
   paragraphPauseMs = 180,
+  enableMathHydration = true,
+  enableSingleDollarMath = true,
+  enableMarkdownCommit = false,
 }) => {
   /** @type {React.MutableRefObject<Array<{chars: string[], offset: number}>>} 待渲染字符块队列 */
   const chunkQueueRef = useRef([])
@@ -168,6 +175,12 @@ export const useSmoothStream = ({
   const revealTailUntilRef = useRef(0)
   /** @type {React.MutableRefObject<number>} 段落结束后的短暂停顿截止时间 */
   const paragraphPauseUntilRef = useRef(0)
+  /** @type {React.MutableRefObject<string>} 已交给 Markdown 渲染的前缀 */
+  const committedPrefixRef = useRef('')
+  /** @type {React.MutableRefObject<Set<Function>>} 前缀变化订阅 */
+  const committedListenersRef = useRef(new Set())
+  /** @type {React.MutableRefObject<Set<Function>>} 已展示全文订阅（无模糊时走 ReactMarkdown） */
+  const displayedListenersRef = useRef(new Set())
 
   const clearQueue = useCallback(() => {
     chunkQueueRef.current = []
@@ -230,34 +243,142 @@ export const useSmoothStream = ({
     return parts.join('')
   }, [clearQueue])
 
-  const appendMissingText = useCallback((container, targetText, intensity) => {
+  const resolveBoundText = useCallback((fullText) => {
+    const source = typeof fullText === 'string' ? fullText : ''
+    if (!enableMarkdownCommit) return { committed: '', tail: source }
+    const committed = getCommittedPrefix(source, {
+      enableMath: enableMathHydration,
+      enableSingleDollar: enableSingleDollarMath,
+    })
+    return { committed, tail: source.slice(committed.length) }
+  }, [enableMarkdownCommit, enableMathHydration, enableSingleDollarMath])
+
+  const publishCommittedPrefix = useCallback((committed) => {
+    const next = typeof committed === 'string' ? committed : ''
+    if (next === committedPrefixRef.current) return
+    committedPrefixRef.current = next
+    committedListenersRef.current.forEach((listener) => {
+      try {
+        listener(next)
+      } catch {
+        // 订阅方异常不能打断流式写入
+      }
+    })
+  }, [])
+
+  const subscribeCommittedPrefix = useCallback((listener) => {
+    if (typeof listener !== 'function') return () => {}
+    committedListenersRef.current.add(listener)
+    listener(committedPrefixRef.current)
+    return () => {
+      committedListenersRef.current.delete(listener)
+    }
+  }, [])
+
+  const publishDisplayedText = useCallback((text) => {
+    const next = typeof text === 'string' ? text : ''
+    displayedListenersRef.current.forEach((listener) => {
+      try {
+        listener(next)
+      } catch {
+        // 订阅方异常不能打断流式写入
+      }
+    })
+  }, [])
+
+  const subscribeDisplayedText = useCallback((listener) => {
+    if (typeof listener !== 'function') return () => {}
+    displayedListenersRef.current.add(listener)
+    listener(displayedTextRef.current)
+    return () => {
+      displayedListenersRef.current.delete(listener)
+    }
+  }, [])
+
+  const syncStreamingMath = useCallback((container, sourceText) => {
+    if (!enableMathHydration || !container || typeof sourceText !== 'string') return
+    hydrateStreamingMath(container, sourceText, {
+      enableSingleDollar: enableSingleDollarMath,
+    })
+  }, [enableMathHydration, enableSingleDollarMath])
+
+  const readBoundSourceText = useCallback((container) => (
+    getStreamedSourceText(container)
+  ), [])
+
+  const writeBoundSourceText = useCallback((container, sourceText) => {
     if (!container) return
-    const currentText = container.textContent || ''
-    // 严格序列模式下，已在前一个 DOM 中展示过的内容无需再次按整段动画补写。
-    // 首次挂载由渲染循环等待 contentRef 后再开始，因此这里不会吞掉首段动画。
-    if (sequencedReveal && currentText !== targetText) {
-      container.textContent = targetText
+    container.textContent = sourceText
+    syncStreamingMath(container, sourceText)
+  }, [syncStreamingMath])
+
+  const appendPlainText = (container, text) => {
+    if (!container || !text) return
+    const lastChild = container.lastChild
+    if (lastChild?.nodeType === 3) {
+      lastChild.appendData(text)
+      return
+    }
+    container.appendChild(document.createTextNode(text))
+  }
+
+  const syncBoundDom = useCallback((container, fullText, intensity) => {
+    if (!container) return
+    const { committed, tail } = resolveBoundText(fullText)
+    publishCommittedPrefix(committed)
+    const currentText = readBoundSourceText(container)
+
+    if (sequencedReveal && currentText !== tail) {
+      writeBoundSourceText(container, tail)
+      return
+    }
+    if (currentText === tail) {
+      syncStreamingMath(container, tail)
       return
     }
     if (
       enableBlurReveal
-      && targetText.startsWith(currentText)
-      && targetText.length > currentText.length
+      && tail.startsWith(currentText)
+      && tail.length > currentText.length
     ) {
-      const missingChars = splitChunk(targetText.slice(currentText.length))
+      const missingChars = splitChunk(tail.slice(currentText.length))
       const didAnimate = appendBlurRevealChars(container, missingChars, intensity)
       if (didAnimate) {
         revealTailUntilRef.current = Math.max(
           revealTailUntilRef.current,
           Date.now() + getBlurRevealTailMs(intensity),
         )
+      } else {
+        appendPlainText(container, tail.slice(currentText.length))
       }
+      syncStreamingMath(container, tail)
       return
     }
-    if (currentText !== targetText) {
-      container.textContent = targetText
+    if (currentText.endsWith(tail) && currentText.length > tail.length) {
+      const removed = deleteSourceRange(container, 0, currentText.length - tail.length)
+      if (!removed) {
+        writeBoundSourceText(container, tail)
+        return
+      }
+      syncStreamingMath(container, tail)
+      return
     }
-  }, [enableBlurReveal, sequencedReveal])
+    if (currentText !== tail) {
+      writeBoundSourceText(container, tail)
+    }
+  }, [
+    enableBlurReveal,
+    publishCommittedPrefix,
+    readBoundSourceText,
+    resolveBoundText,
+    sequencedReveal,
+    syncStreamingMath,
+    writeBoundSourceText,
+  ])
+
+  const appendMissingText = useCallback((container, targetText, intensity) => {
+    syncBoundDom(container, targetText, intensity)
+  }, [syncBoundDom])
 
   /**
    * 将新文本块加入字符队列
@@ -288,10 +409,11 @@ export const useSmoothStream = ({
       lastUpdateTimeRef.current = 0
       // 重置 DOM 元素内容
       if (contentRef.current) {
-        contentRef.current.textContent = newText
+        syncBoundDom(contentRef.current, newText, blurIntensity)
         boundContentElementRef.current = contentRef.current
         verifyBoundContentBeforeAppendRef.current = true
       } else {
+        publishCommittedPrefix(resolveBoundText(newText).committed)
         boundContentElementRef.current = null
         verifyBoundContentBeforeAppendRef.current = false
       }
@@ -299,8 +421,9 @@ export const useSmoothStream = ({
       if (onUpdate) {
         onUpdate(newText)
       }
+      publishDisplayedText(newText)
     },
-    [clearQueue, onUpdate]
+    [blurIntensity, clearQueue, onUpdate, publishCommittedPrefix, publishDisplayedText, resolveBoundText, syncBoundDom]
   )
 
   /**
@@ -317,18 +440,20 @@ export const useSmoothStream = ({
       paragraphPauseUntilRef.current = 0
       lastUpdateTimeRef.current = 0
       if (contentRef.current) {
-        contentRef.current.textContent = newText
+        syncBoundDom(contentRef.current, newText, blurIntensity)
         boundContentElementRef.current = contentRef.current
         verifyBoundContentBeforeAppendRef.current = true
       } else {
+        publishCommittedPrefix(resolveBoundText(newText).committed)
         boundContentElementRef.current = null
         verifyBoundContentBeforeAppendRef.current = false
       }
       if (onUpdate) {
         onUpdate(newText)
       }
+      publishDisplayedText(newText)
     },
-    [clearQueue, onUpdate]
+    [blurIntensity, clearQueue, onUpdate, publishCommittedPrefix, publishDisplayedText, resolveBoundText, syncBoundDom]
   )
 
   /**
@@ -348,18 +473,20 @@ export const useSmoothStream = ({
       paragraphPauseUntilRef.current = 0
       lastUpdateTimeRef.current = 0
       if (contentRef.current) {
-        contentRef.current.textContent = nextText
+        syncBoundDom(contentRef.current, nextText, blurIntensity)
         boundContentElementRef.current = contentRef.current
       } else {
+        publishCommittedPrefix(resolveBoundText(nextText).committed)
         boundContentElementRef.current = null
       }
       verifyBoundContentBeforeAppendRef.current = false
       if (onUpdate) {
         onUpdate(nextText)
       }
+      publishDisplayedText(nextText)
       return nextText
     },
-    [drainQueuedText, onUpdate]
+    [blurIntensity, drainQueuedText, onUpdate, publishCommittedPrefix, publishDisplayedText, resolveBoundText, syncBoundDom]
   )
 
   /**
@@ -409,6 +536,7 @@ export const useSmoothStream = ({
             if (onUpdate) {
               onUpdate(displayedTextRef.current)
             }
+            publishDisplayedText(displayedTextRef.current)
             return
           }
           // 流未结束，等待下一帧
@@ -437,6 +565,10 @@ export const useSmoothStream = ({
           effectiveFrameChars,
           sequencedReveal ? 1 : (enableBlurReveal ? 64 : 256),
         )
+        // 无模糊时贴近 Cherry Studio：按积压量的 1/5 出字，标题/公式能跟着一起成型。
+        if (!enableBlurReveal && !sequencedReveal) {
+          charsToRenderCount = Math.max(charsToRenderCount, Math.max(1, Math.floor(pendingChars / 5)))
+        }
 
         // 4. 流已结束时的渲染策略
         if (streamDone) {
@@ -481,8 +613,9 @@ export const useSmoothStream = ({
           } else if (verifyBoundContentBeforeAppendRef.current) {
             // React state 可能在 replace('') 后先把首段内容回填到同一 DOM。
             // 这里只校验一次，随后完全走增量追加，避免长文本逐帧全文扫描。
-            if ((contentRef.current.textContent || '') !== previousText) {
-              contentRef.current.textContent = previousText
+            const previousTail = resolveBoundText(previousText).tail
+            if (readBoundSourceText(contentRef.current) !== previousTail) {
+              writeBoundSourceText(contentRef.current, previousTail)
             }
             verifyBoundContentBeforeAppendRef.current = false
           }
@@ -496,7 +629,7 @@ export const useSmoothStream = ({
             }
           } else {
             // 思考区不使用逐字符动画，直接追加到现有文本节点，避免每帧重新
-            // 序列化并覆盖整段长文本。
+            // 序列化并覆盖整段长文本。公式节点不是文本节点，追加时另开文本。
             const lastChild = contentRef.current.lastChild
             if (lastChild?.nodeType === 3) {
               lastChild.appendData(renderedText)
@@ -504,6 +637,7 @@ export const useSmoothStream = ({
               contentRef.current.appendChild(document.createTextNode(renderedText))
             }
           }
+          syncBoundDom(contentRef.current, displayedTextRef.current, blurIntensity)
         }
 
         // 7. 向后兼容：如果提供了 onUpdate 回调，也调用它
@@ -511,6 +645,7 @@ export const useSmoothStream = ({
         if (onUpdate) {
           onUpdate(displayedTextRef.current)
         }
+        publishDisplayedText(displayedTextRef.current)
 
         // 8. 记录最终文本（持续更新，确保 getFinalText 随时可用）
         finalTextRef.current = displayedTextRef.current
@@ -529,6 +664,8 @@ export const useSmoothStream = ({
     },
     [
       appendMissingText,
+      readBoundSourceText,
+      resolveBoundText,
       streamDone,
       onUpdate,
       minDelay,
@@ -539,7 +676,10 @@ export const useSmoothStream = ({
       smoothFlush,
       sequencedReveal,
       paragraphPauseMs,
+      publishDisplayedText,
+      syncBoundDom,
       takeQueuedChars,
+      writeBoundSourceText,
     ]
   )
 
@@ -578,5 +718,7 @@ export const useSmoothStream = ({
     isFlushComplete,
     getPendingChars,
     waitForRevealComplete,
+    subscribeCommittedPrefix,
+    subscribeDisplayedText,
   }
 }

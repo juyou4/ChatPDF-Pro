@@ -51,7 +51,7 @@ _CAPTION_PREFIX_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _VISUAL_QUERY_PATTERN = re.compile(
-    r"(?:图片|图像|图表|插图|曲线图|柱状图|折线图|散点图|流程图|示意图|截图|"
+    r"(?:图片|图像|图表|插图|曲线图|柱状图|折线图|散点图|流程图|示意图|架构图|截图|"
     r"表格|公式|方程|坐标轴|图例|布局|排版|视觉|左上角|右上角|左下角|右下角|"
     r"\b(?:figure|fig|image|picture|chart|plot|diagram|table|formula|equation|layout|"
     r"screenshot|visual|axis|legend)s?\b)",
@@ -93,7 +93,7 @@ _VISUAL_QUERY_PATTERN = re.compile(
 # 也能指研究对象（图像分类 / image encoder），已降级到 L3 弱信号。
 _FIGURE_STRONG_TERMS_ZH = (
     "图片", "图表", "插图", "曲线图", "柱状图", "折线图", "散点图",
-    "流程图", "示意图", "截图", "坐标轴", "图例",
+    "流程图", "示意图", "架构图", "截图", "坐标轴", "图例",
 )
 _FIGURE_STRONG_TERMS_EN = (
     "figure", "fig", "chart", "plot", "diagram", "curve", "screenshot",

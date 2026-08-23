@@ -33,7 +33,7 @@ const GlassInput = ({ icon: Icon, placeholder, value, onChange, type = "text", d
       value={value}
       onChange={onChange}
       disabled={disabled}
-      className={`w-full bg-white border border-gray-200 rounded-[14px] text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#FFA07A]/25 focus:border-[#FFA07A]/50 transition-colors ${Icon ? 'pl-10' : 'pl-4'} ${trailing ? 'pr-12' : 'pr-4'} py-3 ${disabled ? 'opacity-60 cursor-not-allowed bg-gray-100' : ''} ${className}`}
+      className={`w-full rounded-[16px] border border-[#e8e4df] bg-[#faf9f7] text-[14px] text-gray-800 font-medium focus:outline-none focus:ring-2 focus:ring-[#FFA07A]/20 focus:border-[#E8C4B4] transition-colors ${Icon ? 'pl-10' : 'pl-4'} ${trailing ? 'pr-12' : 'pr-4'} py-3 ${disabled ? 'opacity-60 cursor-not-allowed bg-gray-100' : ''} ${className}`}
       {...props}
     />
     {trailing && (
@@ -68,7 +68,7 @@ const GlassSelect = ({ value, onChange, children, disabled = false, 'aria-label'
 const Tag = ({ text, active, onClick }) => (
   <span 
     onClick={onClick}
-    className={`${active ? 'bg-[#FFF4EF] text-[#B85F47] border-[#FFDCCF]' : 'bg-gray-50 text-gray-500 border-transparent hover:bg-gray-100 hover:text-gray-700'} border text-[12px] font-semibold px-3.5 py-1.5 rounded-[10px] cursor-pointer transition-colors`}
+    className={`${active ? 'bg-[#F3EDE8] text-[#5c564f]' : 'bg-[#f4f2ef] text-[#8a827b] hover:bg-[#ece8e3] hover:text-[#5c564f]'} text-[12px] font-medium px-3.5 py-1.5 rounded-full cursor-pointer transition-colors`}
   >
     {text}
   </span>
@@ -140,20 +140,20 @@ const ProviderItem = ({ provider, isActive, onClick, onDelete, isDeleting = fals
       type="button"
       onClick={onClick}
       aria-pressed={isActive}
-      className={`relative flex min-h-[62px] w-full items-center rounded-[14px] px-2.5 py-2 text-left transition-colors ${
-        isActive ? '' : 'hover:bg-gray-100/70'
+      className={`relative flex min-h-[62px] w-full items-center rounded-[18px] px-2.5 py-2 text-left transition-colors ${
+        isActive ? '' : 'hover:bg-white/70'
       } ${canDelete ? 'pr-14' : ''}`}>
       {isActive && (
         <motion.span
           layoutId="provider-active-card"
           transition={{ type: 'spring', stiffness: 420, damping: 34, mass: 0.8 }}
           aria-hidden="true"
-          className="absolute inset-0 rounded-[14px] bg-white ring-1 ring-gray-200/80 shadow-[0_10px_24px_-8px_rgba(30,30,35,0.2),0_3px_8px_-2px_rgba(30,30,35,0.08)]"
+          className="absolute inset-0 rounded-[18px] bg-white ring-1 ring-black/[0.05]"
         >
           <span className="absolute left-0 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-full bg-[#F0653A]" />
         </motion.span>
       )}
-      <div className={`relative z-10 flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-[12px] bg-white ${isActive ? 'shadow-[0_2px_6px_rgba(30,30,35,0.12)]' : 'shadow-[0_1px_3px_rgba(30,30,35,0.08)]'}`}>
+      <div className="relative z-10 flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-[14px] bg-[#faf9f7] ring-1 ring-black/[0.04]">
         <ProviderAvatar providerId={provider.id} size={22} />
       </div>
       <div className="relative z-10 ml-2.5 flex-1 min-w-0">
@@ -1024,10 +1024,10 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
         key={adapterKey}
         initial={{ opacity: 0, y: 5 }}
         animate={{ opacity: 1, y: 0 }}
-        className={`group rounded-[16px] border bg-white p-3 transition-[border-color,box-shadow,background-color] ${
+        className={`group rounded-[18px] border bg-[#faf9f7] p-3.5 transition-colors ${
           isRecentlyAdded
-            ? 'border-green-200 bg-green-50/40 shadow-[0_8px_20px_-14px_rgba(34,197,94,0.55)]'
-            : 'border-gray-200/90 hover:border-[#F3B39D] hover:shadow-[0_8px_20px_-14px_rgba(184,95,71,0.42)]'
+            ? 'border-green-200 bg-green-50/50'
+            : 'border-transparent hover:bg-[#f3efe9]'
         }`}
       >
         <div className="flex items-start gap-3 min-w-0">
@@ -1114,11 +1114,12 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
               <button
                 type="button"
                 onClick={() => handleSetDefault(model.type, model.id)}
-                className="p-1.5 rounded-[9px] text-gray-400 hover:text-[#B85F47] hover:bg-[#FFF1EA] transition-colors"
+                className="inline-flex items-center gap-1 rounded-full bg-[#F3EDE8] px-2.5 py-1 text-[11px] font-medium text-[#5c564f] transition-colors hover:bg-[#ece6df] hover:text-[#3f3a35]"
                 title="设为默认模型"
                 aria-label={`将 ${model.name || model.id} 设为默认模型`}
               >
-                <CheckCircle2 size={15} />
+                <CheckCircle2 size={13} strokeWidth={2.1} />
+                设为默认
               </button>
             )}
             {model.isUserAdded && (
@@ -1236,15 +1237,15 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0, transition: { duration: 0.16, ease: [0.22, 1, 0.36, 1] } }}
               exit={{ opacity: 0, y: 6, transition: { duration: 0.09, ease: [0.4, 0, 1, 1] } }}
-              className="settings-modal-surface settings-solid settings-shell w-full max-w-[1320px] h-[92vh] min-h-0 bg-[#f6f7f9] p-4 sm:p-5 border border-white/80 relative z-10 flex flex-col"
+              className="model-service-page settings-modal-surface settings-solid settings-shell w-full max-w-[1320px] h-[92vh] min-h-0 bg-[#f5f3f0] p-4 sm:p-5 border border-white/80 relative z-10 flex flex-col"
             >
               {/* Header */}
               <div className="flex items-center mb-4 px-2">
                 <div className="flex items-center gap-2">
-                  <button onClick={onClose} className="w-9 h-9 flex items-center justify-center bg-white hover:bg-gray-100 rounded-[12px] border border-gray-200 transition-colors text-gray-600" title="返回设置中心" aria-label="返回设置中心">
+                  <button onClick={onClose} className="w-9 h-9 flex items-center justify-center bg-white/80 hover:bg-white rounded-[14px] ring-1 ring-black/[0.05] transition-colors text-gray-600" title="返回设置中心" aria-label="返回设置中心">
                     <ChevronLeft size={18} />
                   </button>
-                  <div className="p-2 rounded-[12px] bg-[#FFF4EF] text-[#B85F47]">
+                  <div className="p-2 rounded-[14px] bg-[#F3EDE8] text-[#5c564f]">
                     <Settings2 className="w-5 h-5" />
                   </div>
                   <div>
@@ -1265,7 +1266,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                       value={providerSearch}
                       onChange={(e) => setProviderSearch(e.target.value)}
                       placeholder="搜索模型平台..." 
-                      className="w-full bg-white border border-gray-200 rounded-[14px] pl-10 pr-4 py-3 text-[13px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#FFA07A]/25 focus:border-[#FFA07A]/50"
+                      className="w-full rounded-[16px] border border-[#e8e4df] bg-white pl-10 pr-4 py-3 text-[13px] text-gray-700 focus:outline-none focus:ring-2 focus:ring-[#FFA07A]/20 focus:border-[#E8C4B4]"
                     />
                   </div>
                   {providerDeleteError && (
@@ -1296,7 +1297,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                           setCustomProviderError('')
                         }}
                         aria-expanded={customProviderFormOpen}
-                        className={`settings-card settings-card-interactive flex w-full items-center rounded-[16px] bg-white p-3 text-left ${customProviderFormOpen ? 'ring-2 ring-[#F3B39D]/70' : ''}`}
+                        className={`settings-card settings-card-interactive flex w-full items-center rounded-[22px] bg-white p-3 text-left ${customProviderFormOpen ? 'ring-2 ring-[#E8C4B4]/70' : ''}`}
                       >
                         <div className="accent-control w-10 h-10 rounded-[14px] flex items-center justify-center shrink-0 shadow-inner">
                           <Settings2 size={20} />
@@ -1316,7 +1317,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                     key="custom-provider-editor"
                     initial={{ opacity: 0, y: 6 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="settings-card col-span-1 flex min-h-0 min-w-0 flex-col overflow-hidden border border-gray-200/90 bg-white lg:col-span-2"
+                    className="settings-card col-span-1 flex min-h-0 min-w-0 flex-col overflow-hidden bg-white lg:col-span-2"
                   >
                     <div className="flex items-start justify-between gap-4 border-b border-gray-100 px-6 py-5">
                       <div className="flex min-w-0 items-start gap-3.5">
@@ -1757,9 +1758,9 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                 {/* Middle Column: Configuration */}
                 <section className="flex min-w-0 w-full flex-col gap-4 overflow-visible pb-2 custom-scrollbar lg:overflow-y-auto lg:pr-2">
                   {/* Header Card */}
-                  <div className="settings-card bg-white p-5 border border-gray-200/90 flex justify-between items-center shrink-0">
+                  <div className="settings-card bg-white px-6 py-5 flex justify-between items-center shrink-0">
                     <div className="flex items-center space-x-4">
-                      <div className="w-12 h-12 bg-white rounded-[16px] flex items-center justify-center shadow-sm border border-gray-100 overflow-hidden">
+                      <div className="w-12 h-12 bg-[#faf9f7] rounded-[18px] flex items-center justify-center ring-1 ring-black/[0.04] overflow-hidden">
                         <ProviderAvatar providerId={activeProvider?.id} size={32} />
                       </div>
                       <div>
@@ -1789,7 +1790,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                   </div>
 
                   {/* API Settings Card */}
-                  <div className="settings-card bg-white p-6 border border-gray-200/90 space-y-4 shrink-0">
+                  <div className="settings-card bg-white p-6 space-y-4 shrink-0">
                     <div className="space-y-1.5">
                       <label className="text-[12px] font-semibold text-gray-600 ml-1">API Key</label>
                       <GlassInput 
@@ -1844,7 +1845,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                       <button
                         onClick={handleTest}
                         disabled={!activeProvider || testing}
-                        className="accent-cta flex-1 disabled:opacity-60 disabled:cursor-not-allowed text-[14px] font-bold py-3 rounded-[14px] flex items-center justify-center gap-2"
+                        className="accent-cta flex-1 disabled:opacity-60 disabled:cursor-not-allowed text-[14px] font-semibold py-3 rounded-[16px] flex items-center justify-center gap-2"
                       >
                         {testing ? <RefreshCw size={16} className="animate-spin" /> : <Play size={16} className="fill-current" />}
                         <span>测试连接</span>
@@ -1852,7 +1853,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                       <button 
                         onClick={handleSyncModels}
                         disabled={!activeProvider || isFetching}
-                        className="flex-1 bg-white hover:bg-gray-50 active:bg-gray-100 disabled:opacity-60 disabled:cursor-not-allowed transition-colors text-gray-700 text-[14px] font-bold py-3 rounded-[14px] border border-gray-200 flex items-center justify-center gap-2"
+                        className="flex-1 bg-[#faf9f7] hover:bg-[#f3efe9] active:bg-[#ece8e3] disabled:opacity-60 disabled:cursor-not-allowed transition-colors text-gray-700 text-[14px] font-semibold py-3 rounded-[16px] ring-1 ring-black/[0.06] flex items-center justify-center gap-2"
                       >
                         <RefreshCw size={16} className={isFetching ? "animate-spin" : ""} />
                         {isFetching ? '同步中...' : '同步模型'}
@@ -1875,7 +1876,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                   </div>
 
                   {/* Add Model Card */}
-                  <div className="settings-card bg-white p-6 border border-gray-200/90 flex flex-col flex-1 shrink-0">
+                  <div className="settings-card bg-white p-6 flex flex-col flex-1 shrink-0">
                     <h3 className="text-[15px] font-bold text-gray-900 mb-4 shrink-0">手动新增模型</h3>
                     <div className="space-y-4 pr-2">
                       <div className="flex gap-4 shrink-0">
@@ -1954,7 +1955,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                     <div className="pt-4 shrink-0">
                       <button
                         onClick={handleAddModel}
-                        className="w-full flex items-center justify-center gap-2 rounded-[14px] border border-[#F3B39D] bg-[#FFF4EF] py-3 text-[14px] font-bold text-[#A8533D] transition-colors hover:border-[#EC9A7F] hover:bg-[#FFEDE4] active:bg-[#FCE1D4]"
+                        className="w-full flex items-center justify-center gap-2 rounded-[16px] bg-[#F3EDE8] py-3 text-[14px] font-semibold text-[#5c564f] transition-colors hover:bg-[#ece6df] active:bg-[#e4ddd5]"
                       >
                         <Plus size={18} />
                         <span>保存模型</span>
@@ -1969,7 +1970,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                 </section>
 
                 {/* Right Column: Model List */}
-                <aside className="settings-card flex min-h-[360px] w-full min-w-0 flex-col border border-gray-200/90 bg-white p-5">
+                <aside className="settings-card flex min-h-[360px] w-full min-w-0 flex-col bg-white p-6">
                   <h3 className="text-[16px] font-bold text-gray-900 mt-2">模型列表</h3>
                   <p className="text-[12px] text-gray-500 font-medium mt-1 mb-4">
                     {isCustomProvider ? '每个模型独立管理，可分别测试和设置默认模型' : '按类型分组: 对话 / 嵌入 / 重排'}
@@ -2022,7 +2023,7 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                       })();
                       
                       return (
-                        <div key={type} className="settings-inset rounded-[16px] overflow-hidden">
+                        <div key={type} className="settings-inset rounded-[18px] overflow-hidden">
                           <button
                             type="button"
                             aria-expanded={!isCollapsed}
@@ -2054,9 +2055,9 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                               >
                                 <div className="p-2 pt-0 space-y-1">
                                   {list.map(model => (
-                                      <div key={model.id} className={`bg-gray-50 hover:bg-gray-100 rounded-[14px] p-2.5 flex items-center justify-between border ${lastAddedModelKey === `${model.providerId}:${model.id}` ? 'border-green-300' : 'border-gray-100'} cursor-pointer transition-colors group`}>
+                                      <div key={model.id} className={`bg-white/80 hover:bg-white rounded-[16px] p-2.5 flex items-center justify-between ${lastAddedModelKey === `${model.providerId}:${model.id}` ? 'ring-1 ring-green-300' : ''} cursor-pointer transition-colors group`}>
                                         <div className="flex items-center space-x-2.5 overflow-hidden min-w-0 flex-1">
-                                          <div className="w-8 h-8 rounded-[10px] bg-white flex items-center justify-center shrink-0 border border-gray-100 shadow-sm">
+                                          <div className="w-8 h-8 rounded-[12px] bg-[#faf9f7] flex items-center justify-center shrink-0 ring-1 ring-black/[0.04]">
                                             <ProviderAvatar providerId={getIconProviderId(model)} size={20} />
                                           </div>
                                           <div className="flex flex-col flex-1 min-w-0 py-0.5">
@@ -2081,14 +2082,21 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                                             </div>
                                           </div>
                                         </div>
-                                        <div className="flex gap-1 shrink-0 ml-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <div className="flex shrink-0 items-center gap-1.5 ml-2">
                                             {!isDefaultModel(model.type, model.id) && (
-                                              <button onClick={(e) => { e.stopPropagation(); handleSetDefault(model.type, model.id); }} className="p-1.5 text-gray-400 hover:text-[#B85F47] rounded-md hover:bg-[#FFA07A]/10" title="设为默认">
-                                                <CheckCircle2 size={16} />
+                                              <button
+                                                type="button"
+                                                onClick={(e) => { e.stopPropagation(); handleSetDefault(model.type, model.id); }}
+                                                className="inline-flex items-center gap-1 rounded-full bg-[#F3EDE8] px-2.5 py-1 text-[11px] font-medium text-[#5c564f] transition-colors hover:bg-[#ece6df] hover:text-[#3f3a35]"
+                                                title="设为默认模型"
+                                                aria-label={`将 ${model.name || model.id} 设为默认模型`}
+                                              >
+                                                <CheckCircle2 size={13} strokeWidth={2.1} />
+                                                设为默认
                                               </button>
                                             )}
                                             {model.isUserAdded && (
-                                              <button onClick={(e) => { e.stopPropagation(); removeModelFromCollection(model.id, model.providerId); }} className="p-1.5 text-gray-400 hover:text-red-500 rounded-md hover:bg-red-50" title="删除">
+                                              <button onClick={(e) => { e.stopPropagation(); removeModelFromCollection(model.id, model.providerId); }} className="p-1.5 text-gray-400 hover:text-red-500 rounded-md hover:bg-red-50 opacity-0 transition-opacity group-hover:opacity-100" title="删除">
                                                 <Trash2 size={16} />
                                               </button>
                                             )}

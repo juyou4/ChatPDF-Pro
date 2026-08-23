@@ -204,6 +204,7 @@ _VISION_CAPABLE_MODEL_RULES: dict[str, re.Pattern[str]] = {
     "minimax": re.compile(r"^(minimax-m3|abab6\.5)", re.IGNORECASE),
     "doubao": re.compile(r"^(doubao-1\.5-pro|doubao-seed)", re.IGNORECASE),
     "moonshot": re.compile(r"^(moonshot-v1|kimi-k[23])", re.IGNORECASE),
+    "deepseek": re.compile(r"deepseek-v4-flash-vision", re.IGNORECASE),
 }
 
 

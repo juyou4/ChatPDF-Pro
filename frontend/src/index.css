@@ -1286,6 +1286,51 @@ body,
     }
 }
 
+/* 模型服务管理：圆润扁平卡片，不改全局设置页 */
+.model-service-page {
+    --settings-card-border: rgba(72, 62, 54, 0.08);
+    --shadow-settings-card: none;
+    --shadow-settings-card-hover: none;
+    --radius-card: 28px;
+}
+
+.model-service-page .settings-card {
+    border-radius: 28px;
+    box-shadow: none;
+}
+
+.model-service-page .settings-card-interactive:hover,
+.model-service-page .settings-card-interactive:active {
+    transform: none;
+    box-shadow: none;
+}
+
+.model-service-page .accent-cta {
+    border-radius: 16px;
+    box-shadow: none;
+}
+
+.model-service-page .accent-cta:hover:not(:disabled),
+.model-service-page .accent-cta:active:not(:disabled) {
+    transform: none;
+    box-shadow: none;
+}
+
+.model-service-page .accent-cta:active:not(:disabled) {
+    transform: scale(0.99);
+}
+
+.model-service-page .model-service-layout {
+    gap: 1.15rem;
+}
+
+.model-service-page .settings-inset {
+    border: none;
+    border-radius: 18px;
+    background-color: #f7f4f0;
+    box-shadow: none;
+}
+
 .settings-chrome {
     background-color: var(--settings-canvas);
     border-color: rgba(100, 116, 139, 0.14);
@@ -2305,16 +2350,16 @@ body,
 }
 
 .chat-send-icon-swap .glass-btn-icon {
-    width: 19px;
-    height: 19px;
+    width: 16px;
+    height: 16px;
     color: inherit;
     filter: none;
     transition: none;
 }
 
 .chat-send-icon-swap [data-icon='send'] .glass-btn-icon {
-    width: 22px;
-    height: 22px;
+    width: 16px;
+    height: 16px;
 }
 
 .chat-send-icon-swap__icon {
@@ -2811,6 +2856,33 @@ body,
     }
 }
 
+.streaming-math {
+    max-width: 100%;
+}
+
+.streaming-math-inline {
+    display: inline;
+    vertical-align: baseline;
+}
+
+.streaming-math-display {
+    display: block;
+    overflow-x: auto;
+    margin: 0.45em 0;
+}
+
+.streaming-math .katex-display {
+    margin: 0.35em 0;
+}
+
+.streaming-md-committed > :last-child {
+    margin-bottom: 0.55em;
+}
+
+.streaming-md-tail {
+    min-height: 0;
+}
+
 /* 流式输出时，新增内容的淡入效果 */
 /* 流式输出时避免对 *:last-child 做动画（Markdown 结构频繁变化会导致重排/闪烁）
    排除 .dot，否则等待动画的第三个点会被误设为 animation: none */
@@ -2827,7 +2899,17 @@ body,
     }
 }
 
-/* 流式输出打字光标 - 在最后一个块级元素末尾显示闪烁光标 */
+/* 流式输出打字光标 - ReactMarkdown 子节点直接挂在容器下，兼容旧的一层 div 包裹 */
+.streaming-active > p:last-of-type::after,
+.streaming-active > ul:last-child > li:last-child::after,
+.streaming-active > ol:last-child > li:last-child::after,
+.streaming-active > blockquote:last-of-type > p:last-of-type::after,
+.streaming-active > h1:last-child::after,
+.streaming-active > h2:last-child::after,
+.streaming-active > h3:last-child::after,
+.streaming-active > h4:last-child::after,
+.streaming-active > h5:last-child::after,
+.streaming-active > h6:last-child::after,
 .streaming-active > div > p:last-of-type::after,
 .streaming-active > div > li:last-child::after,
 .streaming-active > div > blockquote:last-of-type > p:last-of-type::after {
@@ -2842,6 +2924,16 @@ body,
     border-radius: 1px;
 }
 
+.dark .streaming-active > p:last-of-type::after,
+.dark .streaming-active > ul:last-child > li:last-child::after,
+.dark .streaming-active > ol:last-child > li:last-child::after,
+.dark .streaming-active > blockquote:last-of-type > p:last-of-type::after,
+.dark .streaming-active > h1:last-child::after,
+.dark .streaming-active > h2:last-child::after,
+.dark .streaming-active > h3:last-child::after,
+.dark .streaming-active > h4:last-child::after,
+.dark .streaming-active > h5:last-child::after,
+.dark .streaming-active > h6:last-child::after,
 .dark .streaming-active > div > p:last-of-type::after,
 .dark .streaming-active > div > li:last-child::after,
 .dark .streaming-active > div > blockquote:last-of-type > p:last-of-type::after {
@@ -3070,17 +3162,43 @@ body,
     overflow: hidden;
 }
 
+/* 思考/引用过程栏：和正文分开，避免看起来像下一段回答 */
+.assistant-process-rail {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    max-width: 46rem;
+    margin: 0.2rem 0 1.2rem;
+    padding: 0.7rem 0.8rem 0.8rem;
+    border: 1px solid #e7e1da;
+    border-radius: 16px;
+    background: #f6f3ef;
+}
+
+.assistant-process-rail:empty {
+    display: none;
+}
+
+.dark .assistant-process-rail,
+.chatpdf-shell--dark .assistant-process-rail {
+    border-color: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.035);
+}
+
 /* 头部区域：可点击折叠/展开 */
 .thinking-block-header {
     display: flex;
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
     border: 0.5px solid #e5e7eb;
-    border-radius: 10px;
+    border-radius: 12px;
     cursor: pointer;
     user-select: none;
-    transition: height 150ms ease, border-radius 150ms ease;
+    transition: height 180ms ease, border-radius 180ms ease;
     overflow: hidden;
     position: relative;
+    min-height: 48px;
 }
 
 .thinking-block-header.expanded {
@@ -3091,15 +3209,23 @@ body,
     border-color: #374151;
 }
 
+.thinking-block-head-row {
+    display: flex;
+    align-items: center;
+    height: 40px;
+    flex-shrink: 0;
+    padding: 0 2px 0 0;
+}
+
 /* 原子图标容器 */
 .thinking-block-icon {
-    width: 44px;
+    width: 40px;
     display: flex;
     justify-content: center;
     align-items: center;
-    height: 100%;
+    height: 40px;
     flex-shrink: 0;
-    padding-left: 4px;
+    padding-left: 8px;
 }
 
 .thinking-block-icon > div {
@@ -3111,22 +3237,25 @@ body,
 /* 文本区域 */
 .thinking-block-text {
     flex: 1;
-    height: 100%;
-    padding: 4px 0;
+    min-width: 0;
     overflow: hidden;
     position: relative;
 }
 
 /* 标题（计时器文本） */
 .thinking-block-title {
-    position: absolute;
-    inset: 0 0 auto 0;
-    font-size: 13px;
-    line-height: 14px;
+    position: static;
+    flex: 1;
+    min-width: 0;
+    font-size: 14px;
+    line-height: 22px;
     font-weight: 500;
-    padding: 12px 0;
-    z-index: 10;
+    padding: 0 8px 0 4px;
     color: #374151;
+}
+
+.thinking-block-title.showThinking {
+    padding-top: 0;
 }
 
 .dark .thinking-block-title {
@@ -3174,7 +3303,7 @@ body,
     display: flex;
     justify-content: center;
     align-items: center;
-    height: 100%;
+    height: 40px;
     flex-shrink: 0;
     color: #9ca3af;
     transition: transform 150ms ease;
@@ -3191,13 +3320,13 @@ body,
 /* 思考内容滚动预览（收起时显示） */
 .thinking-preview-container {
     width: 100%;
-    height: 100%;
+    flex: none;
+    padding: 2px 14px 8px 44px;
     mask: linear-gradient(
         to bottom,
         rgb(0 0 0 / 0%) 0%,
-        rgb(0 0 0 / 0%) 30%,
-        rgb(0 0 0 / 25%) 40%,
-        rgb(0 0 0 / 100%) 85%,
+        rgb(0 0 0 / 80%) 10%,
+        rgb(0 0 0 / 100%) 22%,
         rgb(0 0 0 / 100%) 100%
     );
     position: relative;
@@ -3206,25 +3335,90 @@ body,
 
 .thinking-preview-messages {
     width: 100%;
-    position: absolute;
-    top: 100%;
+    position: relative;
     display: flex;
     flex-direction: column;
-    justify-content: flex-end;
+    justify-content: flex-start;
 }
 
 .thinking-preview-line {
     width: 100%;
-    font-size: 11px;
-    color: #9ca3af;
+    height: 22px;
+    line-height: 22px;
+    font-size: 14px;
+    color: #8b837b;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    padding-right: 8px;
+    padding-right: 4px;
 }
 
 .dark .thinking-preview-line {
     color: #6b7280;
+}
+
+.thinking-preview-line-live::after {
+    content: '';
+    display: inline-block;
+    width: 1.5px;
+    height: 14px;
+    margin-left: 3px;
+    background: #bd6f53;
+    border-radius: 1px;
+    vertical-align: -1px;
+    animation: streaming-cursor-blink 0.7s steps(2) infinite;
+}
+
+.dark .thinking-preview-line-live::after {
+    background: #d9a28c;
+}
+
+.thinking-stream-live .streaming-active .whitespace-pre-wrap::after {
+    content: '';
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    margin-left: 2px;
+    background: #bd6f53;
+    border-radius: 1px;
+    vertical-align: text-bottom;
+    animation: streaming-cursor-blink 0.7s steps(2) infinite;
+}
+
+.dark .thinking-stream-live .streaming-active .whitespace-pre-wrap::after {
+    background: #d9a28c;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .thinking-preview-line-live::after,
+    .thinking-stream-live .streaming-active .whitespace-pre-wrap::after {
+        animation: none;
+        opacity: 0.7;
+    }
+}
+
+.thinking-block-header {
+    cursor: pointer;
+    background: transparent;
+}
+
+.assistant-process-rail .thinking-block-header {
+    border: none;
+    background: transparent;
+    border-radius: 0;
+}
+
+.thinking-block-header:hover {
+    background: #f6f3f1;
+}
+
+.assistant-process-rail .thinking-block-header:hover {
+    background: transparent;
+}
+
+.dark .thinking-block-header:hover,
+.thinking-block-header.dark:hover {
+    background: rgba(255, 255, 255, 0.04);
 }
 
 /* 展开的内容区域 */
