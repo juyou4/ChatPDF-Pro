@@ -1,7 +1,7 @@
 {
   "name": "chatpdf-desktop",
   "productName": "ChatPDF Pro",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "description": "Agentic RAG paper and PDF reader",
   "main": "dist/main.js",
   "scripts": {

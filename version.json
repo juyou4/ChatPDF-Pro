@@ -1,8 +1,8 @@
 {
-    "version": "3.1.0",
+    "version": "3.2.0",
     "schema_version": 2,
-    "changelog": "MinerU 全链路解析 · 视觉资产复用 · 阅读工作台优化 · 工程身份同步",
-    "releaseDate": "2026-08-04",
+    "changelog": "流式思考与公式 · 问图对照原图 · 截图提问与设置优化",
+    "releaseDate": "2026-08-23",
     "githubOwner": "juyou4",
     "githubRepo": "ChatPDF-Pro"
 }
