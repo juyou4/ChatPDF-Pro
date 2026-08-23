@@ -33,7 +33,9 @@
       "output": "release"
     },
     "files": [
-      "dist/**/*"
+      "dist/**/*",
+      "resources/icon.ico",
+      "resources/icon.png"
     ],
     "extraResources": [
       {

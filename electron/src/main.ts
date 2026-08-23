@@ -115,6 +115,7 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: 'ChatPDF Pro',
+    icon: path.join(__dirname, '..', 'resources', 'icon.ico'),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
