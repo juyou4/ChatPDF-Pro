@@ -453,6 +453,9 @@ Switch between KaTeX and MathJax in Settings Center. KaTeX is faster; MathJax ha
 
 ## Recent Work
 
+### v3.2.0
+- Streaming thinking and formula rendering, original-figure attachments when asking about a figure, screenshot questions, and settings polish.
+
 ### v3.1.0
 - MinerU full-route parsing identity, downstream cache invalidation, and shared visual assets.
 - Reading workspace UI refinements, persistent font settings, markdown note editing, and toolbar layout improvements.
@@ -466,7 +469,7 @@ Switch between KaTeX and MathJax in Settings Center. KaTeX is faster; MathJax ha
 - Summary, outline, translation, notes, task progress, and answer streaming have been revised together.
 - Cache invalidation, cancellation, stale-generation write guards, and desktop release-data filtering have been tightened.
 
-The current version is [v3.1.0](https://github.com/juyou4/ChatPDF-Pro/releases/tag/v3.1.0). See the [commit history](https://github.com/juyou4/ChatPDF-Pro/commits/main/) and Releases for complete changes.
+The current version is [v3.2.0](https://github.com/juyou4/ChatPDF-Pro/releases/tag/v3.2.0). See the [commit history](https://github.com/juyou4/ChatPDF-Pro/commits/main/) and Releases for complete changes.
 
 ---
 
