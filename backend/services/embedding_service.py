@@ -47,9 +47,27 @@ from services.semantic_group_store import (
     semantic_group_paths,
     validate_semantic_group_artifacts,
 )
+from services.block_evidence_service import build_highlight_page_rects, collect_highlight_slots
 from services.table_visual_metadata import build_table_visual_metadata
 
 logger = logging.getLogger(__name__)
+
+
+def is_local_embedding_runtime_supported() -> bool:
+    """Return whether in-process SentenceTransformer inference is safe.
+
+    The Windows FAISS wheel used by this project loads LLVM OpenMP while the
+    common PyTorch/Conda runtime loads Intel OpenMP. Initializing both in one
+    process can terminate Python with OMP Error #15 before an exception can be
+    raised. Remote embedding providers are unaffected.
+    """
+    if sys.platform != "win32":
+        return True
+    return importlib.util.find_spec("faiss") is None
+
+
+class LocalEmbeddingRuntimeUnavailable(RuntimeError):
+    """The local embedding model cannot run safely in this process."""
 
 
 def _get_sentence_transformer_class():
@@ -1850,6 +1868,12 @@ def get_embedding_function(
 
     # 本地模型：使用 SentenceTransformer
     if provider == "local":
+        if not is_local_embedding_runtime_supported():
+            raise LocalEmbeddingRuntimeUnavailable(
+                "当前 Windows 进程已启用 FAISS，无法安全加载本地 PyTorch "
+                "embedding（OpenMP 运行库冲突）。请使用远程 embedding，"
+                "或在独立进程中运行本地模型。"
+            )
         if not _HAS_SENTENCE_TRANSFORMERS:
             raise ValueError(
                 "本地 embedding 模型不可用（sentence-transformers 未安装）。"
@@ -6521,7 +6545,7 @@ def _apply_group_pre_cap(results: List[dict], per_group_limit: int = 4) -> Tuple
     return kept, stats
 
 
-def _apply_page_pre_cap(results: List[dict], per_page_limit: int = 2) -> Tuple[List[dict], dict]:
+def _apply_page_pre_cap(results: List[dict], per_page_limit: int = 4) -> Tuple[List[dict], dict]:
     if not results or per_page_limit <= 0:
         return results, {}
 
@@ -6556,8 +6580,8 @@ def _apply_page_pre_cap(results: List[dict], per_page_limit: int = 2) -> Tuple[L
 def _apply_group_post_cap(
     results: List[dict],
     top_k: int,
-    per_group_limit: int = 2,
-    per_section_limit: int = 2,
+    per_group_limit: int = 4,
+    per_section_limit: int = 4,
 ) -> Tuple[List[dict], dict]:
     if not results or top_k <= 0:
         return [], {}
@@ -6683,6 +6707,11 @@ def _focus_mode_compress(
 
         scored = [(i, _score(s), s) for i, s in enumerate(sentences)]
         scored.sort(key=lambda x: x[1], reverse=True)
+        if not any(sc > 0 for _i, sc, _s in scored):
+            # Chinese queries against English Methods have no lexical hits.
+            # Falling through would keep the first N sentences — usually the
+            # section intro — and drop the actual procedure.
+            continue
 
         # 选 top max_sentences 个支持句（保持原顺序）
         top_indices = sorted({i for i, sc, _ in scored[:max_sentences]})
@@ -11338,7 +11367,7 @@ def _rrf_merge_chunk_and_group(
     1. 分块级别结果直接参与 RRF 排名
     2. 意群级别结果展开为其包含的所有 chunk，每个 chunk 继承意群的排名
     3. 同一 chunk 在两路结果中的 RRF 分数累加
-    4. 同组 chunk 去重：属于同一意群的多个 chunk 只保留 RRF 分数最高的
+    4. 同组 chunk 去重：属于同一意群的多个 chunk 只保留 RRF 分数最高的 4 个
 
     Args:
         chunk_results: 分块级别检索结果列表
@@ -11404,7 +11433,9 @@ def _rrf_merge_chunk_and_group(
                         }
                     _append_retrieval_source(chunk_data[chunk_text], "semantic_group")
 
-    # 步骤 3：同组 chunk 去重 —— 属于同一意群的多个 chunk 只保留 RRF 分数最高的 2 个
+    # 步骤 3：同组 chunk 去重 —— 属于同一意群的多个 chunk 只保留 RRF 分数最高的 4 个
+    # 与 rerank 前的 group pre_cap 对齐。Methods 这类长节若只留 2 条，常见结果是
+    # 标题+导语，正文定义/步骤会被裁掉。
     if chunk_group_map:
         # 构建反向映射：chunk_index -> group_id（基于 group_chunk_map）
         chunk_idx_to_group = {}
@@ -11414,7 +11445,7 @@ def _rrf_merge_chunk_and_group(
                     if 0 <= idx < len(chunks):
                         chunk_idx_to_group[chunks[idx]] = gid
 
-        # 按 group_id 分组，每组只保留 RRF 分数最高的 2 个 chunk
+        # 按 group_id 分组，每组只保留 RRF 分数最高的 4 个 chunk
         # group_id -> [(chunk_text, rrf_score), ...]
         group_chunks = {}
         chunks_to_remove = set()
@@ -11430,13 +11461,12 @@ def _rrf_merge_chunk_and_group(
             else:
                 group_chunks[gid].append((chunk_text, rrf_score))
 
-        # 每组保留 top-2
+        per_group_keep = 4
         for gid, chunk_list in group_chunks.items():
-            if len(chunk_list) <= 2:
+            if len(chunk_list) <= per_group_keep:
                 continue
-            # 按 RRF 分数降序排列，移除第 3 个及之后的
             chunk_list.sort(key=lambda x: x[1], reverse=True)
-            for chunk_text, _ in chunk_list[2:]:
+            for chunk_text, _ in chunk_list[per_group_keep:]:
                 chunks_to_remove.add(chunk_text)
 
         # 移除被去重的 chunk
@@ -11738,9 +11768,31 @@ def _apply_query_intent_boost(results: List[dict], query: str) -> List[dict]:
     wants_limitation = any(hint in query_lower for hint in (
         "limitation", "limitations", "future work", "局限", "限制", "未来", "改进",
     ))
+    wants_contribution = any(hint in query_lower for hint in (
+        "contribution", "contributions", "贡献", "创新点",
+    ))
+    wants_related = any(hint in query_lower for hint in (
+        "related work", "related works", "相关工作",
+    ))
+    wants_conclusion = any(hint in query_lower for hint in (
+        "conclusion", "conclusions", "结论", "主要发现",
+    ))
     wants_cost = _is_numeric_table_cost_query(query)
+    from services.paper_section_router import (
+        detect_query_facets,
+        heading_matches_any_facet,
+        is_figure_identity_query,
+        is_formula_identity_query,
+    )
+    query_facets = detect_query_facets(query)
+    wants_figure = is_figure_identity_query(query)
+    wants_formula = is_formula_identity_query(query)
 
-    if not any((wants_intro, wants_experiment, wants_limitation, wants_cost)):
+    if not any((
+        wants_intro, wants_experiment, wants_limitation, wants_cost,
+        wants_contribution, wants_related, wants_conclusion,
+        query_facets, wants_figure, wants_formula,
+    )):
         return results
 
     boosted = False
@@ -11770,6 +11822,41 @@ def _apply_query_intent_boost(results: List[dict], query: str) -> List[dict]:
                 factor *= 1.2
             elif importance < 1.0:
                 factor *= 0.8
+
+        if wants_contribution:
+            if any(token in sample for token in (
+                "contribution", "contributions", "we propose", "this paper",
+                "贡献", "创新", "本文提出",
+            )):
+                factor *= 1.25
+            if _is_reference_like_text(chunk_text):
+                factor *= 0.45
+
+        if wants_related:
+            if any(token in sample for token in ("related work", "related works", "prior work", "previous work", "相关工作")):
+                factor *= 1.25
+            elif _is_reference_like_text(chunk_text):
+                factor *= 0.4
+
+        if wants_conclusion:
+            if any(token in sample for token in ("conclusion", "conclusions", "in summary", "we conclude", "结论", "综上所述")):
+                factor *= 1.25
+
+        heading = str(item.get("chunk_heading") or item.get("section_path") or item.get("section_title") or "")
+        if query_facets and heading_matches_any_facet(heading, query_facets):
+            factor *= 1.35
+
+        if wants_figure:
+            chunk_type = str(item.get("chunk_type") or item.get("block_type") or "").lower()
+            if chunk_type in {"figure", "caption", "image"} or re.search(r"(?:figure|fig\.?|图)\s*\d+", sample):
+                factor *= 1.35
+            elif _is_reference_like_text(chunk_text):
+                factor *= 0.4
+
+        if wants_formula:
+            chunk_type = str(item.get("chunk_type") or item.get("block_type") or "").lower()
+            if chunk_type == "formula" or "equation" in sample or "公式" in sample:
+                factor *= 1.35
 
         if wants_cost:
             has_cost_anchor = _has_numeric_table_cost_anchor(sample) or _has_numeric_table_cost_anchor(chunk_text)
@@ -12002,6 +12089,89 @@ def _normalize_numeric_exact_term(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
+def _table_ids_from_retrieval_hits(results: Optional[List[dict]]) -> set[str]:
+    table_ids: set[str] = set()
+    for item in results or []:
+        if not isinstance(item, dict):
+            continue
+        table_id = _normalize_numeric_exact_term(
+            item.get("table_id") or _extract_table_id(str(item.get("table_caption") or ""))
+        )
+        if table_id:
+            table_ids.add(table_id)
+    return table_ids
+
+
+def _pages_from_retrieval_hits(results: Optional[List[dict]], neighbor: int = 1) -> set[int]:
+    pages: set[int] = set()
+    for item in results or []:
+        if not isinstance(item, dict):
+            continue
+        for page in _extract_page_candidates_from_metadata(item):
+            if isinstance(page, int) and page > 0:
+                pages.add(page)
+                if neighbor > 0:
+                    pages.add(page - 1)
+                    pages.add(page + 1)
+        try:
+            page = int(item.get("page") or 0)
+        except (TypeError, ValueError):
+            page = 0
+        if page > 0:
+            pages.add(page)
+            if neighbor > 0:
+                pages.add(page - 1)
+                pages.add(page + 1)
+    pages.discard(0)
+    return {page for page in pages if page > 0}
+
+
+def _locate_numeric_exact_row_tables(
+    chunk_metadata: List[dict],
+    chunk_types: List[str],
+    locate_terms: List[str],
+    max_tables: int = 2,
+) -> set[str]:
+    """无表号时先用 caption/header 定位少量表，避免扫描全部 table_row。"""
+    terms = [term for term in locate_terms if term and len(term) >= 3]
+    if not terms:
+        return set()
+
+    table_refs: dict[str, str] = {}
+    for idx, metadata in enumerate(chunk_metadata or []):
+        if not isinstance(metadata, dict):
+            continue
+        chunk_type = (
+            chunk_types[idx] if idx < len(chunk_types) else metadata.get("chunk_type") or ""
+        )
+        chunk_type = str(chunk_type).strip().lower()
+        if chunk_type != "table_row" and metadata.get("table_row_slice_kind") != "exact":
+            continue
+        table_id = _normalize_numeric_exact_term(metadata.get("table_id") or "")
+        if not table_id or table_id in table_refs:
+            continue
+        table_refs[table_id] = _normalize_numeric_exact_term(
+            " ".join(
+                str(metadata.get(key) or "")
+                for key in (
+                    "table_id",
+                    "table_caption",
+                    "numeric_table_exact_context_caption",
+                    "table_header",
+                    "numeric_table_exact_context_header",
+                )
+            )
+        )
+
+    ranked: list[tuple[int, str]] = []
+    for table_id, ref_text in table_refs.items():
+        hits = sum(1 for term in terms if term in ref_text)
+        if hits:
+            ranked.append((hits, table_id))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return {table_id for _, table_id in ranked[: max(1, int(max_tables or 1))]}
+
+
 def _augment_with_numeric_exact_row_search(
     results: List[dict],
     chunks: List[str],
@@ -12100,13 +12270,56 @@ def _augment_with_numeric_exact_row_search(
         if text:
             existing_texts.add(text)
 
+    locate_terms = [
+        term
+        for term in (
+            grouped_terms["methods"]
+            + grouped_terms["datasets"]
+            + grouped_terms["backbones"]
+        )
+        if term and len(term) >= 3
+    ]
+    row_terms = [
+        term
+        for term in (grouped_terms["methods"] + grouped_terms["backbones"])
+        if term and len(term) >= 3
+    ]
+    scoped_table_ids: set[str] = set()
+    scoped_pages: set[int] = set()
+    if not target_tables:
+        scoped_table_ids = _locate_numeric_exact_row_tables(
+            chunk_metadata,
+            chunk_types,
+            locate_terms,
+        )
+        if not scoped_table_ids:
+            scoped_table_ids = _table_ids_from_retrieval_hits(results)
+        if not scoped_table_ids:
+            scoped_pages = _pages_from_retrieval_hits(results)
+        if not scoped_table_ids and not scoped_pages:
+            logger.info("[NumericExactSearch] 无表号且无法定位表/页，跳过全量行扫描")
+            return results
+        logger.info(
+            "[NumericExactSearch] 无表号扫描范围 tables=%s pages=%s",
+            sorted(scoped_table_ids) or "-",
+            sorted(scoped_pages) or "-",
+        )
+
+    compact_cache: dict[str, str] = {}
+
     def _term_hit(term: str, text: str) -> bool:
         if not term:
             return False
         if term in text:
             return True
-        compact_term = re.sub(r"[\s_\-]+", "", term)
-        compact_text = re.sub(r"[\s_\-]+", "", text)
+        compact_term = compact_cache.get(term)
+        if compact_term is None:
+            compact_term = re.sub(r"[\s_\-]+", "", term)
+            compact_cache[term] = compact_term
+        compact_text = compact_cache.get(text)
+        if compact_text is None:
+            compact_text = re.sub(r"[\s_\-]+", "", text)
+            compact_cache[text] = compact_text
         return bool(compact_term and compact_term in compact_text)
 
     def _score_candidate(chunk_text: str, metadata: dict, chunk_type: str) -> tuple[float, list[str]]:
@@ -12203,6 +12416,22 @@ def _augment_with_numeric_exact_row_search(
         chunk_type = (chunk_types[idx] if idx < len(chunk_types) else metadata.get("chunk_type") or "").strip().lower()
         if chunk_type != "table_row" and metadata.get("table_row_slice_kind") != "exact":
             continue
+        if scoped_table_ids:
+            row_table_id = _normalize_numeric_exact_term(metadata.get("table_id") or "")
+            if row_table_id not in scoped_table_ids:
+                continue
+        if scoped_pages:
+            page_num = chunk_pages[idx] if idx < len(chunk_pages) else 0
+            page_num = _resolve_primary_page_from_metadata(metadata, fallback=page_num)
+            if page_num not in scoped_pages:
+                continue
+        if not target_tables and row_terms:
+            row_blob = _normalize_numeric_exact_term(
+                f"{metadata.get('row_text') or ''} {chunk_text}"
+            )
+            # 数据集名常写在每一行上下文里，只用来定位表；行预筛只认方法/backbone。
+            if not any(term in row_blob for term in row_terms):
+                continue
         score, hits = _score_candidate(str(chunk_text), metadata, chunk_type)
         if score < (5.8 if target_tables else 5.0):
             continue
@@ -12776,6 +13005,7 @@ def _sanitize_by_chunk_type(
         else None
     )
     is_formula_query = "formula" in modalities or any(t in query_lower for t in _FORMULA_QUERY_TOKENS)
+    is_figure_query = "figure_caption" in _resolve_evidence_need(query, frozen_evidence_need)
     is_numeric_query = any(t in query_lower for t in _NUMERIC_QUERY_TOKENS)
     is_numeric_table_query = "numeric_table" in _resolve_evidence_need(
         query,
@@ -12814,9 +13044,11 @@ def _sanitize_by_chunk_type(
         if chunk_type == "formula" and not is_formula_query:
             penalty *= 0.25
         elif chunk_type == "caption":
-            if not is_table_query and not is_visual_query:
+            if is_figure_query or is_visual_query:
+                penalty *= 1.0
+            elif not is_table_query:
                 penalty *= 0.50
-            elif not is_table_query and not is_numeric_query:
+            elif not is_numeric_query:
                 penalty *= 0.80
         elif chunk_type == "table" and not is_table_query:
             penalty *= 0.70 if is_visual_query else 0.35
@@ -13410,6 +13642,119 @@ def _citation_anchor_value(item: dict, *keys):
     return None
 
 
+def _citation_anchor_extra_pages(item: dict) -> list[int]:
+    pages: list[int] = []
+    for container in (
+        _citation_anchor_value(item, "page_rects"),
+        _citation_anchor_value(item, "highlight_slots"),
+    ):
+        if not isinstance(container, list):
+            continue
+        for entry in container:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                page = int(entry.get("page") or 0)
+            except (TypeError, ValueError):
+                continue
+            if page > 0:
+                pages.append(page)
+    return pages
+
+
+def _citation_anchor_page_range(page: int, page_range, extra_pages: list[int] | None = None) -> list[int] | None:
+    pages: list[int] = []
+    if page > 0:
+        pages.append(page)
+    if isinstance(page_range, (list, tuple)) and page_range:
+        try:
+            start = int(page_range[0])
+            end = int(page_range[1] if len(page_range) > 1 else start)
+        except (TypeError, ValueError):
+            start = end = 0
+        if start > 0:
+            pages.append(start)
+        if end > 0:
+            pages.append(end)
+    for extra in extra_pages or []:
+        try:
+            number = int(extra or 0)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            pages.append(number)
+    if not pages:
+        return None
+    return [min(pages), max(pages)]
+
+
+def _citation_anchor_page_rects(item: dict, *, page: int, bbox, rects: list[list[float]]) -> list[dict]:
+    slots = _citation_anchor_value(item, "highlight_slots")
+    existing = _citation_anchor_value(item, "page_rects")
+    return build_highlight_page_rects(
+        primary_page=page,
+        primary_bbox=bbox if isinstance(bbox, list) else None,
+        primary_rects=rects,
+        slots=slots if isinstance(slots, list) else None,
+        existing_page_rects=existing if isinstance(existing, list) else None,
+    )
+
+
+def _merge_result_highlight_slots(result: dict, highlight_slots: dict[str, list[dict]]) -> None:
+    """Attach empty-box slots from the live block index without mixing pages into rects."""
+    if not isinstance(result, dict):
+        return
+    block_id = str(result.get("block_id") or "").strip()
+    slots = [
+        slot
+        for slot in (result.get("highlight_slots") or [])
+        if isinstance(slot, dict)
+    ]
+    seen = {
+        (str(slot.get("block_id") or ""), int(slot.get("page") or 0), tuple(slot.get("bbox") or []))
+        for slot in slots
+    }
+    for slot in highlight_slots.get(block_id) or []:
+        if not isinstance(slot, dict):
+            continue
+        key = (
+            str(slot.get("block_id") or ""),
+            int(slot.get("page") or 0),
+            tuple(slot.get("bbox") or []),
+        )
+        if key in seen:
+            continue
+        slots.append(slot)
+        seen.add(key)
+    try:
+        page = int(result.get("page") or 0)
+    except (TypeError, ValueError):
+        page = 0
+    bbox = _valid_citation_bbox(result.get("bbox"))
+    raw_rects = result.get("rects") if isinstance(result.get("rects"), list) else []
+    rects = [value for value in (_valid_citation_bbox(item) for item in raw_rects) if value]
+    page_rects = _citation_anchor_page_rects(
+        {**result, "highlight_slots": slots},
+        page=page,
+        bbox=bbox,
+        rects=rects,
+    )
+    if page_rects:
+        result["page_rects"] = page_rects
+        expanded = _citation_anchor_page_range(
+            page,
+            result.get("page_range"),
+            [int(item.get("page") or 0) for item in page_rects],
+        )
+        if expanded:
+            result["page_range"] = expanded
+        primary = next((item for item in page_rects if int(item.get("page") or 0) == page), None)
+        if primary and primary.get("rects"):
+            result["rects"] = list(primary["rects"])[:64]
+    if slots:
+        result["highlight_slots"] = slots
+
+
 def _citation_anchor_metadata_from_result(item: dict) -> dict:
     if not isinstance(item, dict):
         return {}
@@ -13426,17 +13771,12 @@ def _citation_anchor_metadata_from_result(item: dict) -> dict:
         page = int(page or 0)
     except (TypeError, ValueError):
         page = 0
+    extra_pages = _citation_anchor_extra_pages(item)
+    expanded_range = _citation_anchor_page_range(page, page_range, extra_pages)
     if page > 0:
         anchor["page"] = page
-        anchor["page_range"] = [page, page]
-    elif isinstance(page_range, (list, tuple)) and page_range:
-        try:
-            start = int(page_range[0])
-            end = int(page_range[1] if len(page_range) > 1 else start)
-        except (TypeError, ValueError):
-            start = end = 0
-        if start > 0 and end >= start:
-            anchor["page_range"] = [start, end]
+    if expanded_range:
+        anchor["page_range"] = expanded_range
 
     for key in ("block_id", "chunk_id"):
         value = _citation_anchor_value(item, key)
@@ -13450,11 +13790,31 @@ def _citation_anchor_metadata_from_result(item: dict) -> dict:
             break
 
     raw_rects = _citation_anchor_value(item, "rects", "line_rects")
+    rects: list[list[float]] = []
     if isinstance(raw_rects, list):
         rects = [_valid_citation_bbox(value) for value in raw_rects]
         rects = [value for value in rects if value]
         if rects:
             anchor["rects"] = rects[:64]
+
+    page_rects = _citation_anchor_page_rects(
+        item,
+        page=page,
+        bbox=anchor.get("bbox"),
+        rects=rects,
+    )
+    if page_rects:
+        anchor["page_rects"] = page_rects
+        primary = next((entry for entry in page_rects if int(entry.get("page") or 0) == page), None)
+        if primary and primary.get("rects"):
+            anchor["rects"] = list(primary["rects"])[:64]
+        expanded_range = _citation_anchor_page_range(
+            page,
+            expanded_range,
+            [int(entry.get("page") or 0) for entry in page_rects],
+        )
+        if expanded_range:
+            anchor["page_range"] = expanded_range
 
     page_size = _citation_anchor_value(item, "page_size")
     if not isinstance(page_size, (list, tuple)) or len(page_size) < 2:
@@ -13642,6 +14002,7 @@ def _attach_block_index_citation_anchors(
         if isinstance(page, dict) and int(page.get("page") or 0) > 0
     }
     parse_generation = str(block_index.get("parse_generation") or "")
+    highlight_slots = collect_highlight_slots(block_index)
     attached = 0
 
     for result in results:
@@ -13665,6 +14026,7 @@ def _attach_block_index_citation_anchors(
             result.setdefault("page_size", page_size)
             if parse_generation:
                 result.setdefault("parse_generation", parse_generation)
+            _merge_result_highlight_slots(result, highlight_slots)
             continue
 
         blocks = [
@@ -13703,9 +14065,11 @@ def _attach_block_index_citation_anchors(
             result["rects"] = line_rects
         result["coordinate_space"] = "pdf_top_left_points"
         result["page_size"] = page_size
-        result["page_range"] = [page_number, page_number]
+        if not result.get("page_range"):
+            result["page_range"] = [page_number, page_number]
         if parse_generation:
             result["parse_generation"] = parse_generation
+        _merge_result_highlight_slots(result, highlight_slots)
         attached += 1
 
     if attached:
@@ -13777,6 +14141,12 @@ def _filter_results_to_intent_page_scope(
         if _result_overlaps_page_scope(result, page_ranges)
     ]
 
+
+def _stamp_timing(timings: dict, key: str, started: float) -> None:
+    """把一段墙钟时间写入 public timings（毫秒，一位小数）。"""
+    timings[key] = round((time.perf_counter() - started) * 1000, 1)
+
+
 def search_document_chunks(
     doc_id: str,
     query: str,
@@ -13815,6 +14185,8 @@ def search_document_chunks(
           未执行的阶段不包含对应字段
     """
     original_query = query
+    timings = {}
+    t_total = time.perf_counter()
 
     decision = _resolve_intent_decision(original_query, intent_decision)
     page_scope_ranges = _normalize_intent_page_ranges(decision)
@@ -13830,6 +14202,7 @@ def search_document_chunks(
     # intent orchestration passes a frozen retrieval query and must not let the
     # lower layer mutate it a second time.
     pre_rewrite_evidence_need = list(decision.get("evidence_need") or [])
+    t_rewrite = time.perf_counter()
     try:
         if not query_is_canonical:
             rewritten_query = _query_rewriter_singleton.rewrite(
@@ -13848,6 +14221,8 @@ def search_document_chunks(
                 )
     except Exception as e:
         logger.warning(f"[{doc_id}] 查询改写失败，使用原始查询: {e}")
+    if not query_is_canonical:
+        timings["query_rewrite_ms"] = round((time.perf_counter() - t_rewrite) * 1000, 1)
 
     # 查询类型分析 + 动态 candidate_k（提升召回率）
     query_type = str(decision.get("query_type") or "specific")
@@ -13884,15 +14259,10 @@ def search_document_chunks(
             logger.info(f"[{doc_id}] Wide-net rerank: candidate_k {candidate_k} → {wide_k}")
             candidate_k = wide_k
 
-    # 检索耗时记录（需求 10.1）
-    timings = {}
-    # Candidate-level observability is deliberately request-local.  The
-    # snapshot never participates in ranking and only receives opaque ids,
-    # scores, locations and stage decisions.
+    # 检索耗时记录（需求 10.1）。query_rewrite_ms 已在改写阶段写入。
     from services.retrieval_decision_snapshot import RetrievalDecisionSnapshot
 
     decision_snapshot = RetrievalDecisionSnapshot(doc_id, identity=retrieval_identity)
-    t_total = time.perf_counter()
 
     index_path = os.path.join(vector_store_dir, f"{doc_id}.index")
     chunks_path = os.path.join(vector_store_dir, f"{doc_id}.pkl")
@@ -13901,6 +14271,7 @@ def search_document_chunks(
         raise HTTPException(status_code=404, detail="向量索引未找到,请重新上传PDF")
 
     # 优先从 LRU 缓存读取，避免每次磁盘 I/O
+    t_index = time.perf_counter()
     cached = _index_cache.get_index(doc_id, index_path, chunks_path)
     if cached is not None:
         index, data = cached
@@ -13909,6 +14280,7 @@ def search_document_chunks(
         with open(chunks_path, "rb") as f:
             data = pickle.load(f)
         _index_cache.put_index(doc_id, index, data, index_path, chunks_path)
+    timings["index_load_ms"] = round((time.perf_counter() - t_index) * 1000, 1)
 
     data = _require_current_vector_index_schema(data, doc_id)
     index_meta = data.get("index_meta") if isinstance(data, dict) else {}
@@ -14083,6 +14455,9 @@ def search_document_chunks(
                 )
                 _query_vector_cache.put(embedding_cache_scope, hyde_cache_key, hyde_vector)
 
+        timings["embed_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        t_faiss = time.perf_counter()
+
         # 主查询检索（使用 HyDE 向量或原始查询向量）
         primary_vector = hyde_vector if hyde_vector is not None else query_vector
         _emit_retrieval_progress(progress_callback, "vector_search", "正在进行向量召回...")
@@ -14091,6 +14466,7 @@ def search_document_chunks(
         # 如果启用了 HyDE，同时用原始查询向量检索并合并（双路 RRF）
         if hyde_vector is not None:
             D_orig, I_orig = index.search(np.asarray(query_vector, dtype="float32"), search_k)
+        timings["faiss_search_ms"] = round((time.perf_counter() - t_faiss) * 1000, 1)
     except HTTPException:
         raise
     except Exception as e:
@@ -14482,21 +14858,28 @@ def search_document_chunks(
         timings["group_search_ms"] = group_search_elapsed
     _emit_retrieval_progress(progress_callback, "group_search_done", "语义意群融合完成。")
 
+    t_assemble = time.perf_counter()
     # 邻居 chunk 上下文扩展
+    t_stage = time.perf_counter()
     try:
         _expand_n = get_context_chunk_expansion()
         if _expand_n > 0:
             results = _chunk_expander.expand_context_chunks(results, chunks, expand_n=_expand_n)
     except Exception as _expand_err:
         logger.debug(f"[{doc_id}] chunk 扩展跳过: {_expand_err}")
+    _stamp_timing(timings, "assemble_expand_ms", t_stage)
 
     # 同页表格补充检索
+    t_stage = time.perf_counter()
     results = _augment_with_table_chunks(
         results, chunks, pages, _page_index,
         query=analysis_query, evidence_need=evidence_need,
         chunk_pages=chunk_pages,
         chunk_metadata=chunk_metadata,
     )
+    _stamp_timing(timings, "assemble_table_chunks_ms", t_stage)
+
+    t_stage = time.perf_counter()
     results = _augment_with_numeric_exact_row_search(
         results,
         chunks=chunks,
@@ -14508,6 +14891,9 @@ def search_document_chunks(
         query=analysis_query,
         evidence_need=evidence_need,
     )
+    _stamp_timing(timings, "assemble_exact_row_ms", t_stage)
+
+    t_stage = time.perf_counter()
     results = _apply_query_intent_boost(results, analysis_query)
     results = _apply_numeric_table_boost(results, analysis_query, evidence_need)
     results = _filter_reference_pollution(results, analysis_query, evidence_need=evidence_need)
@@ -14531,6 +14917,9 @@ def search_document_chunks(
         included_reason="quality_threshold_passed",
         excluded_reason="quality_threshold_or_noise_filter",
     )
+    _stamp_timing(timings, "assemble_post_clean_ms", t_stage)
+
+    t_stage = time.perf_counter()
     results = _annotate_results_for_evidence_rerank(
         doc_id=doc_id,
         results=results,
@@ -14544,6 +14933,9 @@ def search_document_chunks(
         group_chunk_map=group_chunk_map,
         include_rerank_text=use_rerank,
     )
+    _stamp_timing(timings, "assemble_annotate_ms", t_stage)
+
+    t_stage = time.perf_counter()
     results = _expand_numeric_table_evidence_units(
         results,
         analysis_query,
@@ -14561,6 +14953,9 @@ def search_document_chunks(
         included_reason="type_policy_passed",
         excluded_reason="duplicate_or_type_policy",
     )
+    _stamp_timing(timings, "assemble_evidence_units_ms", t_stage)
+
+    t_stage = time.perf_counter()
     if use_rerank:
         results, pre_cap_stats = _apply_group_pre_cap(results)
         page_capped_results, page_pre_cap_stats = _apply_page_pre_cap(results)
@@ -14594,6 +14989,9 @@ def search_document_chunks(
         included_reason="rerank_or_final_rank_selected",
         excluded_reason="rerank_floor_or_top_k",
     )
+    _stamp_timing(timings, "assemble_rank_ms", t_stage)
+
+    t_stage = time.perf_counter()
     results = _prioritize_numeric_table_results(results, analysis_query)
     results = _ensure_structured_table_row_shard_results(
         results,
@@ -14616,8 +15014,9 @@ def search_document_chunks(
             timings["visual_overlay_retained"] = 1
             if before_visual_slot:
                 logger.info("[%s] retained one qualified visual evidence result through final ranking", doc_id)
+    _stamp_timing(timings, "assemble_table_shards_ms", t_stage)
 
-
+    t_stage = time.perf_counter()
     results = _attach_block_index_citation_anchors(
         doc_id,
         vector_store_dir,
@@ -14641,17 +15040,24 @@ def search_document_chunks(
     for item in results:
         if isinstance(item, dict):
             item["retrieval_candidate_id"] = decision_snapshot.candidate_id(item)
+    _stamp_timing(timings, "assemble_citation_ms", t_stage)
+    timings["assemble_ms"] = round((time.perf_counter() - t_assemble) * 1000, 1)
     # 总耗时记录（需求 10.1）
     timings["total_ms"] = round((time.perf_counter() - t_total) * 1000, 1)
     timings["_decision_snapshot"] = decision_snapshot.to_dict()
-    logger.info(f"[{doc_id}] 检索耗时: {timings}")
+    public_timings = {
+        key: value
+        for key, value in timings.items()
+        if not str(key).startswith("_")
+    }
+    logger.info("[%s] 检索耗时: %s", doc_id, public_timings)
     _emit_retrieval_progress(
         progress_callback,
         "complete",
         # 检索耗时通过结构化 timings 传递给诊断和任务账本；不要把内部计时
         # 拼进实时思考文案，否则用户会在模型仍在思考时看到“检索耗时”。
         "检索完成，正在整理上下文...",
-        timings=timings,
+        timings=public_timings,
     )
 
     return results, timings
@@ -15433,6 +15839,12 @@ def _format_layered_context(
                 continue
             seen_chunks.add(key)
             page = r.get("page", 0) if isinstance(r, dict) else 0
+            if re.search(
+                r"in this section,?\s+we\s+first|本节(?:首先|将|介绍|概述)",
+                ct,
+                re.IGNORECASE,
+            ) and len(ct) < 500:
+                continue
             preview = ct[:400] + ("..." if len(ct) > 400 else "")
             top_chunks.append(f"(p.{page}) {preview}")
             if len(top_chunks) >= 3:
@@ -15555,7 +15967,7 @@ def _build_context_with_groups(
         (context_string, retrieval_meta) 元组，如果意群不可用返回 (None, {})
     """
     from services.semantic_group_service import SemanticGroupService
-    from services.granularity_selector import GranularitySelector
+    from services.granularity_selector import GranularitySelector, _wants_section_full
     from services.token_budget import TokenBudgetManager
     from services.context_builder import ContextBuilder
     from services.retrieval_logger import RetrievalLogger, RetrievalTrace
@@ -15633,15 +16045,23 @@ def _build_context_with_groups(
     # 步骤 4：使用 TokenBudgetManager 调整 Token 预算
     # P0-B: 按题型设差异化 Token 上限，避免 extraction 塞进 5000+ token
     _TYPE_TOKEN_CAP = {"extraction": 2000, "specific": 3500, "analytical": 5000, "overview": 7000}
-    effective_budget = min(
-        config.max_token_budget,
-        _TYPE_TOKEN_CAP.get(selection_info.query_type, config.max_token_budget),
+    protect_full = _wants_section_full(query, intent_decision)
+    effective_budget = (
+        config.max_token_budget
+        if protect_full
+        else min(
+            config.max_token_budget,
+            _TYPE_TOKEN_CAP.get(selection_info.query_type, config.max_token_budget),
+        )
     )
     budget_manager = TokenBudgetManager(
         max_tokens=effective_budget,
         reserve_for_answer=config.reserve_for_answer,
     )
-    fitted_selections = budget_manager.fit_within_budget(mixed_selections)
+    fitted_selections = budget_manager.fit_within_budget(
+        mixed_selections,
+        protect_full=protect_full,
+    )
     evidence_need_for_context = list((intent_decision or {}).get("evidence_need") or [])
     if not isinstance(intent_decision, dict):
         evidence_need_for_context = _analyze_evidence_need(query)

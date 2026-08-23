@@ -255,7 +255,7 @@ TOOL_SCHEMAS: list[dict] = [
         "type": "function",
         "function": {
             "name": "fetch",
-            "description": "按 groupId 获取语义组内容",
+            "description": "按 groupId 获取语义组正文。默认 full；digest 只适合表格/短查，不要用来解释方法节。",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -263,7 +263,7 @@ TOOL_SCHEMAS: list[dict] = [
                     "granularity": {
                         "type": "string",
                         "enum": ["full", "digest", "summary"],
-                        "default": "digest",
+                        "default": "full",
                     },
                 },
                 "required": ["groupId"],

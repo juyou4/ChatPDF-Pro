@@ -3,7 +3,10 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  FileCode,
   FileText,
+  FolderGit2,
+  GitBranch,
   Globe,
   Hash,
   Layers,
@@ -16,6 +19,7 @@ import {
   ThumbsUp,
   Wrench,
 } from 'lucide-react';
+import { cloneAgentTrace, subscribeLiveAgentTrace } from '../utils/agentTraceLive';
 
 const PlanningThoughtIcon = ({ className = '' }) => (
   <svg
@@ -47,12 +51,18 @@ const TOOL_META = {
   fetch: { label: '获取意群', icon: Layers, family: 'read' },
   map: { label: '查看文档地图', icon: Map, family: 'read' },
   analyze_visual_evidence: { label: '分析图表证据', icon: Sparkles, family: 'visual' },
+  list_paper_repos: { label: '列出论文仓库', icon: FolderGit2, family: 'repo' },
+  search_paper_repo: { label: '检索仓库路径', icon: GitBranch, family: 'repo' },
+  read_paper_repo: { label: '读取仓库文件', icon: FileCode, family: 'repo' },
   complete: { label: '结束检索', icon: Check, family: 'complete' },
 };
+
+const PAPER_REPO_TOOLS = new Set(['list_paper_repos', 'search_paper_repo', 'read_paper_repo']);
 
 const FAMILY_META = {
   search: { icon: Search, done: (count) => `执行了 ${count} 次搜索`, running: '正在搜索证据' },
   read: { icon: FileText, done: (count) => `读取了 ${count} 处文档内容`, running: '正在读取文档内容' },
+  repo: { icon: FolderGit2, done: (count) => `查看了 ${count} 处仓库代码`, running: '正在查看论文仓库' },
   visual: { icon: Sparkles, done: (count) => `分析了 ${count} 个视觉证据`, running: '正在分析视觉证据' },
   complete: { icon: Check, done: () => '证据收集完成', running: '正在结束检索' },
   other: { icon: Wrench, done: (count) => `执行了 ${count} 次工具调用`, running: '正在调用工具' },
@@ -91,6 +101,15 @@ const QUERY_TYPE_LABELS = {
   analytical: '分析',
   specific: '具体',
   inventory: '枚举',
+};
+
+const EVIDENCE_NEED_LABELS = {
+  code_implementation: '代码实现',
+  section_explanation: '章节说明',
+  comparison_multi_aspect: '多方面比较',
+  reference_meta: '参考文献',
+  analysis_explanation: '分析解释',
+  numeric_table: '数值表',
 };
 
 const EVIDENCE_STATUS_LABELS = {
@@ -134,13 +153,168 @@ const formatElapsedMs = (value) => {
   return `${(ms / 1000).toFixed(1)}s`;
 };
 
+const LiveElapsedLabel = ({ startedAt }) => {
+  const ref = useRef(null);
+  useEffect(() => {
+    const started = Number(startedAt);
+    if (!Number.isFinite(started) || started <= 0) return undefined;
+    const tick = () => {
+      if (ref.current) {
+        ref.current.textContent = formatElapsedMs(Math.max(0, Date.now() - started));
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  return <span ref={ref} className="tabular-nums" />;
+};
+
 const normalizePlanningLabel = (round, message) => {
   const text = normalizeText(message, 180);
   if (!text || /LLM\s*规划中/i.test(text)) return `规划第 ${round} 轮检索`;
   return text;
 };
 
+const uniqueTexts = (values, limit = 6) => {
+  const seen = [];
+  for (const value of values || []) {
+    const text = String(value || '').trim();
+    if (!text || seen.includes(text)) continue;
+    seen.push(text);
+    if (seen.length >= limit) break;
+  }
+  return seen;
+};
+
+export const formatEvidenceNeedLabel = (value) => {
+  const key = String(value || '').trim();
+  return EVIDENCE_NEED_LABELS[key] || key;
+};
+
+export const formatPaperRepoName = (repoId) => {
+  const text = String(repoId || '').trim();
+  if (!text) return '';
+  const match = text.match(/^paper-repo:(?:github|gitlab|huggingface):(.+)$/i);
+  return match ? match[1] : text.replace(/^paper-repo:/i, '');
+};
+
+export const parsePaperRepoQuery = (raw) => {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    return {
+      repoId: String(raw.repoId || raw.repo_id || '').trim(),
+      path: String(raw.path || '').trim(),
+      query: String(raw.query || '').trim(),
+    };
+  }
+  const text = String(raw || '').trim();
+  if (!text) return { repoId: '', path: '', query: '' };
+  if (text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return {
+          repoId: String(parsed.repoId || parsed.repo_id || '').trim(),
+          path: String(parsed.path || '').trim(),
+          query: String(parsed.query || '').trim(),
+        };
+      }
+    } catch {
+      return { repoId: '', path: '', query: '' };
+    }
+  }
+  return { repoId: '', path: '', query: text };
+};
+
+const formatPaperRepoSymbolLabel = (symbol) => {
+  if (typeof symbol === 'string') return symbol.trim();
+  if (!symbol || typeof symbol !== 'object') return '';
+  const name = String(symbol.name || '').trim();
+  if (!name) return '';
+  const kind = String(symbol.kind || '').trim().toLowerCase() === 'class' ? 'class' : 'def';
+  const start = Number(symbol.line);
+  const end = Number(symbol.end_line);
+  let span = '';
+  if (Number.isFinite(start) && start > 0) {
+    span = Number.isFinite(end) && end > start ? `L${start}-L${end}` : `L${start}`;
+  }
+  return span ? `${kind} ${name}:${span}` : `${kind} ${name}`;
+};
+
+export const paperRepoOperationDetail = (operation) => {
+  const tool = String(operation?.tool || '').trim();
+  const summary = normalizeText(operation?.resultMessage, 280);
+  if (operation?.status === 'done' && summary) return summary;
+
+  const parsed = parsePaperRepoQuery(operation?.query);
+  const repo = formatPaperRepoName(parsed.repoId);
+  if (tool === 'list_paper_repos') {
+    return repo ? `已列出论文仓库：${repo}` : '已列出论文中的公开仓库';
+  }
+  if (tool === 'search_paper_repo') {
+    return parsed.query ? `已按路径检索：${parsed.query}` : '已检索仓库路径';
+  }
+  if (tool === 'read_paper_repo') {
+    if (parsed.path) return `已读取：${parsed.path}`;
+    return repo ? `已读取 ${repo} 的 README` : '已读取仓库 README';
+  }
+  return summary || getToolMeta(tool).label;
+};
+
+export const buildPaperRepoDiagnosticItems = (diagnostics) => {
+  const items = [];
+  const repos = diagnostics?.paper_repos;
+  const hasRepos = repos && typeof repos === 'object';
+  if (hasRepos && (repos.enabled || repos.extracted_count || repos.read_count || repos.search_count || repos.bootstrap)) {
+    const extracted = Number(repos.extracted_count) || 0;
+    const searches = Number(repos.search_count) || 0;
+    const reads = Number(repos.read_count) || 0;
+    const repoName = formatPaperRepoName(repos.bootstrap?.repo_id);
+    const parts = [];
+    if (extracted > 0) parts.push(`抽出 ${extracted} 个`);
+    if (repoName) parts.push(repoName);
+    if (searches > 0) parts.push(`路径检索 ${searches} 次`);
+    if (reads > 0) parts.push(`读取 ${reads} 次`);
+    if (parts.length) items.push(`论文仓库：${parts.join(' · ')}`);
+    else if (repos.enabled) items.push('论文仓库：已启用，尚未读取文件');
+
+    if (String(repos.bootstrap?.skipped || '') === 'no_fetchable_github') {
+      items.push('论文仓库：没有可读取的公开 GitHub');
+    }
+
+    const paths = uniqueTexts([
+      ...(repos.bootstrap?.readme ? ['README'] : []),
+      ...(Array.isArray(repos.read_paths) ? repos.read_paths : []),
+      ...(Array.isArray(repos.bootstrap?.read_paths) ? repos.bootstrap.read_paths : []),
+      repos.bootstrap?.readme_guided_path,
+    ], 6);
+    if (paths.length) items.push(`已读文件：${paths.join('、')}`);
+
+    const symbolLabels = uniqueTexts([
+      ...(Array.isArray(repos.symbols) ? repos.symbols : []),
+      ...(Array.isArray(repos.bootstrap?.symbols) ? repos.bootstrap.symbols : []),
+    ].flatMap((row) => {
+      if (typeof row === 'string') return [row];
+      if (!row || typeof row !== 'object') return [];
+      if (Array.isArray(row.symbols)) return row.symbols.map(formatPaperRepoSymbolLabel);
+      return [formatPaperRepoSymbolLabel(row)];
+    }), 4);
+    if (symbolLabels.length) items.push(`对准符号：${symbolLabels.join('、')}`);
+  }
+
+  const gate = diagnostics?.paper_repo_file_gate;
+  if (gate && typeof gate === 'object' && (gate.blocked_final || gate.blocked_early_stop)) {
+    items.push('论文仓库：还没有读到代码文件，继续检索');
+  } else if (diagnostics?.sufficiency?.paper_repo_file_gate === 'missing_paper_repo_file') {
+    items.push('论文仓库：还没有读到代码文件');
+  }
+  return items;
+};
+
 const operationDetailText = (operation) => {
+  if (PAPER_REPO_TOOLS.has(String(operation?.tool || '').trim())) {
+    return paperRepoOperationDetail(operation);
+  }
   const query = normalizeText(operation.query, 280);
   if (query) {
     if (operation.tool === 'web_search') return `已搜索网络：${query}`;
@@ -236,7 +410,7 @@ const buildDiagnosticItems = (trace) => {
     const enabled = gate.enabled || gate.use_agent || gate.agent_mode;
     items.push(`Agent ${enabled ? '启用' : '未启用'}：${AGENT_GATE_REASON_LABELS[gate.reason] || gate.reason || '未知'}`);
     if (Array.isArray(gate.matched_evidence_need) && gate.matched_evidence_need.length > 0) {
-      items.push(`证据需求：${gate.matched_evidence_need.join('、')}`);
+      items.push(`证据需求：${gate.matched_evidence_need.map(formatEvidenceNeedLabel).join('、')}`);
     }
     if (gate.query_type) items.push(`题型：${QUERY_TYPE_LABELS[gate.query_type] || gate.query_type}`);
   }
@@ -265,6 +439,7 @@ const buildDiagnosticItems = (trace) => {
     if (Number(evidenceState.independent_evidence_count) > 0) pieces.push(`${Number(evidenceState.independent_evidence_count)} 路证据`);
     items.push(`证据状态：${pieces.join(' · ')}`);
   }
+  items.push(...buildPaperRepoDiagnosticItems(diagnostics));
   const evidenceDeltas = Array.isArray(diagnostics?.evidence_delta)
     ? diagnostics.evidence_delta
     : [];
@@ -286,17 +461,13 @@ const buildDiagnosticItems = (trace) => {
 const TimelineIcon = ({ children, active = false, complete = false, darkMode = false }) => (
   <span
     className={`absolute -left-[31px] top-[9px] z-[1] grid h-[22px] w-[22px] place-items-center rounded-full border ring-[3px] ${
-      active
+      active || complete
         ? darkMode
-          ? 'border-[#FFA07A] bg-[#FFA07A] text-[#24272d] ring-[#2b2e34]'
-          : 'border-[#a8624e] bg-[#a8624e] text-white ring-[#faf8f6]'
-        : complete
-          ? darkMode
-            ? 'border-gray-100 bg-gray-100 text-[#27292d] ring-[#2b2e34]'
-            : 'border-[#303238] bg-[#303238] text-white ring-[#faf8f6]'
+          ? 'border-white/16 bg-[#454b55] text-gray-100 ring-[#2b2e34]'
+          : 'border-[#cfc6bd] bg-[#efe8e1] text-[#4a453f] ring-[#faf8f6]'
         : darkMode
-          ? 'border-white/15 bg-[#444850] text-gray-100 ring-[#2b2e34]'
-          : 'border-[#d8cec7] bg-[#f2ece7] text-[#5c5049] ring-[#faf8f6]'
+          ? 'border-white/12 bg-[#3d424b] text-gray-300 ring-[#2b2e34]'
+          : 'border-[#ddd5cd] bg-[#f5f1ec] text-[#6a635c] ring-[#faf8f6]'
     } ${active ? 'agent-timeline-node-active' : complete ? 'agent-timeline-node-complete' : ''}`}
     aria-hidden="true"
   >
@@ -343,7 +514,7 @@ const AgentProgress = ({ taskStatus, operationCount, darkMode }) => {
       >
         {hasKnownTotal && (
           <span
-            className={`agent-progress-fill block h-full rounded-full ${darkMode ? 'bg-[#FFA07A]' : 'bg-[#B56B55]'}`}
+            className={`agent-progress-fill block h-full rounded-full ${darkMode ? 'bg-gray-400' : 'bg-[#8a827b]'}`}
             style={{ width: `${progress}%` }}
           />
         )}
@@ -353,18 +524,38 @@ const AgentProgress = ({ taskStatus, operationCount, darkMode }) => {
   );
 };
 
-export default function AgentTracePanel({ trace, embedded = false, darkMode = false }) {
-  const isRunning = Boolean(trace?.enabled && trace?.startedAt && !trace?.endedAt);
+export default function AgentTracePanel({ trace, liveMessageId = null, embedded = false, darkMode = false }) {
+  const [liveTrace, setLiveTrace] = useState(null);
+  useEffect(() => {
+    if (!liveMessageId) {
+      setLiveTrace(null);
+      return undefined;
+    }
+    let frame = 0;
+    const unsubscribe = subscribeLiveAgentTrace(liveMessageId, (nextTrace) => {
+      if (frame) window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        setLiveTrace(cloneAgentTrace(nextTrace));
+      });
+    });
+    return () => {
+      unsubscribe();
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [liveMessageId]);
+  const displayTrace = liveTrace || trace;
+  const isRunning = Boolean(displayTrace?.enabled && displayTrace?.startedAt && !displayTrace?.endedAt);
   const rounds = useMemo(() => {
-    const source = Array.isArray(trace?.rounds) ? trace.rounds : [];
+    const source = Array.isArray(displayTrace?.rounds) ? displayTrace.rounds : [];
     return source
       .map((round) => ({ ...round, round: Number(round?.round) }))
       .filter((round) => Number.isInteger(round.round) && round.round > 0)
       .sort((left, right) => left.round - right.round);
-  }, [trace?.rounds]);
+  }, [displayTrace?.rounds]);
   const activities = useMemo(
-    () => buildActivities(rounds, trace?.searchHistory),
-    [rounds, trace?.searchHistory]
+    () => buildActivities(rounds, displayTrace?.searchHistory),
+    [rounds, displayTrace?.searchHistory]
   );
   const activeActivityIds = useMemo(() => new Set(
     activities
@@ -375,16 +566,9 @@ export default function AgentTracePanel({ trace, embedded = false, darkMode = fa
   const previousActiveActivityIdsRef = useRef(new Set(activeActivityIds));
   const [panelExpanded, setPanelExpanded] = useState(() => isRunning);
   const wasRunningRef = useRef(isRunning);
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  const intentId = String(trace?.routeDiagnosis?.intent_id || '');
+  const intentId = String(displayTrace?.routeDiagnosis?.intent_id || '');
   const [intentFeedback, setIntentFeedback] = useState('');
   const [intentFeedbackPending, setIntentFeedbackPending] = useState(false);
-
-  useEffect(() => {
-    if (!isRunning) return undefined;
-    const timer = setInterval(() => setNowTick(Date.now()), 500);
-    return () => clearInterval(timer);
-  }, [isRunning]);
 
   useEffect(() => {
     setIntentFeedback('');
@@ -426,7 +610,7 @@ export default function AgentTracePanel({ trace, embedded = false, darkMode = fa
     wasRunningRef.current = isRunning;
   }, [isRunning]);
 
-  if (!trace?.enabled) return null;
+  if (!displayTrace?.enabled) return null;
 
   const operationCount = activities.reduce(
     (count, activity) => count + (activity.kind === 'operations' ? activity.operations.length : 0),
@@ -439,16 +623,19 @@ export default function AgentTracePanel({ trace, embedded = false, darkMode = fa
     0
   );
   const duration = isRunning
-    ? formatElapsedMs(Math.max(0, nowTick - trace.startedAt))
-    : formatDuration(trace.startedAt, trace.endedAt);
-  const diagnosticItems = buildDiagnosticItems(trace);
-  const subQuestions = Array.isArray(trace.subQuestions)
-    ? trace.subQuestions
-    : Array.isArray(trace.diagnostics?.sub_questions)
-      ? trace.diagnostics.sub_questions
+    ? null
+    : formatDuration(displayTrace.startedAt, displayTrace.endedAt);
+  const elapsedSuffix = isRunning
+    ? <LiveElapsedLabel startedAt={displayTrace.startedAt} />
+    : duration;
+  const diagnosticItems = buildDiagnosticItems(displayTrace);
+  const subQuestions = Array.isArray(displayTrace.subQuestions)
+    ? displayTrace.subQuestions
+    : Array.isArray(displayTrace.diagnostics?.sub_questions)
+      ? displayTrace.diagnostics.sub_questions
       : [];
-  const coverage = Array.isArray(trace.taskStatus?.sub_question_coverage)
-    ? trace.taskStatus.sub_question_coverage
+  const coverage = Array.isArray(displayTrace.taskStatus?.sub_question_coverage)
+    ? displayTrace.taskStatus.sub_question_coverage
     : [];
 
   const toggleGroup = (groupId) => {
@@ -462,7 +649,7 @@ export default function AgentTracePanel({ trace, embedded = false, darkMode = fa
 
   const submitIntentFeedback = async (verdict) => {
     if (!intentId || intentFeedbackPending || intentFeedback) return;
-    const route = trace?.routeDiagnosis || {};
+    const route = displayTrace?.routeDiagnosis || {};
     setIntentFeedbackPending(true);
     try {
       const response = await fetch('/intent/corrections', {
@@ -543,8 +730,8 @@ export default function AgentTracePanel({ trace, embedded = false, darkMode = fa
           aria-expanded={hasDetails ? expanded : undefined}
           className={`flex min-h-9 w-full items-center gap-2.5 rounded-[8px] px-2.5 py-1.5 text-left transition-[background-color,transform] duration-200 active:scale-[0.995] focus-visible:outline-none focus-visible:ring-2 ${
             darkMode
-              ? 'hover:bg-white/[0.035] focus-visible:ring-[#FFA07A]/35'
-              : 'hover:bg-[#f6f3f1] focus-visible:ring-[#D99178]/35'
+              ? 'hover:bg-white/[0.035] focus-visible:ring-gray-100/35'
+              : 'hover:bg-[#f6f3f1] focus-visible:ring-[#1a1a1a]/25'
           }`}
         >
           <span className={`min-w-0 flex-1 truncate text-[13.5px] ${
@@ -607,13 +794,13 @@ export default function AgentTracePanel({ trace, embedded = false, darkMode = fa
     );
   };
 
-  const currentTask = normalizeText(trace.taskStatus?.current, 180);
+  const currentTask = normalizeText(displayTrace.taskStatus?.current, 180);
   const hasActivities = activities.length > 0;
   const timeline = (
     <div data-testid="agent-trace-timeline">
       {isRunning && (
         <AgentProgress
-          taskStatus={trace.taskStatus}
+          taskStatus={displayTrace.taskStatus}
           operationCount={operationCount}
           darkMode={darkMode}
         />
@@ -644,16 +831,16 @@ export default function AgentTracePanel({ trace, embedded = false, darkMode = fa
           <div className={`flex min-h-8 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-[7px] px-2.5 py-1.5 text-[13.5px] leading-5 ${darkMode ? 'text-gray-200' : 'text-[#4d4946]'}`}>
             <span className="font-medium">证据收集完成</span>
             <span className={`text-[12px] tabular-nums ${darkMode ? 'text-gray-300' : 'text-[#776d66]'}`}>
-              {operationCount} 次工具{totalResults > 0 ? ` · ${totalResults} 个结果` : ''}{duration ? ` · ${duration}` : ''}
+              {operationCount} 次工具{totalResults > 0 ? ` · ${totalResults} 个结果` : ''}{elapsedSuffix ? <> · {elapsedSuffix}</> : ''}
             </span>
           </div>
         </div>
       )}
 
-      {(diagnosticItems.length > 0 || subQuestions.length > 0 || trace.agentDetail?.length > 0) && (
+      {(diagnosticItems.length > 0 || subQuestions.length > 0 || displayTrace.agentDetail?.length > 0) && (
         <details className={`agent-diagnostics ml-1 mt-1 rounded-[8px] px-2 py-1 text-[12.5px] ${darkMode ? 'text-gray-300' : 'text-[#746a63]'}`}>
           <summary className={`flex min-h-7 cursor-pointer select-none items-center gap-1.5 rounded-[6px] px-1 py-1 transition-colors focus-visible:outline-none focus-visible:ring-2 ${
-            darkMode ? 'hover:text-gray-300 focus-visible:ring-[#FFA07A]/30' : 'hover:text-gray-600 focus-visible:ring-[#D99178]/30'
+            darkMode ? 'hover:text-gray-300 focus-visible:ring-gray-100/30' : 'hover:text-gray-600 focus-visible:ring-[#1a1a1a]/25'
           }`}>
             <ChevronRight className="agent-diagnostics-chevron h-3.5 w-3.5 flex-shrink-0" strokeWidth={2} aria-hidden="true" />
             <span>检索诊断</span>
@@ -668,8 +855,8 @@ export default function AgentTracePanel({ trace, embedded = false, darkMode = fa
                 <span>{normalizeText(question, 240)}</span>
               </div>
             ))}
-            {Array.isArray(trace.agentDetail) && trace.agentDetail.length > 0 && (
-              <div>已纳入 {trace.agentDetail.length} 个语义组</div>
+            {Array.isArray(displayTrace.agentDetail) && displayTrace.agentDetail.length > 0 && (
+              <div>已纳入 {displayTrace.agentDetail.length} 个语义组</div>
             )}
             {intentId && (
               <div className="flex items-center gap-1.5 pt-1" aria-label="意图判定反馈">
@@ -720,18 +907,18 @@ export default function AgentTracePanel({ trace, embedded = false, darkMode = fa
         aria-expanded={panelExpanded}
         className={`-ml-1 flex min-h-9 max-w-full items-center gap-2.5 rounded-[9px] px-2 py-1.5 text-left transition-[background-color,transform] duration-200 active:scale-[0.995] focus-visible:outline-none focus-visible:ring-2 ${
           darkMode
-            ? 'hover:bg-white/[0.04] focus-visible:ring-[#FFA07A]/40'
-            : 'hover:bg-[#f6f3f1] focus-visible:ring-[#D99178]/40'
+            ? 'hover:bg-white/[0.04] focus-visible:ring-gray-100/35'
+            : 'hover:bg-[#f6f3f1] focus-visible:ring-[#1a1a1a]/25'
         }`}
       >
         {isRunning ? (
-          <Loader2 className="h-[18px] w-[18px] animate-spin motion-reduce:animate-none" strokeWidth={1.9} aria-hidden="true" />
+          <Loader2 className={`h-[18px] w-[18px] animate-spin motion-reduce:animate-none ${darkMode ? 'text-gray-300' : 'text-[#5c564f]'}`} strokeWidth={1.9} aria-hidden="true" />
         ) : (
-          <ScanSearch className="h-[18px] w-[18px]" strokeWidth={1.9} aria-hidden="true" />
+          <ScanSearch className={`h-[18px] w-[18px] ${darkMode ? 'text-gray-400' : 'text-[#6a635c]'}`} strokeWidth={1.9} aria-hidden="true" />
         )}
         <span className="font-medium">{headerLabel}</span>
         <span className={`truncate text-[12px] tabular-nums ${darkMode ? 'text-gray-400' : 'text-[#8b817b]'}`}>
-          {operationCount} 次工具{totalResults > 0 ? ` · ${totalResults} 个结果` : ''}{duration ? ` · ${duration}` : ''}
+          {operationCount} 次工具{totalResults > 0 ? ` · ${totalResults} 个结果` : ''}{elapsedSuffix ? <> · {elapsedSuffix}</> : ''}
         </span>
         <ChevronDown className={`h-4 w-4 transition-transform duration-300 ${panelExpanded ? 'rotate-180' : ''}`} strokeWidth={1.9} aria-hidden="true" />
       </button>

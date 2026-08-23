@@ -158,8 +158,8 @@ from services.citation_service import (
     match_citations_to_chunks,
     START_ANSWER,
     START_CITATION,
-    _RE_START_ANSWER,
-    _RE_START_CITATION,
+    _RE_START_ANSWER_SECTION,
+    _RE_START_CITATION_SECTION,
     _ci_contains,
     _ci_split,
 )
@@ -1148,7 +1148,7 @@ async def _buffered_stream(raw_stream, *, passthrough: bool = False, buffer_size
         }
 
 
-_LLM_STREAM_HEARTBEAT_INTERVAL_SECONDS = 5.0
+_LLM_STREAM_HEARTBEAT_INTERVAL_SECONDS = 2.0
 
 
 async def _stream_with_total_timeout(raw_stream, timeout_seconds: float):
@@ -3744,6 +3744,12 @@ def _auto_enable_rerank_if_beneficial(request, evidence_need: list, query_type: 
     """
     if getattr(request, "use_rerank", False):
         return False
+    # Windows 的 FAISS 与 Torch wheel 使用不同 OpenMP 运行库。本地
+    # CrossEncoder 会让整个流式后端直接退出，自动策略必须先做运行时围栏。
+    from services.rerank_service import is_local_rerank_runtime_supported
+
+    if not is_local_rerank_runtime_supported():
+        return False
     need_set = {str(e).lower() for e in (evidence_need or [])}
     qt = (query_type or "").lower()
     if not (need_set & _AUTO_RERANK_EVIDENCE_NEEDS) and qt not in _AUTO_RERANK_QUERY_TYPES:
@@ -3836,6 +3842,9 @@ def _retrieve_memory_context(
     doc_id: str = None,
     parse_identity: dict | None = None,
     top_k: int | None = None,
+    embedding_model: str | None = None,
+    embedding_provider: str | None = None,
+    embedding_api_host: str | None = None,
 ) -> str:
     if memory_service is None:
         return ""
@@ -3847,6 +3856,16 @@ def _retrieve_memory_context(
             "filter_by_doc": filter_by_doc,
             "top_k": _resolve_memory_top_k(top_k),
         }
+        if any(value is not None for value in (
+            embedding_model,
+            embedding_provider,
+            embedding_api_host,
+        )):
+            kwargs.update({
+                "embedding_model": embedding_model,
+                "embedding_provider": embedding_provider,
+                "embedding_api_host": embedding_api_host,
+            })
         if parse_identity is not None:
             kwargs["parse_identity"] = parse_identity
         return memory_service.retrieve_memories(question, **kwargs)
@@ -3862,6 +3881,9 @@ def _retrieve_raw_memories(
     chat_history: list[dict] | None = None,
     parse_identity: dict | None = None,
     top_k: int | None = None,
+    embedding_model: str | None = None,
+    embedding_provider: str | None = None,
+    embedding_api_host: str | None = None,
 ) -> list[dict]:
     """检索原始记忆列表（供 ContextInjector 使用）"""
     if memory_service is None:
@@ -3875,6 +3897,16 @@ def _retrieve_raw_memories(
             "chat_history": chat_history,
             "top_k": _resolve_memory_top_k(top_k),
         }
+        if any(value is not None for value in (
+            embedding_model,
+            embedding_provider,
+            embedding_api_host,
+        )):
+            kwargs.update({
+                "embedding_model": embedding_model,
+                "embedding_provider": embedding_provider,
+                "embedding_api_host": embedding_api_host,
+            })
         if parse_identity is not None:
             kwargs["parse_identity"] = parse_identity
         return memory_service.retrieve_memories_raw(question, **kwargs)
@@ -3947,6 +3979,9 @@ async def _retrieve_memory_for_stream(
     chat_history: list[dict] | None = None,
     parse_identity: dict | None = None,
     top_k: int | None = None,
+    embedding_model: str | None = None,
+    embedding_provider: str | None = None,
+    embedding_api_host: str | None = None,
 ) -> tuple[str, list[dict]]:
     """在线程中读取记忆，保护 async 接口不被同步检索卡住。
 
@@ -3968,6 +4003,9 @@ async def _retrieve_memory_for_stream(
             chat_history=chat_history,
             parse_identity=parse_identity,
             top_k=top_k,
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
+            embedding_api_host=embedding_api_host,
         ),
         [],
     )
@@ -4580,7 +4618,8 @@ def _format_numeric_table_context_segments_for_prompt(segments: list[dict], *, m
             continue
         key = (
             str(segment.get("evidence_id") or "").casefold()
-            or str(segment.get("context_id") or "").casefold()
+            or str(segment.get("chunk_id") if segment.get("chunk_id") not in (None, False, "") else "").casefold()
+            or str(segment.get("child_chunk_id") if segment.get("child_chunk_id") not in (None, False, "") else "").casefold()
             or text.casefold()[:240]
         )
         if key in seen:
@@ -8053,6 +8092,35 @@ def _normalize_public_citation_rects(value) -> list[list[float]]:
     return rects
 
 
+def _normalize_public_page_rects(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    by_page: dict[int, list[list[float]]] = {}
+    for item in value[:32]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            page = int(item.get("page") or 0)
+        except (TypeError, ValueError):
+            continue
+        if page <= 0:
+            continue
+        rects = _normalize_public_citation_rects(item.get("rects") or [])
+        bbox = _normalize_public_bbox(item.get("bbox"))
+        if bbox:
+            rects.append(bbox)
+        if not rects:
+            continue
+        bucket = by_page.setdefault(page, [])
+        for rect in rects:
+            if rect not in bucket:
+                bucket.append(rect)
+    return [
+        {"page": page, "rects": rects[:64]}
+        for page, rects in sorted(by_page.items())
+    ]
+
+
 def _normalize_public_page_size(value) -> list[float] | None:
     if not isinstance(value, (list, tuple)) or len(value) < 2:
         return None
@@ -8392,9 +8460,16 @@ def _merge_response_context_segments(*segment_lists: list[dict]) -> list[dict]:
             normalized = _normalize_response_context_segment(segment)
             if not normalized:
                 continue
+            # context_id / group_id are section-level and must not collapse
+            # distinct passages (citation anchors often share one Methods id).
+            # chunk_id=0 is a valid FAISS index and must not be treated as missing.
+            chunk_id = normalized.get("chunk_id")
+            if chunk_id in (None, False, ""):
+                chunk_id = normalized.get("child_chunk_id")
+            chunk_token = "" if chunk_id in (None, False, "") else str(chunk_id).strip()
             key = (
                 str(normalized.get("evidence_id") or "").casefold()
-                or str(normalized.get("context_id") or "").casefold()
+                or chunk_token.casefold()
                 or re.sub(r"\s+", " ", normalized["text"]).casefold()[:240]
             )
             if key in seen:
@@ -9795,6 +9870,7 @@ _PUBLIC_CITATION_KEYS = {
     "parent_id",
     "page",
     "page_range",
+    "page_rects",
     "chunk_type",
     "block_type",
     "retrieval_type",
@@ -10123,6 +10199,10 @@ def _augment_public_citation(citation: dict) -> dict:
             page_range = _normalize_public_page_range(value)
             if page_range:
                 public[key] = page_range
+        elif key == "page_rects":
+            page_rects = _normalize_public_page_rects(value)
+            if page_rects:
+                public[key] = page_rects
         elif key in {"page", "ref", "display_ref", "source_ref"}:
             public[key] = _debug_int(value)
         elif key in {"best_ratio", "score", "similarity", "rerank_score", "combined_score"}:
@@ -10152,11 +10232,27 @@ def _augment_public_citation(citation: dict) -> dict:
     if surrounding:
         public["surrounding_context"] = _compact_context_text(surrounding, limit=900)
     page_range = public.get("page_range") or []
-    page = page_range[0] if isinstance(page_range, list) and page_range else public.get("page")
+    page = public.get("page") or (page_range[0] if isinstance(page_range, list) and page_range else None)
     block_id = public.get("block_id") or public.get("evidence_block_id") or public.get("chunk_id")
     rects = _normalize_public_citation_rects(
         citation.get("rects") or citation.get("line_rects")
     )
+    page_rects = public.get("page_rects") or _normalize_public_page_rects(
+        citation.get("page_rects") or citation.get("highlight_slots")
+    )
+    if page and (rects or bbox):
+        page_rects = _normalize_public_page_rects(
+            list(page_rects)
+            + [{"page": page, "rects": rects or ([bbox] if bbox else [])}]
+        )
+    if page_rects:
+        public["page_rects"] = page_rects
+        primary_rects = next(
+            (item.get("rects") for item in page_rects if item.get("page") == page),
+            None,
+        )
+        if primary_rects:
+            rects = primary_rects
     coordinate_space = _normalize_public_coordinate_space(
         citation.get("coordinate_space")
     )
@@ -10166,6 +10262,7 @@ def _augment_public_citation(citation: dict) -> dict:
         "page": page,
         "bbox": bbox,
         "rects": rects,
+        "page_rects": page_rects,
         "coordinate_space": coordinate_space,
         "page_size": page_size,
         "parse_generation": public.get("parse_generation") or "",
@@ -11958,6 +12055,46 @@ def _build_numbered_context_and_citations(
     return formatted_context, citations
 
 
+_BODY_SECTION_PAGE_HEADING_RE = re.compile(
+    r"(?:^|\n)\s*(?:\d+(?:\.\d+)*\.?\s+)?(?:"
+    r"methods?|methodology|approach|"
+    r"experiments?|experimental\s+setup|"
+    r"results?|evaluation|"
+    r"discussion|limitations?|"
+    r"conclusions?|"
+    r"related\s+works?|"
+    r"ablation(?:\s+stud(?:y|ies))?|"
+    r"方法|实验|结果|讨论|结论|相关工作|消融"
+    r")\b"
+    r"|in this section,?\s+we\s+(?:first|evaluate|report|discuss|present|describe)"
+    r"|本节(?:首先|将|给出|报告|介绍)",
+    re.IGNORECASE,
+)
+
+
+def _page_looks_like_methods_section(page_text: str) -> bool:
+    """True when a page is a paper body section whose middle must be kept."""
+    return bool(_BODY_SECTION_PAGE_HEADING_RE.search((page_text or "")[:1200]))
+
+
+def _clip_fast_overview_page(page_text: str, page_budget: int) -> str:
+    if len(page_text) <= page_budget:
+        return page_text
+    if page_budget < 24:
+        return page_text[:page_budget].strip()
+    if _page_looks_like_methods_section(page_text) and page_budget >= 60:
+        third = max(1, (page_budget - 6) // 3)
+        mid_start = max(0, (len(page_text) - third) // 2)
+        return (
+            f"{page_text[:third].rstrip()}..."
+            f"{page_text[mid_start:mid_start + third].strip()}..."
+            f"{page_text[-third:].lstrip()}"
+        )
+    head_budget = max(1, int(page_budget * 0.7) - 3)
+    tail_budget = max(1, page_budget - head_budget - 3)
+    return f"{page_text[:head_budget].rstrip()}...{page_text[-tail_budget:].lstrip()}"
+
+
 def _build_fast_overview_context(
     pages: list[dict],
     full_text: str,
@@ -12003,14 +12140,7 @@ def _build_fast_overview_context(
     sampled_parts: list[str] = []
     for index, ((page_number, page_text), header) in enumerate(zip(page_records, headers)):
         page_budget = min(max_page_chars, max(1, base_budget + (1 if index < extra_budget else 0)))
-        if len(page_text) <= page_budget:
-            clipped = page_text
-        elif page_budget < 24:
-            clipped = page_text[:page_budget].strip()
-        else:
-            head_budget = max(1, int(page_budget * 0.7) - 3)
-            tail_budget = max(1, page_budget - head_budget - 3)
-            clipped = f"{page_text[:head_budget].rstrip()}...{page_text[-tail_budget:].lstrip()}"
+        clipped = _clip_fast_overview_page(page_text, page_budget)
         if clipped:
             block = f"{header}{clipped}"
         else:
@@ -13214,11 +13344,13 @@ def _mark_retrieval_fallback(retrieval_meta: dict, fallback_reason: str) -> None
 def _citation_dedupe_key(citation: dict) -> tuple[str, str, str]:
     if not isinstance(citation, dict):
         return ("", "", "")
+    chunk_id = citation.get("chunk_id")
+    if chunk_id in (None, False, ""):
+        chunk_id = citation.get("child_chunk_id")
+    chunk_token = "" if chunk_id in (None, False, "") else str(chunk_id).strip()
     source_id = str(
         citation.get("evidence_id")
-        or citation.get("context_id")
-        or citation.get("group_id")
-        or citation.get("chunk_id")
+        or chunk_token
         or citation.get("source_ref")
         or ""
     ).strip().casefold()
@@ -13290,7 +13422,11 @@ def _merge_multi_query_retrieval_meta(
     for segment in [*existing_segments, *update_segments]:
         text = re.sub(r"\s+", " ", str(segment.get("text") or "")).strip()
         group_id = str(segment.get("group_id") or "").strip().casefold()
-        key = (group_id, text[:180].casefold())
+        chunk_id = segment.get("chunk_id")
+        if chunk_id in (None, False, ""):
+            chunk_id = segment.get("child_chunk_id")
+        chunk_token = "" if chunk_id in (None, False, "") else str(chunk_id).strip().casefold()
+        key = (chunk_token or group_id, text[:180].casefold())
         if not text or key in seen_segments:
             continue
         seen_segments.add(key)
@@ -15297,6 +15433,41 @@ def _prepare_answer_and_citations_for_display(
     return claim_alignment.get("answer") or rewritten_answer, aligned_projected
 
 
+def _compact_section_marker(text: str) -> str:
+    return re.sub(r"\s+", "", text or "").upper()
+
+
+def _is_incomplete_section_marker(text: str) -> bool:
+    """True when the whole buffer is still a prefix of FINAL ANSWER / CITATION LIST.
+
+    Streaming often emits the first 1–2 letters (`F`, `FI`) before the marker is
+    complete. Those must not be treated as visible answer text.
+    """
+    compact_text = _compact_section_marker(text)
+    if not compact_text:
+        return False
+    for marker in (START_ANSWER, START_CITATION):
+        compact_marker = _compact_section_marker(marker)
+        if compact_marker.startswith(compact_text) and len(compact_text) < len(compact_marker):
+            return True
+    return False
+
+
+_INLINE_STRUCTURED_PROTOCOL_RE = re.compile(
+    r"\b(?:FINAL\s*ANSWER|CITATION\s*LIST)\b",
+    re.IGNORECASE,
+)
+
+
+def _contains_inline_structured_protocol_reference(text: str) -> bool:
+    """Return true for protocol chatter that is not a valid section marker."""
+    if not text:
+        return False
+    if _ci_contains(_RE_START_ANSWER_SECTION, text) or _ci_contains(_RE_START_CITATION_SECTION, text):
+        return False
+    return bool(_INLINE_STRUCTURED_PROTOCOL_RE.search(text))
+
+
 def _trim_partial_section_suffix(text: str, marker: str) -> str:
     normalized_marker = (marker or "").strip()
     if not text or not normalized_marker:
@@ -15311,32 +15482,116 @@ def _trim_partial_section_suffix(text: str, marker: str) -> str:
     return text
 
 
-def _extract_streaming_final_answer(full_output: str) -> str:
+def _trim_incomplete_section_last_line(text: str) -> str:
+    """去掉末行尚未写完的 FINAL ANSWER / CITATION LIST 前缀。
+
+    流式常在换行后先吐 `F` / `FI`。整句以 F 结尾（「第一段回答。F」）不能裁。
+    """
+    if not text:
+        return text
+    newline_at = text.rfind("\n")
+    head = text[: newline_at + 1] if newline_at >= 0 else ""
+    last = text[newline_at + 1:] if newline_at >= 0 else text
+    if _is_incomplete_section_marker(last):
+        return head
+    trimmed = _trim_partial_section_suffix(last, START_ANSWER)
+    trimmed = _trim_partial_section_suffix(trimmed, START_CITATION)
+    return head + trimmed
+
+
+def _extract_streaming_final_answer(full_output: str, *, require_answer_marker: bool = False) -> str:
     if not full_output:
         return ""
-    parts = _ci_split(_RE_START_ANSWER, full_output)
+    parts = _ci_split(_RE_START_ANSWER_SECTION, full_output)
     if parts is not None:
         answer = parts[1].lstrip()
-        cit_parts = _ci_split(_RE_START_CITATION, answer)
+        cit_parts = _ci_split(_RE_START_CITATION_SECTION, answer)
         if cit_parts is not None:
             answer = cit_parts[0].rstrip()
         else:
-            answer = _trim_partial_section_suffix(answer, START_CITATION).rstrip()
+            answer = _trim_incomplete_section_last_line(answer).rstrip()
+            if _is_incomplete_section_marker(answer.lstrip()):
+                return ""
         return answer
 
     stripped = full_output.lstrip()
     if not stripped:
         return ""
+    if _is_incomplete_section_marker(stripped):
+        return ""
 
-    cit_parts = _ci_split(_RE_START_CITATION, full_output)
+    cit_parts = _ci_split(_RE_START_CITATION_SECTION, full_output)
     if cit_parts is not None:
         if not cit_parts[0].strip():
             return ""
+        if require_answer_marker:
+            # 思考开启时，CITATION LIST 之前的文本是思考/前言，不能当正文。
+            return ""
         return cit_parts[0].rstrip()
 
-    answer = _trim_partial_section_suffix(full_output, START_ANSWER)
-    answer = _trim_partial_section_suffix(answer, START_CITATION)
-    return answer.rstrip()
+    if require_answer_marker:
+        return ""
+
+    # A compatible model may narrate the requested output protocol without
+    # ever opening a real section. Keep that chatter out of the visible answer;
+    # the terminal path will retry instead of silently accepting it.
+    if _contains_inline_structured_protocol_reference(stripped):
+        return ""
+
+    answer = _trim_incomplete_section_last_line(full_output).rstrip()
+    if _is_incomplete_section_marker(answer.lstrip()):
+        return ""
+    return answer
+
+
+def _extract_terminal_structured_answer(full_output: str) -> str:
+    """Recover a structured answer while tolerating missing section markers.
+
+    Many OpenAI-compatible models return a correct plain ``content`` answer but
+    omit ``FINAL ANSWER``. That output is still a valid answer. Explicit protocol
+    chatter remains invalid so it can enter the controlled retry path instead.
+    """
+    if not full_output:
+        return ""
+    marked = extract_final_answer(full_output, allow_unmarked=False)
+    if str(marked or "").strip():
+        return marked
+    unmarked = _trim_incomplete_section_last_line(str(full_output)).strip()
+    if not unmarked or _contains_inline_structured_protocol_reference(unmarked):
+        return ""
+    return unmarked
+
+
+def _extract_streaming_preamble(full_output: str) -> str:
+    """FINAL ANSWER / 文首 CITATION LIST 之前的文本。
+
+    部分网关不返回 reasoning_content，而是把思考写进 content。结构化引文
+    若把这段前言当成回答，思考区会一直是空的。
+    """
+    if not full_output:
+        return ""
+    parts = _ci_split(_RE_START_ANSWER_SECTION, full_output)
+    if parts is not None:
+        left = parts[0] or ""
+        cit_parts = _ci_split(_RE_START_CITATION_SECTION, left)
+        if cit_parts is not None:
+            left = cit_parts[0]
+        return _trim_incomplete_section_last_line(left).rstrip()
+
+    stripped = full_output.lstrip()
+    if not stripped or _is_incomplete_section_marker(stripped):
+        return ""
+
+    cit_parts = _ci_split(_RE_START_CITATION_SECTION, full_output)
+    if cit_parts is not None:
+        if not cit_parts[0].strip():
+            return ""
+        return _trim_incomplete_section_last_line(cit_parts[0]).rstrip()
+
+    trimmed = _trim_incomplete_section_last_line(full_output)
+    if _is_incomplete_section_marker(trimmed.lstrip()):
+        return ""
+    return trimmed.rstrip()
 
 
 def _normalize_web_search_max_results(value: Optional[int]) -> int:
@@ -15810,9 +16065,9 @@ def _build_faithfulness_guard_prompt(*, allow_web_evidence: bool = False) -> str
         "\n"
         "## 首要规则：禁止幻觉（Anti-Hallucination Sentinel）\n"
         f"- 你的回答**只能**基于{evidence_scope}中的事实，禁止使用预训练知识补充\n"
-        f"- 如果{insufficient_scope}**不足以回答问题**，必须明确说明缺少什么信息，不得假装已经联网核实\n"
+        f"- 如果{insufficient_scope}**不足以完整回答**，先回答已经有直接依据的部分，再明确缺什么；不得假装已经联网核实\n"
         "- 判断标准：答案中的每个核心事实（数值、因果、归属、方法名）都必须能在检索内容中找到直接依据\n"
-        "- 宁可不答，不可乱答。一个诚实的「无法回答」远比一个看似完整但不忠实的答案更有价值\n"
+        "- 禁止用自身知识填补缺口。不要因为缺一块就把能依据证据回答的部分也丢掉；仅当核心问题完全没有直接依据时，才使用整题拒答\n"
         "\n"
         "## 引用格式\n"
         f"{citation_rule}"
@@ -15852,9 +16107,9 @@ def _build_faithfulness_guard_prompt(*, allow_web_evidence: bool = False) -> str
         "- 数字、公式、方法名、模型名、数据集名必须**完整照抄原文**，不得改写或简化\n"
         f"- {insufficient_scope}中**未明确出现**的细节（如具体数值、超参数、版本号），必须明确说明未找到\n"
         "## 信息不足时的处理（借鉴 paper-qa CANNOT_ANSWER 哨兵 + TrustRAG 拒答机制）\n"
-        f"- 如果{insufficient_scope}**不足以回答问题**，直接说明当前证据无法回答，然后简要说明原因\n"
-        "- 禁止在证据不足时用自身知识补充回答；宁可不答，不可乱答\n"
-        f"- 判断标准：如果答案中的核心事实（数值、因果、归属）在{evidence_scope}中找不到直接依据，则视为不足\n"
+        f"- 如果{insufficient_scope}**不足以完整回答**，先回答已有直接依据的部分，再说明缺口\n"
+        "- 禁止在证据不足时用自身知识补充回答；不要把局部缺口升级成整题拒答\n"
+        f"- 判断标准：某个子问题的核心事实（数值、因果、归属）在{evidence_scope}中找不到直接依据时，只对该子问题标明未覆盖\n"
         "\n"
         "- 如果某句无法在上下文中找到证据，请删除该句的引用而不是强行引用\n"
         "- 不要引入当前证据之外的通用知识来填补用户正在核验的事实"
@@ -16677,8 +16932,17 @@ async def _retry_generation_after_stream_error(
     )
     message = _extract_non_stream_ai_message(response)
     raw_answer = message.get("content") or ""
-    answer = extract_final_answer(raw_answer)
+    answer = (
+        _extract_terminal_structured_answer(raw_answer)
+        if has_structured_citations
+        else raw_answer
+    )
     reasoning_content = extract_reasoning_content(message)
+    if isinstance(response.get("_reasoning_resolution"), dict):
+        observed_resolution = dict(response["_reasoning_resolution"])
+        observed_resolution["output_observed"] = bool(str(reasoning_content or "").strip())
+        observed_resolution["reasoning_chars"] = len(str(reasoning_content or ""))
+        response["_reasoning_resolution"] = observed_resolution
 
     if not answer.strip():
         raise ValueError("stream_retry_empty_answer")
@@ -16785,6 +17049,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
             chat_history=safe_chat_history,
             parse_identity=memory_parse_identity,
             top_k=request.memory_top_k,
+            **_request_embedding_transport_kwargs(request),
         )
 
     # 模糊意图的澄清提示片段；hint 模式下随最终回答一起返回。
@@ -16925,6 +17190,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                 chat_history=safe_chat_history,
                 parse_identity=memory_parse_identity,
                 top_k=request.memory_top_k,
+                **_request_embedding_transport_kwargs(request),
             )
         effective_question = resolved_question
         retrieval_meta["agent_gate"] = _annotate_agent_gate(
@@ -17583,7 +17849,11 @@ async def _chat_with_pdf_impl(request: ChatRequest):
         turn_status = _chat_success_status_for_response(response)
 
         # 结构化引文后处理（非流式）
-        answer = extract_final_answer(raw_answer)
+        answer = (
+            _extract_terminal_structured_answer(raw_answer)
+            if has_citations_non_stream
+            else raw_answer
+        )
         if not answer.strip():
             try:
                 answer, retry_reasoning, retry_response = await _retry_generation_after_stream_error(
@@ -18177,6 +18447,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     chat_history=safe_chat_history,
                     parse_identity=memory_parse_identity,
                     top_k=request.memory_top_k,
+                    **_request_embedding_transport_kwargs(request),
                 )
 
             # 模糊意图的澄清提示片段；hint 模式下随最终 done 事件一起返回。
@@ -18333,6 +18604,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         chat_history=safe_chat_history,
                         parse_identity=memory_parse_identity,
                         top_k=request.memory_top_k,
+                        **_request_embedding_transport_kwargs(request),
                     )
                 effective_question = resolved_question
                 retrieval_meta["agent_gate"] = _annotate_agent_gate(
@@ -19298,6 +19570,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
             full_output = ""
             reached_final_answer = False
             visible_answer_text = ""
+            visible_preamble_text = ""
             content_progress_sent = False
             citation_preamble_status_sent = False
             thinking_complete_emitted = False
@@ -19313,11 +19586,11 @@ async def chat_with_pdf_stream(request: ChatRequest):
             stream_usage: Optional[dict] = None
 
             def _thinking_complete_events(*, phase: str, message: str) -> list[str]:
-                """Close the thinking UI as soon as answer generation begins.
+                """Emit the handoff only after the first visible answer token.
 
-                Structured-citation mode may hide early content (CITATION LIST).
-                Without an explicit handoff, the client keeps "思考中" until the
-                first visible FINAL ANSWER token, which feels like a stuck pause.
+                Structured-citation mode may generate a hidden CITATION LIST first.
+                That protocol text must keep the client in its thinking state; this
+                helper is called only once FINAL ANSWER has visible content.
                 """
                 nonlocal thinking_complete_emitted
                 events: list[str] = []
@@ -19360,27 +19633,45 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     retrieval_meta["reasoning"] = dict(chunk["reasoning_resolution"])
                 if chunk.get("type") == "llm_stream_heartbeat":
                     llm_waiting_heartbeat_step += 1
+                    waiting_after_reasoning = bool(saw_reasoning_tokens)
                     yield _sse_json({
                         "type": "retrieval_progress",
-                        "phase": "llm_waiting",
+                        "phase": (
+                            "llm_answer_waiting"
+                            if waiting_after_reasoning
+                            else "llm_waiting"
+                        ),
                         "step": llm_waiting_heartbeat_step,
                         "elapsed_ms": chunk.get("elapsed_ms"),
-                        "message": "模型仍在处理，正在等待可见输出...",
+                        "message": (
+                            "思考内容已返回，正在等待回答正文..."
+                            if waiting_after_reasoning
+                            else "模型仍在处理，正在等待首段思考内容..."
+                        ),
                     })
                     continue
                 if isinstance(chunk.get("usage"), dict):
                     stream_usage = chunk.get("usage")
                     continue
                 if chunk.get("done") and not chunk.get("error"):
+                    pending_output = f"{full_output}{chunk.get('content') or ''}"
                     candidate_answer = (
-                        extract_final_answer(full_output)
+                        _extract_terminal_structured_answer(pending_output)
                         if has_structured_citations
-                        else full_output
+                        else pending_output
                     )
                     if not str(candidate_answer or "").strip():
+                        had_model_output = bool(
+                            str(pending_output or "").strip()
+                            or str(chunk.get("reasoning_content") or "").strip()
+                        )
                         chunk = {
                             **chunk,
-                            "error": "模型未返回正文",
+                            "error": (
+                                "模型只返回了思考或协议内容，未返回正文"
+                                if had_model_output
+                                else "模型未返回正文"
+                            ),
                             "error_code": "llm_stream_empty_answer",
                             "done": True,
                         }
@@ -19589,20 +19880,106 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         "llm_first_content_chunk",
                         chars=len(content),
                     )
-                # Thinking → answer handoff: first content after reasoning (or any
-                # content when not in pure-reasoning mode) must end the thinking UI
-                # even if structured-citation filtering still hides the payload.
+                # Thinking → answer handoff: first *visible* answer token must end
+                # the thinking UI. Structured-citation streams start with
+                # `FINAL ANSWER` / `CITATION LIST`; leaking `F`/`FI` as content
+                # would close thinking too early and leave a stray `F` in the answer.
+                # 结构化引文下，content 里的草稿一律进思考区，不依赖 enable_thinking。
+                treat_preamble_as_thinking = bool(
+                    has_structured_citations
+                    or request.enable_thinking
+                    or saw_reasoning_tokens
+                    or reasoning
+                )
+                if content:
+                    full_output += content
                 if content and not thinking_complete_emitted:
-                    handoff_message = (
-                        "思考完成，正在生成回答..."
-                        if saw_reasoning_tokens or request.enable_thinking
-                        else "正在生成回答..."
+                    visible_handoff = str(content).strip()
+                    if has_structured_citations:
+                        visible_handoff = _extract_streaming_final_answer(
+                            full_output,
+                            require_answer_marker=False,
+                        ).strip()
+                    elif _is_incomplete_section_marker(visible_handoff):
+                        visible_handoff = ""
+                    if visible_handoff:
+                        handoff_message = (
+                            "思考完成，正在生成回答..."
+                            if (
+                                saw_reasoning_tokens
+                                or request.enable_thinking
+                                or treat_preamble_as_thinking
+                            )
+                            else "正在生成回答..."
+                        )
+                        for event in _thinking_complete_events(
+                            phase="answer_generating",
+                            message=handoff_message,
+                        ):
+                            yield event
+
+                # 结构化引文流式过滤：隐藏 CITATION LIST，只展示 FINAL ANSWER。
+                # 必须在 done 处理前执行，避免终包把思考草稿整段带进正文。
+                if has_structured_citations and (content or reasoning):
+                    current_answer_text = _extract_streaming_final_answer(
+                        full_output,
+                        require_answer_marker=False,
                     )
-                    for event in _thinking_complete_events(
-                        phase="answer_generating",
-                        message=handoff_message,
-                    ):
-                        yield event
+                    has_answer_section = _ci_contains(_RE_START_ANSWER_SECTION, full_output)
+                    if treat_preamble_as_thinking and (has_answer_section or not current_answer_text):
+                        preamble = _extract_streaming_preamble(full_output)
+                        if preamble.startswith(visible_preamble_text):
+                            preamble_delta = preamble[len(visible_preamble_text):]
+                        else:
+                            preamble_delta = preamble
+                        visible_preamble_text = preamble
+                        if preamble_delta and not reasoning:
+                            reasoning = preamble_delta
+                    if current_answer_text:
+                        reached_final_answer = True
+                    elif not citation_preamble_status_sent:
+                        citation_parts = _ci_split(_RE_START_CITATION_SECTION, full_output)
+                        answer_parts = _ci_split(_RE_START_ANSWER_SECTION, full_output)
+                        if (
+                            citation_parts is not None
+                            and not citation_parts[0].strip()
+                            and answer_parts is None
+                        ):
+                            citation_preamble_status_sent = True
+                            # 模型偶尔会违反协议，先生成隐藏的 CITATION LIST。
+                            # 这时正文尚未出现，不能提前发 thinking_complete；否则
+                            # 前端会显示“思考完成”后空等整段引文。保持思考态，等
+                            # 首个可见 FINAL ANSWER token 再做原子交接。
+                            yield _sse_json({
+                                "type": "retrieval_progress",
+                                "phase": "llm_structuring_citations",
+                                "message": "正在整理引用证据，回答正文即将开始...",
+                            })
+                    if _citation_match_thread is None:
+                        citation_parts = _ci_split(_RE_START_CITATION_SECTION, full_output)
+                        if citation_parts is not None:
+                            citation_list_part = citation_parts[1].lstrip()
+                            if citation_list_part and (_retrieval_chunks or retrieval_meta.get("_context_segments")):
+                                _citation_match_thread = _start_citation_background_task(
+                                    _run_citation_match,
+                                    (
+                                        citation_list_part,
+                                        _retrieval_chunks,
+                                        retrieval_meta.get("_context_segments", []),
+                                        _citation_match_result,
+                                    ),
+                                )
+                    stream_delta = ""
+                    if current_answer_text:
+                        if current_answer_text.startswith(visible_answer_text):
+                            stream_delta = current_answer_text[len(visible_answer_text):]
+                        elif not content_progress_sent:
+                            stream_delta = current_answer_text
+                        visible_answer_text = current_answer_text
+                    if stream_delta or reasoning:
+                        if stream_delta:
+                            content_progress_sent = True
+                        yield f"data: {json.dumps({'content': stream_delta, 'reasoning_content': reasoning, 'done': False, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')}, ensure_ascii=False)}\n\n"
 
                 if chunk.get("done"):
                     stream_done_sent = True
@@ -19611,7 +19988,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     # FINAL ANSWER 发给客户端，再等待该增强元数据，避免思考结束后
                     # 因最长 5 秒的匹配窗口而看不到任何正文。
                     if has_structured_citations and full_output:
-                        preview_answer_text = extract_final_answer(full_output)
+                        preview_answer_text = _extract_terminal_structured_answer(full_output)
                         preview_delta = ""
                         if preview_answer_text:
                             if not content_progress_sent:
@@ -19658,7 +20035,11 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                                 oc["page_range"] = [ec["page"], ec["page"]]
                                             break
 
-                    final_answer_text = extract_final_answer(full_output) if has_structured_citations else (full_output or "")
+                    final_answer_text = (
+                        _extract_terminal_structured_answer(full_output)
+                        if has_structured_citations
+                        else (full_output or "")
+                    )
                     answer_guard: dict = {}
                     _snapshot_retrieval_context_segments(retrieval_meta)
                     final_answer_text, retrieval_meta["citations"] = _prepare_answer_and_citations_for_display(
@@ -19947,10 +20328,10 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     )
                     record_usage(usage_meta)
 
-                    # Bug1 兜底：LLM 未输出 FINAL ANSWER 标记时，流式过滤跳过了所有 content，
-                    # 此处补发完整回答文本，确保前端不会显示空内容
-                    if has_structured_citations and full_output:
-                        fallback_text = final_answer_text or full_output
+                    # 有行首 FINAL ANSWER 才补发正文。无标记的草稿已经进思考区，
+                    # 不能把 full_output 整段当成回答。
+                    if has_structured_citations and final_answer_text:
+                        fallback_text = final_answer_text
                         fallback_delta = ""
                         if not content_progress_sent:
                             fallback_delta = fallback_text
@@ -20269,59 +20650,7 @@ async def chat_with_pdf_stream(request: ChatRequest):
                     yield "data: [DONE]\n\n"
                     break
 
-                # 累积完整输出
-                full_output += content
-
-                # 结构化引文流式过滤：隐藏 CITATION LIST，只展示 FINAL ANSWER
                 if has_structured_citations:
-                    current_answer_text = _extract_streaming_final_answer(full_output)
-                    if current_answer_text:
-                        reached_final_answer = True
-                    elif not citation_preamble_status_sent:
-                        citation_parts = _ci_split(_RE_START_CITATION, full_output)
-                        answer_parts = _ci_split(_RE_START_ANSWER, full_output)
-                        if (
-                            citation_parts is not None
-                            and not citation_parts[0].strip()
-                            and answer_parts is None
-                        ):
-                            citation_preamble_status_sent = True
-                            for event in _thinking_complete_events(
-                                phase="llm_structuring_citations",
-                                message="思考完成，正在整理引用证据，回答正文即将开始...",
-                            ):
-                                yield event
-                    # D1：CITATION LIST 已完整，立即在后台线程启动引文匹配
-                    if _citation_match_thread is None:
-                        citation_parts = _ci_split(_RE_START_CITATION, full_output)
-                        if citation_parts is not None:
-                            citation_list_part = citation_parts[1].lstrip()
-                            if citation_list_part and (_retrieval_chunks or retrieval_meta.get("_context_segments")):
-                                _citation_match_thread = _start_citation_background_task(
-                                    _run_citation_match,
-                                    (
-                                        citation_list_part,
-                                        _retrieval_chunks,
-                                        retrieval_meta.get("_context_segments", []),
-                                        _citation_match_result,
-                                    ),
-                                )
-                    # 提取 FINAL ANSWER 之后的内容并发送
-                    stream_delta = ""
-                    if current_answer_text:
-                        if current_answer_text.startswith(visible_answer_text):
-                            stream_delta = current_answer_text[len(visible_answer_text):]
-                        elif not content_progress_sent:
-                            stream_delta = current_answer_text
-                        visible_answer_text = current_answer_text
-                    if stream_delta or reasoning:
-                        if stream_delta:
-                            content_progress_sent = True
-                        yield f"data: {json.dumps({'content': stream_delta, 'reasoning_content': reasoning, 'done': False, 'used_provider': chunk.get('used_provider'), 'used_model': chunk.get('used_model'), 'fallback_used': chunk.get('fallback_used')})}\n\n"
-                    # 不展示 CITATION LIST 部分
-                    # 已进入 FINAL ANSWER 区域，检查是否 CITATION LIST 再次出现（小模型重复）
-                    # 使用 continue 跳过脏块而非 break，确保 done 事件正常触发
-                    # 仅保留 CITATION LIST 之前的内容（如有），其余丢弃
                     continue
 
                 chunk_data = {
@@ -20373,7 +20702,11 @@ async def chat_with_pdf_stream(request: ChatRequest):
                                         oc["alignment_status"] = "span_matched"
                                     break
 
-                final_answer_text = extract_final_answer(full_output) if has_structured_citations else full_output
+                final_answer_text = (
+                    _extract_terminal_structured_answer(full_output)
+                    if has_structured_citations
+                    else full_output
+                )
                 answer_guard: dict = {}
                 _snapshot_retrieval_context_segments(retrieval_meta)
                 final_answer_text, retrieval_meta["citations"] = _prepare_answer_and_citations_for_display(

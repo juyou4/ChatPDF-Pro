@@ -253,19 +253,26 @@ async def get_capabilities():
     桌面模式下隐藏本地模型选项，提示用户配置 API Key。
     服务器模式下返回完整能力列表。
     """
-    from services.embedding_service import _HAS_SENTENCE_TRANSFORMERS
-    from services.rerank_service import _HAS_CROSS_ENCODER
+    from services.embedding_service import (
+        _HAS_SENTENCE_TRANSFORMERS,
+        is_local_embedding_runtime_supported,
+    )
+    from services.rerank_service import _HAS_CROSS_ENCODER, is_local_rerank_runtime_supported
     build = get_public_build_identity()
 
     # 收集可用的 embedding provider 列表
     embedding_providers = ["openai", "silicon", "aliyun", "gemini", "zhipu",
                            "minimax", "ollama"]
-    if _HAS_SENTENCE_TRANSFORMERS:
+    has_safe_local_embedding = bool(
+        _HAS_SENTENCE_TRANSFORMERS and is_local_embedding_runtime_supported()
+    )
+    if has_safe_local_embedding:
         embedding_providers.insert(0, "local")
 
     # 收集可用的 rerank provider 列表
     rerank_providers = ["cohere", "jina", "silicon", "aliyun"]
-    if _HAS_CROSS_ENCODER:
+    has_safe_local_rerank = bool(_HAS_CROSS_ENCODER and is_local_rerank_runtime_supported())
+    if has_safe_local_rerank:
         rerank_providers.insert(0, "local")
 
     return {
@@ -274,11 +281,11 @@ async def get_capabilities():
         "git_short_sha": build.get("git_short_sha"),
         "build_time": build.get("build_time"),
         "build_dirty": build.get("build_dirty"),
-        "has_local_embedding": _HAS_SENTENCE_TRANSFORMERS,
-        "has_local_rerank": _HAS_CROSS_ENCODER,
+        "has_local_embedding": has_safe_local_embedding,
+        "has_local_rerank": has_safe_local_rerank,
         "embedding_providers": embedding_providers,
         "rerank_providers": rerank_providers,
-        "needs_api_key": runtime.is_desktop or not _HAS_SENTENCE_TRANSFORMERS,
+        "needs_api_key": runtime.is_desktop or not has_safe_local_embedding,
         # /capabilities is intentionally reachable before the Electron token
         # is available; do not disclose the user's absolute storage path there.
         "data_dir": "" if runtime.requires_token else runtime.data_dir,

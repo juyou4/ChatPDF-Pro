@@ -159,11 +159,15 @@ def _namespaced_citation(
 ) -> dict[str, Any]:
     entry = dict(item)
     namespace = f"doc:{doc_id}"
-    original_id = next((
-        str(entry.get(field) or "").strip()
-        for field in ("evidence_id", "block_id", "chunk_id", "context_id")
-        if str(entry.get(field) or "").strip()
-    ), "")
+    original_id = ""
+    for field in ("evidence_id", "chunk_id", "child_chunk_id", "block_id", "context_id"):
+        value = entry.get(field)
+        if value in (None, False, ""):
+            continue
+        token = str(value).strip()
+        if token:
+            original_id = token
+            break
     if not original_id:
         original_id = hashlib.sha1(_citation_text(entry).encode("utf-8")).hexdigest()[:20]
     namespaced_id = f"{namespace}:{original_id}"

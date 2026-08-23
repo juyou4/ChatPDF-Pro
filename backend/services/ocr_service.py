@@ -4,6 +4,7 @@ Supports both local Tesseract OCR and cloud OCR APIs
 """
 import io
 import ipaddress
+import json
 import os
 import re
 import shutil
@@ -497,6 +498,77 @@ def _validate_mineru_zip(zf: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     return infos
 
 
+def _select_mineru_zip_members(names: list[str]) -> dict[str, str | None]:
+    members: dict[str, str | None] = {
+        "full_md": None,
+        "middle": None,
+        "content_list": None,
+        "content_list_v2": None,
+        "layout": None,
+        "model": None,
+    }
+    for name in names:
+        base = name.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if base.endswith("full.md"):
+            members["full_md"] = name
+        elif base.endswith("middle.json"):
+            members["middle"] = name
+        elif base.endswith("content_list_v2.json"):
+            members["content_list_v2"] = name
+        elif base.endswith("content_list.json"):
+            members["content_list"] = name
+        elif base.endswith("layout.json"):
+            members["layout"] = name
+        elif base.endswith("_model.json") or base == "model.json":
+            members["model"] = name
+    return members
+
+
+def _read_mineru_zip_json(zf: zipfile.ZipFile, name: str | None):
+    if not name:
+        return None
+    return json.loads(zf.read(name).decode("utf-8"))
+
+
+def _build_mineru_zip_payload(zf: zipfile.ZipFile, infos: list[zipfile.ZipInfo]) -> dict[str, Any]:
+    names = [info.filename for info in infos]
+    members = _select_mineru_zip_members(names)
+    content_list_path = members["content_list"] or members["content_list_v2"]
+    if members["content_list"] is None and members["middle"] is None and content_list_path is None:
+        raise RuntimeError(
+            "MinerU ZIP 中未找到 content_list.json 或 middle.json，"
+            f"ZIP 包含: {names}"
+        )
+    if members["full_md"] is None:
+        logger.warning(
+            "MinerU ZIP 中未找到 full.md，文本覆盖率见证将不可用。ZIP 包含: %s",
+            names,
+        )
+    full_md = zf.read(members["full_md"]).decode("utf-8") if members["full_md"] else ""
+    content_list_v2_json = (
+        _read_mineru_zip_json(zf, members["content_list_v2"])
+        if members["content_list"] and members["content_list_v2"]
+        else None
+    )
+    return {
+        "full_md": full_md,
+        "middle_json": _read_mineru_zip_json(zf, members["middle"]),
+        "content_list_json": _read_mineru_zip_json(zf, content_list_path),
+        "content_list_v2_json": content_list_v2_json,
+        "layout_json": _read_mineru_zip_json(zf, members["layout"]),
+        "model_json": _read_mineru_zip_json(zf, members["model"]),
+        "zip_entries": names,
+        "paths": {
+            "full_md": members["full_md"],
+            "middle_json": members["middle"],
+            "content_list_json": content_list_path,
+            "content_list_v2_json": members["content_list_v2"],
+            "layout_json": members["layout"],
+            "model_json": members["model"],
+        },
+    }
+
+
 class BaseOCRAdapter(ABC):
     """OCR 适配器抽象基类，定义所有 OCR 后端的统一接口"""
 
@@ -541,7 +613,6 @@ class BaseOCRAdapter(ABC):
 # local configuration during migration.
 _DOCUMENT_PARSE_PROVIDER_NAMES = frozenset({"mineru"})
 
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -972,86 +1043,170 @@ def _ocr_tools_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "ocr_tools"
 
 
-def _find_local_ocr_tools():
-    """查找本地安装的 OCR 工具"""
+def _tesseract_exe_name() -> str:
+    return "tesseract.exe" if os.name == "nt" else "tesseract"
+
+
+def _candidate_tesseract_cmds() -> List[Path]:
     ocr_dir = _ocr_tools_dir()
-    
-    # Tesseract 路径
-    tesseract_paths = [
-        ocr_dir / "tesseract" / "tesseract.exe",  # Windows 本地安装
-        ocr_dir / "tesseract" / "tesseract",  # Linux/Mac 本地安装
-        Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),  # Windows 默认
-        Path("/usr/bin/tesseract"),  # Linux 默认
-        Path("/usr/local/bin/tesseract"),  # macOS Homebrew
-        Path("/opt/homebrew/bin/tesseract"),  # macOS M1 Homebrew
+    exe = _tesseract_exe_name()
+    local_app = str(os.environ.get("LOCALAPPDATA") or "").strip()
+    candidates = [
+        ocr_dir / "tesseract" / exe,
+        Path(r"C:\Program Files\Tesseract-OCR") / exe,
+        Path(r"C:\Program Files (x86)\Tesseract-OCR") / exe,
+        Path("/usr/bin/tesseract"),
+        Path("/usr/local/bin/tesseract"),
+        Path("/opt/homebrew/bin/tesseract"),
     ]
-    
-    for path in tesseract_paths:
-        if path.exists():
-            return str(path.parent)
-    
+    if local_app:
+        candidates.append(Path(local_app) / "Programs" / "Tesseract-OCR" / exe)
+    candidates.append(Path.home() / "scoop" / "apps" / "tesseract" / "current" / exe)
+    which = shutil.which("tesseract")
+    if which:
+        candidates.append(Path(which))
+    return candidates
+
+
+def _find_tesseract_cmd() -> Optional[str]:
+    """返回可用的 tesseract 可执行文件路径。"""
+    for path in _candidate_tesseract_cmds():
+        try:
+            if path.is_file():
+                return str(path)
+        except OSError:
+            continue
     return None
+
+
+def _find_local_ocr_tools():
+    """查找本地 Tesseract 所在目录（兼容旧调用方）。"""
+    command = _find_tesseract_cmd()
+    return str(Path(command).parent) if command else None
+
+
+def _apply_tesseract_cmd(command: Optional[str] = None) -> Optional[str]:
+    """把发现的 tesseract 路径写进 pytesseract 和 PATH。"""
+    resolved = command or _find_tesseract_cmd()
+    if not resolved:
+        return None
+    parent = str(Path(resolved).parent)
+    os.environ["PATH"] = parent + os.pathsep + os.environ.get("PATH", "")
+    if TESSERACT_AVAILABLE:
+        pytesseract.pytesseract.tesseract_cmd = resolved
+    return resolved
+
+
+def _candidate_poppler_dirs() -> List[Path]:
+    ocr_dir = _ocr_tools_dir()
+    dirs = [
+        ocr_dir / "poppler" / "Library" / "bin",
+        ocr_dir / "poppler" / "bin",
+        Path("/usr/bin"),
+        Path("/usr/local/bin"),
+        Path("/opt/homebrew/bin"),
+    ]
+    which = shutil.which("pdftoppm")
+    if which:
+        dirs.append(Path(which).resolve().parent)
+    return dirs
+
+
+def _poppler_dir_has_binary(directory: Path) -> bool:
+    return (directory / "pdftoppm.exe").is_file() or (directory / "pdftoppm").is_file()
+
+
+def _find_poppler():
+    """查找 Poppler 的 bin 目录（含 PATH / TeX Live / ocr_tools）。"""
+    ocr_dir = _ocr_tools_dir()
+    poppler_paths = _candidate_poppler_dirs()
+    poppler_dir = ocr_dir / "poppler"
+    if poppler_dir.exists() and poppler_dir.is_dir():
+        has_executable = any(
+            _poppler_dir_has_binary(sub_path)
+            for sub_path in poppler_paths
+            if _is_relative_to(sub_path, poppler_dir)
+        )
+        if not has_executable:
+            logger.warning(
+                "Poppler 目录 '%s' 存在但未找到可执行文件（pdftoppm），"
+                "该目录可能为空或未正确安装。",
+                poppler_dir,
+            )
+
+    for path in poppler_paths:
+        if _poppler_dir_has_binary(path):
+            return str(path)
+
+    searched_paths_str = "\n  ".join(str(p) for p in poppler_paths)
+    logger.warning(
+        "未找到 Poppler 可执行文件（pdftoppm），已搜索以下路径:\n  %s\n"
+        "请安装 Poppler 以启用 PDF 转图像功能。\n"
+        "安装指引:\n"
+        "  - Windows: 下载 https://github.com/oschwartz10612/poppler-windows/releases 并解压到 ocr_tools/poppler/\n"
+        "  - macOS: brew install poppler\n"
+        "  - Linux: sudo apt-get install poppler-utils",
+        searched_paths_str,
+    )
+    return None
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_tesseract_languages(requested: str, installed: Any) -> List[str]:
+    """从已安装语言里挑出实际能用的 Tesseract 语言包。
+
+    请求 `chi_sim+eng` 但只装了 `eng` 时，仍应视为可用，而不是整引擎不可用。
+    """
+    available = {
+        str(item).strip()
+        for item in (installed or [])
+        if str(item).strip() and str(item).strip().lower() != "osd"
+    }
+    wanted = [part.strip() for part in str(requested or "").split("+") if part.strip()]
+    matched = [part for part in wanted if part in available]
+    if matched:
+        return matched
+    for fallback in ("chi_sim", "chi_tra", "eng"):
+        if fallback in available:
+            return [fallback]
+    return sorted(available)[:2]
+
+
+def should_enable_mineru_ocr(
+    config: Optional[dict] = None,
+    *,
+    extraction_quality: Any = "",
+    pages_needing_ocr: Any = None,
+    ocr_status: Any = "",
+) -> bool:
+    """决定 MinerU 深度解析要不要打开 is_ocr。
+
+    设置里手动打开时始终开启；本地提取质量差、已标出待 OCR 页，
+    或本地逐页 OCR 不可用/失败时，自动打开，避免扫描件只走 MinerU 却关掉 OCR。
+    """
+    if bool((config or {}).get("enable_ocr")):
+        return True
+    quality = str(extraction_quality or "").strip().lower()
+    if quality == "poor":
+        return True
+    if isinstance(pages_needing_ocr, (list, tuple, set)) and any(
+        True for _page in pages_needing_ocr
+    ):
+        return True
+    return str(ocr_status or "").strip().lower() in {"unavailable", "failed"}
+
 
 # 设置 Tesseract 路径
 _tesseract_path = _find_local_ocr_tools()
 if _tesseract_path:
     os.environ["PATH"] = _tesseract_path + os.pathsep + os.environ.get("PATH", "")
-
-# Poppler 路径
-def _find_poppler():
-    """
-    查找 Poppler 路径
-
-    增强逻辑：
-    - 搜索失败时记录所有已搜索路径到日志
-    - 检测 ocr_tools/poppler/ 目录存在但无可执行文件的情况并记录警告
-    """
-    ocr_dir = _ocr_tools_dir()
-
-    poppler_paths = [
-        ocr_dir / "poppler" / "Library" / "bin",  # Windows 本地安装
-        Path("/usr/bin"),  # Linux
-        Path("/usr/local/bin"),  # macOS Homebrew
-        Path("/opt/homebrew/bin"),  # macOS M1 Homebrew
-    ]
-
-    # 检测 ocr_tools/poppler/ 目录是否存在但内部无可执行文件
-    poppler_dir = ocr_dir / "poppler"
-    if poppler_dir.exists() and poppler_dir.is_dir():
-        # 检查该目录及其子目录中是否有 pdftoppm 可执行文件
-        has_executable = False
-        for sub_path in poppler_paths:
-            # 仅检查属于 poppler_dir 子路径的搜索路径
-            try:
-                sub_path.relative_to(poppler_dir)
-            except ValueError:
-                continue
-            if (sub_path / "pdftoppm.exe").exists() or (sub_path / "pdftoppm").exists():
-                has_executable = True
-                break
-
-        if not has_executable:
-            logger.warning(
-                f"Poppler 目录 '{poppler_dir}' 存在但未找到可执行文件（pdftoppm），"
-                "该目录可能为空或未正确安装。"
-                "请确保 Poppler 已正确解压到该目录中。"
-            )
-
-    for path in poppler_paths:
-        if (path / "pdftoppm.exe").exists() or (path / "pdftoppm").exists():
-            return str(path)
-
-    # 搜索失败，记录所有已搜索路径到日志
-    searched_paths_str = "\n  ".join(str(p) for p in poppler_paths)
-    logger.warning(
-        f"未找到 Poppler 可执行文件（pdftoppm），已搜索以下路径:\n  {searched_paths_str}\n"
-        "请安装 Poppler 以启用 PDF 转图像功能。\n"
-        "安装指引:\n"
-        "  - Windows: 下载 https://github.com/oschwartz10612/poppler-windows/releases 并解压到 ocr_tools/poppler/\n"
-        "  - macOS: brew install poppler\n"
-        "  - Linux: sudo apt-get install poppler-utils"
-    )
-    return None
 
 _poppler_path = _find_poppler()
 if _poppler_path:
@@ -1060,12 +1215,8 @@ if _poppler_path:
 try:
     import pytesseract
     from PIL import Image
-    # 设置 Tesseract 命令路径
-    if _tesseract_path:
-        tesseract_cmd = os.path.join(_tesseract_path, "tesseract.exe" if os.name == "nt" else "tesseract")
-        if os.path.exists(tesseract_cmd):
-            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
     TESSERACT_AVAILABLE = True
+    _apply_tesseract_cmd()
 except ImportError:
     pass
 
@@ -1081,6 +1232,121 @@ try:
     PADDLEOCR_AVAILABLE = True
 except ImportError:
     pass
+
+
+def diagnose_poppler() -> dict:
+    path = _find_poppler() or ""
+    if path:
+        return {"available": True, "path": path, "reason": ""}
+    return {
+        "available": False,
+        "path": "",
+        "reason": "未找到 Poppler（pdftoppm），无法把 PDF 转成图片",
+    }
+
+
+def diagnose_tesseract(lang: str = "chi_sim+eng") -> dict:
+    if not TESSERACT_AVAILABLE:
+        return {
+            "available": False,
+            "executable": "",
+            "languages": [],
+            "reason": "未安装 pytesseract Python 包",
+        }
+    if not PDF2IMAGE_AVAILABLE:
+        return {
+            "available": False,
+            "executable": "",
+            "languages": [],
+            "reason": "未安装 pdf2image",
+        }
+    command = _apply_tesseract_cmd() or ""
+    if not command:
+        return {
+            "available": False,
+            "executable": "",
+            "languages": [],
+            "reason": "未找到 Tesseract 可执行文件，请安装 Tesseract-OCR 并加入 PATH",
+        }
+    try:
+        installed = list(pytesseract.get_languages(config="") or [])
+    except Exception as exc:
+        return {
+            "available": False,
+            "executable": command,
+            "languages": [],
+            "reason": f"Tesseract 无法列出语言包：{exc}",
+        }
+    languages = resolve_tesseract_languages(lang, installed)
+    if not languages:
+        return {
+            "available": False,
+            "executable": command,
+            "languages": [],
+            "reason": "Tesseract 未安装任何可用语言包（需要 chi_sim 或 eng）",
+        }
+    poppler = diagnose_poppler()
+    if not poppler.get("available"):
+        return {
+            "available": False,
+            "executable": command,
+            "languages": languages,
+            "reason": poppler.get("reason") or "未找到 Poppler（pdftoppm）",
+        }
+    return {
+        "available": True,
+        "executable": command,
+        "languages": languages,
+        "reason": "",
+    }
+
+
+def diagnose_paddleocr() -> dict:
+    if not PADDLEOCR_AVAILABLE:
+        return {"available": False, "reason": "未安装 paddleocr Python 包"}
+    if not PDF2IMAGE_AVAILABLE:
+        return {"available": False, "reason": "未安装 pdf2image"}
+    poppler = diagnose_poppler()
+    if not poppler.get("available"):
+        return {
+            "available": False,
+            "reason": poppler.get("reason") or "未找到 Poppler（pdftoppm）",
+        }
+    return {"available": True, "reason": ""}
+
+
+def diagnose_local_ocr(lang: str = "chi_sim+eng") -> dict:
+    tesseract = diagnose_tesseract(lang)
+    paddleocr = diagnose_paddleocr()
+    poppler = diagnose_poppler()
+    reasons: List[str] = []
+    if not tesseract.get("available") and tesseract.get("reason"):
+        reasons.append(f"Tesseract：{tesseract['reason']}")
+    if not paddleocr.get("available") and paddleocr.get("reason"):
+        reasons.append(f"PaddleOCR：{paddleocr['reason']}")
+    if not poppler.get("available") and poppler.get("reason"):
+        reasons.append(poppler["reason"])
+    return {
+        "tesseract": tesseract,
+        "paddleocr": paddleocr,
+        "poppler": poppler,
+        "local_available": bool(tesseract.get("available") or paddleocr.get("available")),
+        "unavailable_reasons": reasons,
+    }
+
+
+def format_local_ocr_unavailable_message(backend: str = "auto") -> str:
+    """生成本地逐页 OCR 不可用时的中文原因，避免只回 `OCR 后端不可用: auto`。"""
+    diagnosis = diagnose_local_ocr()
+    reasons = [
+        str(item).strip()
+        for item in (diagnosis.get("unavailable_reasons") or [])
+        if str(item).strip()
+    ]
+    if reasons:
+        return "本地逐页 OCR 不可用：" + "；".join(reasons)
+    name = str(backend or "auto").strip() or "auto"
+    return f"OCR 后端不可用: {name}"
 
 
 # ============================================================
@@ -1105,18 +1371,10 @@ class TesseractAdapter(BaseOCRAdapter):
         return "tesseract"
 
     def is_available(self) -> bool:
-        """Verify the Python packages, executable, and requested language data."""
-        if not (TESSERACT_AVAILABLE and PDF2IMAGE_AVAILABLE):
-            return False
-        command = str(getattr(pytesseract.pytesseract, "tesseract_cmd", "tesseract") or "tesseract")
-        if not Path(command).is_file() and shutil.which(command) is None:
-            return False
-        try:
-            languages = set(pytesseract.get_languages(config=""))
-        except Exception:
-            return False
-        requested = {language.strip() for language in self._lang.split("+") if language.strip()}
-        return requested.issubset(languages)
+        return bool(diagnose_tesseract(self._lang).get("available"))
+
+    def _usable_languages(self) -> List[str]:
+        return list(diagnose_tesseract(self._lang).get("languages") or [])
 
     def ocr_image(self, image) -> str:
         """
@@ -1129,7 +1387,11 @@ class TesseractAdapter(BaseOCRAdapter):
         """
         if not TESSERACT_AVAILABLE:
             return ""
-        return pytesseract.image_to_string(image, lang=self._lang)
+        command = _apply_tesseract_cmd()
+        if not command:
+            return ""
+        languages = "+".join(self._usable_languages()) or self._lang
+        return pytesseract.image_to_string(image, lang=languages)
 
     def ocr_pages(
         self,
@@ -1228,8 +1490,7 @@ class PaddleOCRAdapter(BaseOCRAdapter):
         return "paddleocr"
 
     def is_available(self) -> bool:
-        """检测 PaddleOCR 和 pdf2image 是否可用"""
-        return PADDLEOCR_AVAILABLE and PDF2IMAGE_AVAILABLE
+        return bool(diagnose_paddleocr().get("available"))
 
     def _get_paddle_ocr(self):
         """延迟加载 PaddleOCR 实例"""
@@ -1835,69 +2096,24 @@ class MinerUAdapter(WorkerOCRAdapter):
             zip_data = io.BytesIO(zip_bytes)
             with zipfile.ZipFile(zip_data, "r") as zf:
                 infos = _validate_mineru_zip(zf)
-                full_md_path = None
-                middle_json_path = None
-                content_list_path = None
-                for name in (info.filename for info in infos):
-                    if name.endswith("full.md"):
-                        full_md_path = name
-                    elif name.endswith("middle.json"):
-                        middle_json_path = name
-                    elif name.endswith("content_list.json"):
-                        content_list_path = name
-
-                # 必需项以前恰好反了：缺 full.md 直接 raise，而缺 content_list.json /
-                # middle.json 只记一条 info 就继续。真正喂数据的是后两者——正文、块
-                # 结构、表格与坐标全部来自它们；full.md 的唯一活消费点是文本覆盖率
-                # 见证。一份没有结构化数据的产物本来是不该通过的。
-                if content_list_path is None and middle_json_path is None:
-                    raise RuntimeError(
-                        "MinerU ZIP 中未找到 content_list.json 或 middle.json，"
-                        f"ZIP 包含: {[info.filename for info in infos]}"
-                    )
-
-                if full_md_path is None:
-                    logger.warning(
-                        "MinerU ZIP 中未找到 full.md，文本覆盖率见证将不可用。"
-                        f"ZIP 包含: {[info.filename for info in infos]}"
-                    )
-                full_md = zf.read(full_md_path).decode("utf-8") if full_md_path else ""
-                middle_json = None
-                content_list_json = None
-                if middle_json_path:
-                    middle_json = json.loads(zf.read(middle_json_path).decode("utf-8"))
-                if content_list_path:
-                    content_list_json = json.loads(zf.read(content_list_path).decode("utf-8"))
-
+                payload = _build_mineru_zip_payload(zf, infos)
                 layout_figures = []
-                layout_source = middle_json if middle_json is not None else content_list_json
+                layout_source = payload.get("middle_json")
+                if layout_source is None:
+                    layout_source = payload.get("content_list_json")
                 if layout_source is not None:
                     try:
                         layout_figures = self._parse_layout_figures(json.dumps(layout_source, ensure_ascii=False))
                         logger.info(
-                            f"MinerU: 从 {middle_json_path or content_list_path} 提取到 "
-                            f"{len(layout_figures)} 个 figure 区域"
+                            "MinerU: 从 %s 提取到 %s 个 figure 区域",
+                            (payload.get("paths") or {}).get("middle_json")
+                            or (payload.get("paths") or {}).get("content_list_json"),
+                            len(layout_figures),
                         )
                     except Exception as e:
                         logger.warning(f"MinerU: 解析版面 figure 数据失败: {e}")
-                else:
-                    logger.info(
-                        f"MinerU ZIP 中未找到 middle.json 或 content_list.json，"
-                        f"跳过版面分析。ZIP 包含: {[info.filename for info in infos]}"
-                    )
-
-                return {
-                    "full_md": full_md,
-                    "middle_json": middle_json,
-                    "content_list_json": content_list_json,
-                    "layout_figures": layout_figures,
-                    "zip_entries": [info.filename for info in infos],
-                    "paths": {
-                        "full_md": full_md_path,
-                        "middle_json": middle_json_path,
-                        "content_list_json": content_list_path,
-                    },
-                }
+                payload["layout_figures"] = layout_figures
+                return payload
         except zipfile.BadZipFile as e:
             raise RuntimeError(f"MinerU ZIP 文件解压失败: {e}")
 
@@ -2362,56 +2578,18 @@ class MinerUDirectAdapter(MinerUAdapter):
             zip_data = io.BytesIO(zip_bytes)
             with zipfile.ZipFile(zip_data, "r") as zf:
                 infos = _validate_mineru_zip(zf)
-                full_md_path = None
-                middle_json_path = None
-                content_list_path = None
-                for name in (info.filename for info in infos):
-                    if name.endswith("full.md"):
-                        full_md_path = name
-                    elif name.endswith("middle.json"):
-                        middle_json_path = name
-                    elif name.endswith("content_list.json"):
-                        content_list_path = name
-
-                # 必需项以前恰好反了：缺 full.md 直接 raise，而缺 content_list.json /
-                # middle.json 只记一条 info 就继续。真正喂数据的是后两者——正文、块
-                # 结构、表格与坐标全部来自它们；full.md 的唯一活消费点是文本覆盖率
-                # 见证。一份没有结构化数据的产物本来是不该通过的。
-                if content_list_path is None and middle_json_path is None:
-                    raise RuntimeError(
-                        "MinerU ZIP 中未找到 content_list.json 或 middle.json，"
-                        f"ZIP 包含: {[info.filename for info in infos]}"
-                    )
-
-                if full_md_path is None:
-                    logger.warning(
-                        "MinerU ZIP 中未找到 full.md，文本覆盖率见证将不可用。"
-                        f"ZIP 包含: {[info.filename for info in infos]}"
-                    )
-                full_md = zf.read(full_md_path).decode("utf-8") if full_md_path else ""
-                middle_json = json.loads(zf.read(middle_json_path).decode("utf-8")) if middle_json_path else None
-                content_list_json = json.loads(zf.read(content_list_path).decode("utf-8")) if content_list_path else None
-
+                payload = _build_mineru_zip_payload(zf, infos)
                 layout_figures = []
-                layout_source = middle_json if middle_json is not None else content_list_json
+                layout_source = payload.get("middle_json")
+                if layout_source is None:
+                    layout_source = payload.get("content_list_json")
                 if layout_source is not None:
                     try:
                         layout_figures = self._parse_layout_figures(json.dumps(layout_source, ensure_ascii=False))
                     except Exception as exc:
                         logger.warning("MinerU Direct: 解析版面 figure 数据失败: %s", exc)
-
-                return {
-                    "full_md": full_md,
-                    "middle_json": middle_json,
-                    "content_list_json": content_list_json,
-                    "layout_figures": layout_figures,
-                    "zip_entries": [info.filename for info in infos],
-                    "paths": {
-                        "full_md": full_md_path,
-                        "middle_json": middle_json_path,
-                        "content_list_json": content_list_path,
-                    },
-                }
+                payload["layout_figures"] = layout_figures
+                return payload
         except zipfile.BadZipFile:
             raise
 
@@ -2893,6 +3071,7 @@ class OCRRegistry:
         if name in _DOCUMENT_PARSE_PROVIDER_NAMES:
             logger.warning("%s 是文档级解析器，不能作为逐页 OCR 获取", name)
             return None
+        self.refresh_local_adapters()
         if name == "auto":
             # 自动页级 OCR 不得静默上传整篇 PDF。云端服务必须由用户显式选择。
             for key in ["paddleocr", "tesseract"]:
@@ -2928,6 +3107,8 @@ class OCRRegistry:
         if exclude:
             exclude_set.update(exclude)
 
+        self.refresh_local_adapters()
+
         # 本地适配器优先级：paddleocr > tesseract
         for key in ["paddleocr", "tesseract"]:
             if key in self._adapters and key not in exclude_set:
@@ -2936,6 +3117,28 @@ class OCRRegistry:
 
         logger.warning("无可用的本地 OCR 适配器用于回退")
         return None
+
+    def refresh_local_adapters(self) -> None:
+        """重新探测并注册本地逐页 OCR 适配器。
+
+        进程启动时可能还没装 Tesseract；装好后不必重启后端。
+        不会把 MinerU 等文档级解析器写进逐页注册表。
+        """
+        _apply_tesseract_cmd()
+        for name, factory in (("paddleocr", PaddleOCRAdapter), ("tesseract", TesseractAdapter)):
+            if name in _DOCUMENT_PARSE_PROVIDER_NAMES:
+                continue
+            existing = self._adapters.get(name)
+            if existing is not None and existing.is_available():
+                continue
+            adapter = factory()
+            if adapter.is_available():
+                self._adapters[name] = adapter
+                if existing is None:
+                    logger.info("OCR 适配器已刷新注册: %s", name)
+            elif existing is not None:
+                self._adapters.pop(name, None)
+                logger.info("OCR 适配器已从注册表移除: %s", name)
 
     def list_available(self) -> Dict[str, bool]:
         """
@@ -2978,14 +3181,25 @@ def is_ocr_available() -> dict:
 
     使用全局 OCRRegistry 注册表查询已注册的适配器，
     同时保持向后兼容的返回格式。
+    `any` 仍包含 MinerU；本地逐页能力看 `local_available`。
     """
+    _ocr_registry.refresh_local_adapters()
     available = _ocr_registry.list_available()
     document_parsers = _document_parser_registry.list_available()
+    diagnostics = diagnose_local_ocr()
+    local_available = bool(
+        available.get("tesseract")
+        or available.get("paddleocr")
+        or diagnostics.get("local_available")
+    )
     return {
         "tesseract": available.get("tesseract", False),
         "paddleocr": available.get("paddleocr", False),
         "mineru": document_parsers.get("mineru", False),
-        "any": bool(available or document_parsers)
+        "any": bool(available or document_parsers),
+        "local_available": local_available,
+        "diagnostics": diagnostics,
+        "unavailable_reasons": list(diagnostics.get("unavailable_reasons") or []),
     }
 
 

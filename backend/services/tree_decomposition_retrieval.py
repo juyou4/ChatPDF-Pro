@@ -25,6 +25,14 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _chunk_merge_key(ch: dict) -> str:
+    """Passage identity for recursive merge. chunk_id=0 is valid."""
+    chunk_id = ch.get("chunk_id")
+    if chunk_id is None or isinstance(chunk_id, bool) or chunk_id == "":
+        return str(ch.get("chunk") or ch.get("text") or "")[:100]
+    return f"chunk:{chunk_id}"
+
+
 # ragflow sufficiency_check.md 中文版
 _SUFFICIENCY_CHECK_PROMPT = """你是一个严谨的研究助手。请判断给定的"已检索内容"是否足以全面回答用户的问题。
 
@@ -393,7 +401,7 @@ async def research(
     seen_keys: set = set()
     for ch in chunks:
         if isinstance(ch, dict):
-            key = ch.get("chunk_id") or (ch.get("chunk") or ch.get("text") or "")[:100]
+            key = _chunk_merge_key(ch)
             if key:
                 seen_keys.add(key)
 
@@ -406,7 +414,7 @@ async def research(
         for ch in (child_chunks or []):
             if not isinstance(ch, dict):
                 continue
-            key = ch.get("chunk_id") or (ch.get("chunk") or ch.get("text") or "")[:100]
+            key = _chunk_merge_key(ch)
             if not key or key in seen_keys:
                 continue
             seen_keys.add(key)

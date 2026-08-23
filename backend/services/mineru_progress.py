@@ -8,7 +8,8 @@ therefore distinguish an authoritative remote value from an activity estimate.
 from __future__ import annotations
 
 import math
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 
@@ -31,6 +32,7 @@ _STAGE_ESTIMATES = {
     "waiting_for_document_lock": 7,
     "requesting_upload": 10,
     "uploading": 18,
+    "mineru_parsing": 0,
     "resuming": 20,
     "resuming_result_download": 80,
     "downloading": 82,
@@ -59,6 +61,53 @@ _STAGE_ESTIMATE_WINDOWS = {
     "building_semantic_index": (95, 96, 30.0),
     "publishing_rag_index": (98, 99, 12.0),
 }
+
+# 远端解析可能十几分钟停在同一 stage。不要用 updated_at，轮询刷新会把进度打回 floor。
+_LONG_RUNNING_PARSE_WINDOW = (0, 78, 180.0)
+_LONG_RUNNING_PARSE_STAGES = {
+    "mineru_parsing": _LONG_RUNNING_PARSE_WINDOW,
+    "polling": _LONG_RUNNING_PARSE_WINDOW,
+}
+
+# JS Date 对超过 3 位的小数秒、以及无时区 ISO 的解析不一致。
+# 统一写成 UTC 毫秒，前端才能稳定算出耗时。
+_ISO_FRACTION_RE = re.compile(r"(\.\d{6})\d+")
+
+
+def utc_now_iso_ms() -> str:
+    """Return a JS-safe UTC timestamp with millisecond precision."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _coerce_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.astimezone(timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return _coerce_utc(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+        if not math.isfinite(number) or number <= 0:
+            return None
+        # 秒级时间戳与毫秒级时间戳都接受。
+        if number < 1e11:
+            number *= 1000
+        try:
+            return datetime.fromtimestamp(number / 1000, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    text = _ISO_FRACTION_RE.sub(r"\1", text.replace("Z", "+00:00").replace(" ", "T"))
+    try:
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return _coerce_utc(parsed)
 
 
 def _as_percentage(value: Any) -> float | None:
@@ -141,20 +190,15 @@ def extract_remote_mineru_progress(payload: Mapping[str, Any] | None) -> dict[st
 
 
 def _elapsed_seconds(value: Any, *, now: datetime | None = None) -> int | None:
-    if not value:
+    started = _parse_datetime(value)
+    if started is None:
         return None
-    try:
-        started = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+    current = _coerce_utc(now) if isinstance(now, datetime) else datetime.now(timezone.utc)
+    delta = (current - started).total_seconds()
+    if delta < -2:
+        # 无时区 ISO 被当成 UTC 时，会得到“未来”的开始时间，耗时会被夹成 0。
         return None
-    current = now
-    if current is None:
-        current = datetime.now(tz=started.tzinfo) if started.tzinfo else datetime.now()
-    elif started.tzinfo and current.tzinfo is None:
-        current = current.replace(tzinfo=started.tzinfo)
-    elif not started.tzinfo and current.tzinfo:
-        current = current.replace(tzinfo=None)
-    return max(0, int((current - started).total_seconds()))
+    return max(0, int(delta))
 
 
 def _estimated_stage_percent(
@@ -165,16 +209,31 @@ def _estimated_stage_percent(
 ) -> int:
     window = _STAGE_ESTIMATE_WINDOWS.get(stage)
     if not window:
-        return int(_STAGE_ESTIMATES.get(stage, 22))
+        return int(_STAGE_ESTIMATES.get(stage, 0))
 
     floor, ceiling, time_constant = window
-    stage_elapsed = _elapsed_seconds(
-        source.get("stage_started_at") or source.get("updated_at"),
-        now=now,
-    )
+    # 不要用 updated_at：轮询每次刷新都会把窗口耗时打回 0，进度条会在 floor 上来回抖。
+    stage_elapsed = _elapsed_seconds(source.get("stage_started_at"), now=now)
     if stage_elapsed is None or stage_elapsed <= 0:
         return floor
     estimate = floor + (ceiling - floor) * (1 - math.exp(-stage_elapsed / time_constant))
+    return min(ceiling, max(floor, round(estimate)))
+
+
+def _long_running_parse_percent(
+    source: Mapping[str, Any],
+    *,
+    now: datetime | None = None,
+) -> int:
+    floor, ceiling, time_constant = _LONG_RUNNING_PARSE_WINDOW
+    elapsed = None
+    for timestamp_key in ("started_at", "created_at"):
+        elapsed = _elapsed_seconds(source.get(timestamp_key), now=now)
+        if elapsed is not None:
+            break
+    if elapsed is None:
+        elapsed = 0
+    estimate = floor + (ceiling - floor) * (1 - math.exp(-elapsed / time_constant))
     return min(ceiling, max(floor, round(estimate)))
 
 
@@ -183,7 +242,11 @@ def derive_mineru_progress(task: Mapping[str, Any] | None, *, now: datetime | No
     source = task if isinstance(task, Mapping) else {}
     status = str(source.get("status") or "").strip().lower()
     stage = str(source.get("stage") or "").strip().lower()
-    elapsed = _elapsed_seconds(source.get("started_at") or source.get("created_at"), now=now)
+    elapsed = None
+    for timestamp_key in ("started_at", "created_at", "stage_started_at"):
+        elapsed = _elapsed_seconds(source.get(timestamp_key), now=now)
+        if elapsed is not None:
+            break
 
     if status in {"ready", "partial_ready"}:
         return {
@@ -204,10 +267,9 @@ def derive_mineru_progress(task: Mapping[str, Any] | None, *, now: datetime | No
 
     remote_percent = _as_percentage(source.get("remote_progress_percent"))
     if remote_percent is not None and stage == "polling":
-        # Upload/download/indexing account for the remaining 24% of the task.
-        percent = round(24 + remote_percent * 0.54)
+        percent = round(remote_percent * 0.78)
         return {
-            "percent": min(78, max(24, percent)),
+            "percent": min(78, max(0, percent)),
             "remote_percent": round(remote_percent),
             "estimated": False,
             "source": str(source.get("remote_progress_source") or "remote_percent"),
@@ -215,19 +277,20 @@ def derive_mineru_progress(task: Mapping[str, Any] | None, *, now: datetime | No
             "elapsed_seconds": elapsed,
         }
 
-    if stage == "polling":
-        try:
-            attempt = max(0, int(source.get("poll_attempt") or 0))
-        except (TypeError, ValueError):
-            attempt = 0
-        # The estimate moves early to acknowledge liveness, then asymptotically
-        # approaches the hand-off point instead of claiming remote completion.
-        percent = round(25 + 50 * (1 - math.exp(-attempt / 23)))
+    if stage in _LONG_RUNNING_PARSE_STAGES:
+        percent = _long_running_parse_percent(source, now=now)
+        if stage == "polling":
+            try:
+                attempt = max(0, int(source.get("poll_attempt") or 0))
+            except (TypeError, ValueError):
+                attempt = 0
+            attempt_percent = round(50 * (1 - math.exp(-attempt / 23)))
+            percent = max(percent, min(75, attempt_percent))
     else:
         percent = (
             _estimated_stage_percent(stage, source, now=now)
             if stage in _STAGE_ESTIMATE_WINDOWS
-            else _STAGE_ESTIMATES.get(stage, 22 if status == "running" else 2)
+            else _STAGE_ESTIMATES.get(stage, 0 if status == "running" else 2)
         )
 
     return {

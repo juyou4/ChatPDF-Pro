@@ -322,12 +322,20 @@ const CollapsiblePre = ({ children, ...props }) => {
   );
 };
 
+export const isRefDirectWriteStreaming = (props) => (
+  Boolean(props?.isStreaming && props?.streamingRef != null)
+);
+
 export const streamingMarkdownAreEqual = (prevProps, nextProps) => {
+  // 思考首包会把 content 写成「好的」，但后续 token 只走 ref 直写。
+  // 若这里把 content 变化当成需要重绘，直写节点会被拆掉，画面就停在「好的」。
+  const ignoreContent = isRefDirectWriteStreaming(prevProps) && isRefDirectWriteStreaming(nextProps);
   return (
-    prevProps.content === nextProps.content &&
+    (ignoreContent || prevProps.content === nextProps.content) &&
     prevProps.isStreaming === nextProps.isStreaming &&
     prevProps.enableBlurReveal === nextProps.enableBlurReveal &&
     prevProps.blurIntensity === nextProps.blurIntensity &&
+    prevProps.hydrateDirectWriteContent === nextProps.hydrateDirectWriteContent &&
     (prevProps.streamingRef != null) === (nextProps.streamingRef != null) &&
     prevProps.citations === nextProps.citations &&
     prevProps.webSearchSources === nextProps.webSearchSources &&
@@ -336,7 +344,7 @@ export const streamingMarkdownAreEqual = (prevProps, nextProps) => {
 };
 
 const StreamingMarkdown = React.memo(
-  ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null, streamingRef = null, webSearchSources = null, suppressInitialDots = false }) => {
+  ({ content, isStreaming, enableBlurReveal, blurIntensity = 'medium', citations = null, onCitationClick = null, streamingRef = null, webSearchSources = null, suppressInitialDots = false, hydrateDirectWriteContent = true }) => {
     const containerRef = useRef(null);
     const previousAnimatedLengthRef = useRef(0);
     const [hasDirectWriteContent, setHasDirectWriteContent] = useState(false);
@@ -460,9 +468,14 @@ const StreamingMarkdown = React.memo(
         return;
       }
 
-      // 兼容只传入 React state、尚未由流队列接管的调用方。useSmoothStream
-      // 会在接管首帧做一次同步校验，避免同一首段被重复追加。
-      if ((el.textContent || '').trim().length === 0 && content && content.trim().length > 0) {
+      // 检索阶段可能只把 React state 传到这里，流队列还没接管。
+      // 思考正文不能靠这个回填：首包「好的」会把后续 token 写到被卸掉的节点上。
+      if (
+        hydrateDirectWriteContent
+        && (el.textContent || '').trim().length === 0
+        && content
+        && content.trim().length > 0
+      ) {
         el.textContent = content;
       }
 
@@ -479,7 +492,7 @@ const StreamingMarkdown = React.memo(
       observer.observe(el, { childList: true, subtree: true, characterData: true });
 
       return () => observer.disconnect();
-    }, [isRefDirectWrite, streamingRef, content]);
+    }, [isRefDirectWrite, streamingRef, content, hydrateDirectWriteContent]);
 
     const citationMap = useMemo(() => {
       if (!citations || citations.length === 0) return null;

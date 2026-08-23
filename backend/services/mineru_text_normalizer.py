@@ -441,7 +441,12 @@ def normalize_mineru_for_rag(
                 continue
 
         if not text:
-            _inc(filtered_counts, f"{raw_type}:empty")
+            # Empty boxes with geometry are layout slots after MinerU stitched
+            # the sentence elsewhere. They are not parse failures.
+            if item.get("bbox") or item.get("poly"):
+                _inc(filtered_counts, f"{raw_type}:layout_slot")
+            else:
+                _inc(filtered_counts, f"{raw_type}:empty")
             continue
 
         if _HTML_TAG_RE.search(text):
@@ -1618,6 +1623,16 @@ def _extract_text(item: dict[str, Any], keys: tuple[str, ...], _depth: int = 0) 
                     if nested:
                         parts.append(nested)
     return "\n".join(_dedupe(parts)).strip()
+
+
+def normalize_code_text(text: str) -> str:
+    """Keep MinerU algorithm/code wording and drop only wrapper markup.
+
+    ``content_list`` puts algorithms in ``code_body`` as a
+    ``mineru-algorithm`` HTML div.  The block index and RAG both need the
+    inner Require/Ensure lines, not the wrapper tags.
+    """
+    return _clean_text(text)
 
 
 def normalize_formula_markdown(text: str) -> str:

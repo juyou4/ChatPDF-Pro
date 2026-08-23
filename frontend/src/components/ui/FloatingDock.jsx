@@ -13,7 +13,7 @@ import {
   useMotionValue,
   useSpring,
   useTransform,
-} from 'motion/react';
+} from 'framer-motion';
 import { cn } from '../../utils/cn';
 
 const FloatingDockContext = createContext(null);

@@ -673,5 +673,8 @@ def _timestamp(value: str | datetime | None) -> str:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc).isoformat()
-    return datetime.now(timezone.utc).isoformat()
+        value = value.astimezone(timezone.utc)
+    else:
+        value = datetime.now(timezone.utc)
+    # 毫秒精度带时区，避免 JS Date 把 6 位微秒或无时区 ISO 解析成 Invalid / UTC。
+    return value.isoformat(timespec="milliseconds")

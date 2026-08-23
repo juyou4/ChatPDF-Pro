@@ -3583,12 +3583,17 @@ body,
 }
 
 @keyframes agentTimelineNodePulse {
-    0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(181, 107, 85, 0.16); }
-    50% { transform: scale(1.08); box-shadow: 0 0 0 5px rgba(181, 107, 85, 0); }
+    0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 var(--agent-timeline-pulse, rgba(92, 86, 79, 0.12)); }
+    50% { transform: scale(1.06); box-shadow: 0 0 0 5px transparent; }
 }
 
 .agent-timeline-node-active {
+    --agent-timeline-pulse: rgba(92, 86, 79, 0.12);
     animation: agentTimelineNodePulse 1.8s ease-in-out infinite;
+}
+
+.dark .agent-timeline-node-active {
+    --agent-timeline-pulse: rgba(209, 213, 219, 0.16);
 }
 
 @keyframes agentTimelineNodeComplete {
@@ -3607,13 +3612,13 @@ body,
 }
 
 .agent-progress-track {
-    --agent-progress-sweep-color: rgba(181, 107, 85, 0.48);
+    --agent-progress-sweep-color: rgba(138, 130, 123, 0.38);
     position: relative;
     overflow: hidden;
 }
 
 .dark .agent-progress-track {
-    --agent-progress-sweep-color: rgba(255, 160, 122, 0.56);
+    --agent-progress-sweep-color: rgba(156, 163, 175, 0.42);
 }
 
 .agent-progress-fill {
@@ -3664,6 +3669,13 @@ body,
     .agent-diagnostics-chevron {
         transition: none;
     }
+}
+
+/* 默认 scaleX(0)。不要从浏览器默认的 1 过渡到当前进度，否则重挂载会先满格再收回。 */
+.mineru-progress-fill {
+    width: 100%;
+    transform: scaleX(0);
+    transform-origin: left center;
 }
 
 /* ==================== MinerU 解析扫描动画 ==================== */

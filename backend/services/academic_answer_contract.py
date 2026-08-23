@@ -267,13 +267,50 @@ def _coverage_ratio(coverage: Optional[dict]) -> float:
     return float(raw)
 
 
-def is_cannot_answer(answer: str) -> bool:
-    text = str(answer or "").strip()
+def _leading_answer_text(answer: str) -> str:
+    """去掉 markdown 装饰后的首段，用来判断是不是整题拒答。"""
+    text = strip_citation_protocol_block(str(answer or "")).strip()
+    if not text:
+        return ""
+    first_line = text.split("\n", 1)[0].strip()
+    return re.sub(r"^[\s>#*_`\-]+", "", first_line).strip()
+
+
+def _answer_has_grounded_substance(answer: str) -> bool:
+    """正文里是否还有可独立成答的事实句，而不是一句拒答理由。"""
+    text = strip_citation_protocol_block(str(answer or "")).strip()
     if not text:
         return False
-    if CANNOT_ANSWER_PHRASE_ZH in text or CANNOT_ANSWER_PHRASE_EN.lower() in text.lower():
+    factual = 0
+    for sentence in split_sentences(text):
+        cleaned = sentence.strip()
+        if len(cleaned) < 12:
+            continue
+        if _CANNOT_ANSWER_RE.search(cleaned):
+            continue
+        if _TRANSITION_RE.match(cleaned):
+            continue
+        if _FACTUAL_CLAIM_RE.search(_STRUCTURAL_REF_RE.sub(" ", cleaned)):
+            factual += 1
+    return factual >= 1
+
+
+def is_cannot_answer(answer: str) -> bool:
+    """整题拒答才为 True；部分能答、部分缺证据不算拒答。"""
+    text = strip_citation_protocol_block(str(answer or "")).strip()
+    if not text:
+        return False
+    if _answer_has_grounded_substance(text):
+        return False
+    leading = _leading_answer_text(text)
+    if leading.startswith(CANNOT_ANSWER_PHRASE_ZH):
         return True
-    return bool(_CANNOT_ANSWER_RE.search(text[:400]))
+    if leading.lower().startswith(CANNOT_ANSWER_PHRASE_EN.lower()):
+        return True
+    compact = re.sub(r"\s+", "", text)
+    if len(compact) <= 120 and _CANNOT_ANSWER_RE.search(text):
+        return True
+    return bool(_CANNOT_ANSWER_RE.search(leading))
 
 
 def build_academic_style_prompt(
@@ -350,8 +387,9 @@ def build_academic_style_prompt(
         f"{task_lines}\n"
         f"{absence_evidence_rule}\n"
         f"{architecture_coverage_rule}\n"
-        f"- 若证据不足，使用固定拒答句：「{CANNOT_ANSWER_PHRASE_ZH}」，并简要说明缺什么；"
-        f"英文场景可用 “{CANNOT_ANSWER_PHRASE_EN}”。\n"
+        f"- 复合问题先回答证据已经覆盖的部分；只对缺证据的子项说明当前证据未覆盖。"
+        f"仅当核心问题完全没有可引用事实时，才使用固定拒答句：「{CANNOT_ANSWER_PHRASE_ZH}」"
+        f"（英文可用 “{CANNOT_ANSWER_PHRASE_EN}”），并补一句缺口原因。\n"
         "- 禁止用预训练知识补全文档未给出的数值、超参、作者主张或实验设置。\n"
         "- 每个关键事实声明（数值、因果、方法归属、比较结论）句末使用 [n] 引用；"
         "过渡句与结构提示可不引。"
@@ -383,7 +421,8 @@ def build_compact_academic_contract_prompt(
         "不得把“层数、通道、投影或超参未给出”说成“没有结构”。\n"
         "- 复合问题逐项覆盖；任何“未给出”都要明确限定到具体字段。\n"
         "- Do not turn a missing local retrieval hit into a whole-document absence claim; use a current-evidence scope unless an explicit cited statement supports the absence.\n"
-        f"- 证据不足时只输出：「{CANNOT_ANSWER_PHRASE_ZH}」+ 一句原因"
+        "- 证据能支撑的部分必须先答并引用 [n]；不要因为缺一块就把整题改成拒答。\n"
+        f"- 仅当核心问题完全没有可引用事实时，才输出：「{CANNOT_ANSWER_PHRASE_ZH}」+ 一句原因"
         f"（或英文 “{CANNOT_ANSWER_PHRASE_EN}”）。\n"
         "- 数值、方法名、数据集、指标名必须照抄证据，不得估算或改写。\n"
         f"{citation_rule}"

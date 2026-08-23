@@ -20,7 +20,15 @@ import logging
 from dataclasses import dataclass
 from typing import List
 
-from services.query_analyzer import analyze_query_type, is_section_explanation_query, QueryType
+from services.query_analyzer import (
+    analyze_query_type,
+    is_analysis_explanation_query,
+    is_mechanism_explanation_query,
+    is_method_identity_query,
+    is_paper_facet_identity_query,
+    is_section_explanation_query,
+    QueryType,
+)
 from services.semantic_group_service import SemanticGroup
 
 logger = logging.getLogger(__name__)
@@ -42,6 +50,31 @@ QUERY_TYPE_REASONING: dict[str, str] = {
     "specific": "具体性查询：使用精要粒度提供适中的上下文细节",
     "inventory": "完整结构化枚举：不使用语义意群，改由按页块索引枚举",
 }
+
+
+_SECTION_FULL_EVIDENCE = {
+    "section_explanation",
+    "analysis_explanation",
+    "comparison_multi_aspect",
+}
+
+
+def _wants_section_full(query: str, intent_decision: dict | None = None) -> bool:
+    """论文身份 / 章节深讲需要组全文，digest 通常只是节导语。"""
+    evidence_need = (
+        {str(item).strip() for item in ((intent_decision or {}).get("evidence_need") or [])}
+        if isinstance(intent_decision, dict)
+        else set()
+    )
+    if evidence_need & _SECTION_FULL_EVIDENCE:
+        return True
+    return (
+        is_section_explanation_query(query)
+        or is_method_identity_query(query)
+        or is_paper_facet_identity_query(query)
+        or is_mechanism_explanation_query(query)
+        or is_analysis_explanation_query(query)
+    )
 
 
 @dataclass
@@ -110,15 +143,10 @@ class GranularitySelector:
 
         # 获取选择理由
         reasoning = QUERY_TYPE_REASONING.get(query_type, QUERY_TYPE_REASONING["specific"])
-        evidence_need = set((intent_decision or {}).get("evidence_need") or []) if isinstance(intent_decision, dict) else set()
-        section_explanation = (
-            "section_explanation" in evidence_need
-            if isinstance(intent_decision, dict)
-            else is_section_explanation_query(query)
-        )
-        if query_type == "analytical" and section_explanation:
+        if _wants_section_full(query, intent_decision):
+            granularity = "full"
             max_groups = max(max_groups, 7)
-            reasoning = "章节深讲查询：扩大方法相关意群覆盖，兼顾细节与范围"
+            reasoning = "章节/方法身份查询：使用全文粒度，避免只拿到章节导语"
 
         logger.info(
             f"粒度选择: query_type={query_type}, "
@@ -160,16 +188,11 @@ class GranularitySelector:
             return []
 
         result: List[dict] = []
-        evidence_need = set((intent_decision or {}).get("evidence_need") or []) if isinstance(intent_decision, dict) else set()
-        prefer_section_detail = (
-            "section_explanation" in evidence_need
-            if isinstance(intent_decision, dict)
-            else is_section_explanation_query(query)
-        )
+        prefer_section_detail = _wants_section_full(query, intent_decision)
 
         for rank, group in enumerate(ranked_groups):
             # 根据排名位置分配粒度
-            if prefer_section_detail and rank <= 1:
+            if prefer_section_detail and rank <= 2:
                 granularity = "full"
             elif rank == 0:
                 # 第 1 名：全文粒度
@@ -243,7 +266,8 @@ class GranularitySelector:
             query_type,
             QUERY_TYPE_MAPPING["specific"],
         )
-        if query_type == "analytical" and is_section_explanation_query(query):
+        if _wants_section_full(query, intent_decision):
+            base_granularity = "full"
             max_groups = max(max_groups, 7)
 
         # 粒度降级顺序
@@ -286,11 +310,14 @@ class GranularitySelector:
             if group.char_count < 500 and granularity in ("digest", "full"):
                 granularity = "summary"
 
-            # Token 预算检查与降级
+            # Token 预算检查与降级。方法/章节深讲不把 full 降成 digest。
             text_attr = {"full": "full_text", "digest": "digest", "summary": "summary"}
             tokens = budget.estimate_tokens(getattr(group, text_attr[granularity], ""))
+            protect_full = _wants_section_full(query, intent_decision)
 
             while accumulated + tokens > available and DOWNGRADE.get(granularity):
+                if protect_full and granularity == "full":
+                    break
                 granularity = DOWNGRADE[granularity]
                 tokens = budget.estimate_tokens(getattr(group, text_attr[granularity], ""))
 

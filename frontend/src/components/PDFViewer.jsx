@@ -25,10 +25,12 @@ import StreamingMarkdown from './StreamingMarkdown';
 import { useDebouncedValue } from '../hooks/useDebouncedValue';
 import pdfPageCache from '../utils/pdfPageCache';
 import {
+    citationPageRectsForPage,
     citationRectsToRendered,
     collectTextRangeClientRects,
     findBestCitationBlock,
     findCitationTextRange,
+    hasCitationPageRects,
     isCitationGeometryCurrent,
     mergeClientRectsByLine,
     normalizeCitationBBox,
@@ -49,7 +51,9 @@ import {
     mapPdfReaderDisplayRectToPage,
     mapPdfReaderPageRectToDisplay,
     normalizePdfReaderRotation,
+    readPdfReaderFlowMode,
     rotatePdfReader,
+    writePdfReaderFlowMode,
 } from '../utils/pdfReaderLayoutUtils';
 import {
     hasSelectionText,
@@ -369,7 +373,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const [numPages, setNumPages] = useState(null);
     const [pageNumber, setPageNumber] = useState(page || 1);
     const [scale, setScale] = useState(1.0);
-    const [pageFlowMode, setPageFlowMode] = useState(PDF_READER_FLOW_MODES.PAGED);
+    const [pageFlowMode, setPageFlowMode] = useState(readPdfReaderFlowMode);
     const [pageLayout, setPageLayout] = useState(PDF_READER_LAYOUTS.SINGLE);
     const [pageRotation, setPageRotation] = useState(0);
     const [isPageLayoutMenuOpen, setIsPageLayoutMenuOpen] = useState(false);
@@ -479,7 +483,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         setError(null);
         setPageBaseSize({ width: 0, height: 0 });
         setPageRotation(0);
-        setPageFlowMode(PDF_READER_FLOW_MODES.PAGED);
         setPageLayout(PDF_READER_LAYOUTS.SINGLE);
         setIsPageLayoutMenuOpen(false);
     }, [pdfUrl]);
@@ -907,13 +910,14 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     }, [numPages, pageFlowMode, pageLayout, pageNumber, updateReaderPage]);
 
     const selectPageFlowMode = useCallback((nextMode) => {
-        if (nextMode === pageFlowMode) return;
-        setPageFlowMode(nextMode);
-        if (nextMode === PDF_READER_FLOW_MODES.PAGED) {
+        const resolved = writePdfReaderFlowMode(nextMode);
+        if (resolved === pageFlowMode) return;
+        setPageFlowMode(resolved);
+        if (resolved === PDF_READER_FLOW_MODES.PAGED) {
             const firstVisiblePage = getPdfReaderDisplayPages({
                 totalPages: numPages,
                 pageNumber,
-                flowMode: nextMode,
+                flowMode: resolved,
                 layout: pageLayout,
             })[0];
             updateReaderPage(firstVisiblePage || pageNumber);
@@ -1018,15 +1022,16 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
                 const pageEl = pageRef.current;
                 const canvas = pageEl?.querySelector('canvas');
-                if (canvas?.toBlob && !pdfPageCache.has(cachePage, cacheScale, cacheDocumentKey)) {
+                if (
+                    canvas?.toBlob
+                    && typeof URL !== 'undefined'
+                    && typeof URL.createObjectURL === 'function'
+                    && !pdfPageCache.has(cachePage, cacheScale, cacheDocumentKey)
+                ) {
                     canvas.toBlob((blob) => {
-                        if (!blob || generation !== backgroundGenerationRef.current || typeof FileReader === 'undefined') return;
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                            if (generation !== backgroundGenerationRef.current || typeof reader.result !== 'string') return;
-                            pdfPageCache.set(cachePage, cacheScale, reader.result, cacheDocumentKey);
-                        };
-                        reader.readAsDataURL(blob);
+                        if (!blob || generation !== backgroundGenerationRef.current) return;
+                        const objectUrl = URL.createObjectURL(blob);
+                        pdfPageCache.set(cachePage, cacheScale, objectUrl, cacheDocumentKey);
                     }, 'image/webp', 0.86);
                 }
 
@@ -1377,10 +1382,13 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         const MAX_RETRIES = 12; // 最多等待约 1.2 秒，随后才使用块坐标兜底
 
         const citationAnchor = highlightInfo?.citationAnchor || {};
+        const pageRects = citationAnchor.pageRects || citationAnchor.page_rects || [];
+        const currentPageExplicitRects = citationPageRectsForPage(pageRects, pageNumber);
         const hasCitationAnchor = Boolean(
             citationAnchor.blockId
             || normalizeCitationBBox(citationAnchor.bbox)
             || (Array.isArray(citationAnchor.rects) && citationAnchor.rects.length > 0)
+            || hasCitationPageRects(pageRects)
         );
         if (!highlightInfo || (!highlightInfo.text && !hasCitationAnchor)) {
             setHighlightRect(null);
@@ -1390,8 +1398,39 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
 
         // 使用 prop page 作为目标页码（而非内部 pageNumber 状态），避免竞态条件
         const targetPage = highlightInfo.page;
+        const geometryCurrent = isCitationGeometryCurrent(highlightInfo, blockIndex);
+        const renderedPageSize = pageRenderedSize.width > 0 && pageRenderedSize.height > 0 && debouncedScale > 0
+            ? {
+                width: pageRenderedSize.width / debouncedScale,
+                height: pageRenderedSize.height / debouncedScale,
+            }
+            : null;
+        const renderOptions = {
+            pageData: currentBlockPage,
+            renderedPageSize,
+            scale: debouncedScale,
+        };
+
         if (targetPage !== pageNumber) {
-            // 页面还没切换到位，等下一次 pageNumber 更新后再匹配
+            // 跨页槽位：翻到槽位页时仍画出该页的 page_rects，不依赖原文所在页。
+            if (
+                geometryCurrent
+                && currentPageExplicitRects.length > 0
+                && renderedPageEpoch === pageRenderEpoch
+            ) {
+                const slotRects = citationRectsToRendered({
+                    rects: currentPageExplicitRects,
+                    coordinateSpace: citationAnchor.coordinateSpace,
+                    pageSize: citationAnchor.pageSize,
+                    padding: { x: 2, y: 0 },
+                    ...renderOptions,
+                });
+                if (slotRects.length > 0) {
+                    setHighlightRect(slotRects[0]);
+                    setHighlightRects(slotRects);
+                    return;
+                }
+            }
             setHighlightRect(null);
             setHighlightRects([]);
             return;
@@ -1405,7 +1444,6 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             return;
         }
 
-        const geometryCurrent = isCitationGeometryCurrent(highlightInfo, blockIndex);
         const anchorBBox = geometryCurrent
             ? normalizeCitationBBox(citationAnchor.bbox)
             : null;
@@ -1419,20 +1457,9 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         });
         const spatialBBox = anchorBBox || normalizeCitationBBox(blockMatch?.block?.bbox);
         const initialPageElement = pageRef.current;
-        const renderedPageSize = pageRenderedSize.width > 0 && pageRenderedSize.height > 0 && debouncedScale > 0
-            ? {
-                width: pageRenderedSize.width / debouncedScale,
-                height: pageRenderedSize.height / debouncedScale,
-            }
-            : null;
-        const renderOptions = {
-            pageData: currentBlockPage,
-            renderedPageSize,
-            scale: debouncedScale,
-        };
         const explicitRects = geometryCurrent
             ? citationRectsToRendered({
-                rects: citationAnchor.rects,
+                rects: currentPageExplicitRects.length ? currentPageExplicitRects : citationAnchor.rects,
                 coordinateSpace: citationAnchor.coordinateSpace,
                 pageSize: citationAnchor.pageSize,
                 padding: { x: 2, y: 0 },
@@ -1685,7 +1712,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const inlineTranslationBlock = useMemo(() => {
         if (!hoveredBlockId) return null;
         const block = currentBlocks.find((item) => item.block_id === hoveredBlockId) || null;
-        if (!block || !['paragraph', 'caption', 'heading'].includes(block.type || 'paragraph')) return null;
+        if (!block || !['paragraph', 'caption', 'heading', 'code'].includes(block.type || 'paragraph')) return null;
         if (!inlineTranslationSet.has(hoveredBlockId)) return null;
         const translation = blockTranslations?.[hoveredBlockId]?.translation;
         return translation ? block : null;
@@ -1696,7 +1723,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const hoverTranslationBlock = useMemo(() => {
         if (!displayedTranslationBlockId) return null;
         const block = currentBlocks.find((item) => item.block_id === displayedTranslationBlockId) || null;
-        if (!block || !['paragraph', 'caption', 'heading', 'figure', 'table'].includes(block.type || 'paragraph')) return null;
+        if (!block || !['paragraph', 'caption', 'heading', 'figure', 'table', 'code'].includes(block.type || 'paragraph')) return null;
         return block;
     }, [currentBlocks, displayedTranslationBlockId]);
     const hoverTranslationBBox = normalizeBlockBBox(hoverTranslationBlock?.bbox);

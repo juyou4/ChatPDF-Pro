@@ -28,6 +28,11 @@ from services.reasoning_effort_service import (
     merge_request_body,
     prepare_reasoning_history_messages,
 )
+from services.think_tag_stream import (
+    StreamingThinkSplitter,
+    apply_stream_think_split,
+    split_think_tags,
+)
 
 
 def _sanitize_api_key(api_key: Optional[str]) -> str:
@@ -195,6 +200,65 @@ def _extract_api_error_message(body: str, status_code: int) -> str:
     return f"API 返回错误（HTTP {status_code}）"
 
 
+_REASONING_PART_TYPES = frozenset({
+    "thinking", "reasoning", "reasoning_text", "thought", "reasoning_content",
+})
+_TEXT_PART_TYPES = frozenset({"text", "output_text", "answer", "output_text_delta"})
+_RESPONSES_REASONING_EVENT_TYPES = frozenset({
+    "response.reasoning_text.delta",
+    "response.reasoning.delta",
+})
+_RESPONSES_TEXT_EVENT_TYPES = frozenset({
+    "response.output_text.delta",
+    "response.content_part.delta",
+})
+
+
+def _coerce_stream_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        text = value.get("text") or value.get("content") or value.get("thinking") or ""
+        return text if isinstance(text, str) else ""
+    if isinstance(value, list):
+        return "".join(_coerce_stream_text(item) for item in value)
+    return ""
+
+
+def _split_delta_content_parts(content) -> tuple[str, str]:
+    """把 delta.content 的字符串 / 多模态 parts 拆成 (正文, 思考)."""
+    if content is None:
+        return "", ""
+    if isinstance(content, str):
+        return content, ""
+    if isinstance(content, dict):
+        part_type = str(content.get("type") or "").strip().lower()
+        text = _coerce_stream_text(
+            content.get("text")
+            or content.get("content")
+            or content.get("thinking")
+            or content.get("reasoning")
+        )
+        if part_type in _REASONING_PART_TYPES:
+            return "", text
+        if part_type in _TEXT_PART_TYPES or not part_type:
+            return text, ""
+        return text, ""
+    if isinstance(content, list):
+        texts: list[str] = []
+        reasons: list[str] = []
+        for item in content:
+            text, reason = _split_delta_content_parts(item)
+            if text:
+                texts.append(text)
+            if reason:
+                reasons.append(reason)
+        return "".join(texts), "".join(reasons)
+    return "", ""
+
+
 def extract_reasoning_content(chunk: dict | list | str | None) -> str:
     """Normalize reasoning content across providers (DeepSeek-R1 / o1)."""
     if chunk is None:
@@ -213,25 +277,58 @@ def extract_reasoning_content(chunk: dict | list | str | None) -> str:
     else:
         candidate = chunk
 
+    coerced = _coerce_stream_text(candidate)
+    if coerced:
+        return coerced
     if isinstance(candidate, str):
         return candidate
-
-    if isinstance(candidate, dict):
-        text = candidate.get("text") or candidate.get("content") or ""
-        return text if isinstance(text, str) else ""
-
-    if isinstance(candidate, list):
-        parts = []
-        for item in candidate:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text") or item.get("content") or ""
-                if isinstance(text, str):
-                    parts.append(text)
-        return "".join(parts)
-
     return ""
+
+
+def normalize_openai_stream_delta(delta: dict | None) -> tuple[str, str]:
+    """从 OpenAI delta 取出 (可见正文, 思考增量)。"""
+    if not isinstance(delta, dict):
+        return "", ""
+    reasoning = extract_reasoning_content(delta)
+    content, part_reasoning = _split_delta_content_parts(delta.get("content"))
+    if part_reasoning:
+        reasoning = f"{reasoning}{part_reasoning}"
+    return content, reasoning
+
+
+def extract_responses_api_delta(chunk: dict | None) -> tuple[str, str] | None:
+    """解析 DeepSeek V4 Responses API 的 reasoning/output 增量。无匹配时返回 None。"""
+    if not isinstance(chunk, dict):
+        return None
+    event_type = str(chunk.get("type") or "").strip()
+    if event_type in _RESPONSES_REASONING_EVENT_TYPES:
+        return "", _coerce_stream_text(chunk.get("delta") or chunk.get("text"))
+    if event_type in _RESPONSES_TEXT_EVENT_TYPES:
+        part_type = str((chunk.get("part") or {}).get("type") or "").strip().lower()
+        text = _coerce_stream_text(chunk.get("delta") or chunk.get("text"))
+        if part_type in _REASONING_PART_TYPES:
+            return "", text
+        return text, ""
+    return None
+
+
+def _flush_think_splitter_chunk(
+    splitter: StreamingThinkSplitter,
+    *,
+    provider: str,
+    model: str,
+) -> dict | None:
+    flushed = splitter.flush()
+    if not flushed.content and not flushed.reasoning:
+        return None
+    return {
+        "content": flushed.content,
+        "reasoning_content": flushed.reasoning,
+        "done": False,
+        "used_provider": provider,
+        "used_model": model,
+        "fallback_used": False,
+    }
 
 
 def _stream_terminal_payload(
@@ -255,6 +352,11 @@ def _stream_terminal_payload(
     accidentally treating reasoning-only streams as successful answers.
     """
     outcome = resolve_completion_outcome(finish_reason=finish_reason)
+    observed_reasoning_resolution = None
+    if isinstance(reasoning_resolution, dict):
+        observed_reasoning_resolution = dict(reasoning_resolution)
+        observed_reasoning_resolution["output_observed"] = reasoning_chars > 0
+        observed_reasoning_resolution["reasoning_chars"] = max(0, int(reasoning_chars or 0))
     if content_chars <= 0:
         reason_suffix = f"（finish_reason={finish_reason}）" if finish_reason else ""
         payload = {
@@ -279,8 +381,8 @@ def _stream_terminal_payload(
             "fallback_used": fallback_used,
             "degraded": degraded,
         }
-        if isinstance(reasoning_resolution, dict):
-            payload["reasoning_resolution"] = reasoning_resolution
+        if observed_reasoning_resolution is not None:
+            payload["reasoning_resolution"] = observed_reasoning_resolution
         return payload
 
     payload = {
@@ -297,8 +399,8 @@ def _stream_terminal_payload(
         payload["finish_reason"] = finish_reason
     if qa_score is not None:
         payload["qa_score"] = qa_score
-    if isinstance(reasoning_resolution, dict):
-        payload["reasoning_resolution"] = reasoning_resolution
+    if observed_reasoning_resolution is not None:
+        payload["reasoning_resolution"] = observed_reasoning_resolution
     return payload
 
 
@@ -540,6 +642,7 @@ async def call_ai_api_stream(
             enable_thinking=enable_thinking,
             requested_effort=reasoning_effort,
         )
+        think_splitter = StreamingThinkSplitter()
         if reasoning_resolution.enabled:
             # DeepSeek 的 reasoning 与正文共享 completion 预算。标准回答默认的
             # 1000/2024 tokens 可能被思考过程耗尽，最终只返回 reasoning 而没有正文。
@@ -602,6 +705,14 @@ async def call_ai_api_stream(
                         else:
                             data = line.strip()
                         if data == "[DONE]":
+                            flushed_chunk = _flush_think_splitter_chunk(
+                                think_splitter, provider=provider, model=model
+                            )
+                            if flushed_chunk:
+                                _chunk_count += 1
+                                _content_chars += len(str(flushed_chunk.get("content") or "").strip())
+                                _reasoning_chars += len(str(flushed_chunk.get("reasoning_content") or ""))
+                                yield flushed_chunk
                             logger.debug(f"[Stream] done chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
                             qa_score = None
                             if _logprobs_count > 0:
@@ -646,6 +757,35 @@ async def call_ai_api_stream(
                                 "fallback_used": False,
                             }
 
+                        responses_delta = extract_responses_api_delta(chunk)
+                        if responses_delta is not None:
+                            content, reasoning_content = responses_delta
+                            if isinstance(content, str):
+                                content, reasoning_content = apply_stream_think_split(
+                                    think_splitter,
+                                    content,
+                                    reasoning_content,
+                                )
+                            if content or reasoning_content:
+                                _chunk_count += 1
+                                _content_chars += len(str(content).strip())
+                                _reasoning_chars += len(reasoning_content)
+                                if reasoning_content and _reasoning_chars <= 500:
+                                    import time as _time
+                                    logger.info(
+                                        f"[Stream] REASONING chunk#{_chunk_count} t={_time.time():.3f} "
+                                        f"len={len(reasoning_content)} first40={reasoning_content[:40]!r}"
+                                    )
+                                yield {
+                                    "content": content,
+                                    "reasoning_content": reasoning_content,
+                                    "done": False,
+                                    "used_provider": provider,
+                                    "used_model": model,
+                                    "fallback_used": False,
+                                }
+                            continue
+
                         choices = chunk.get("choices") or []
                         if not choices:
                             continue
@@ -653,13 +793,23 @@ async def call_ai_api_stream(
                         if choice.get("finish_reason"):
                             _finish_reason = str(choice.get("finish_reason"))
                         delta = choice.get("delta") or choice.get("message") or {}
-                        content = delta.get("content") or ""
-                        reasoning_content = extract_reasoning_content(delta)
+                        content, reasoning_content = normalize_openai_stream_delta(delta)
                         # MiniMax 的思考内容在 reasoning_details 字段中
                         if not reasoning_content:
                             reasoning_details = delta.get("reasoning_details") or choice.get("reasoning_details")
                             if reasoning_details:
                                 reasoning_content = extract_reasoning_content(reasoning_details)
+                        if not reasoning_content:
+                            reasoning_content = (
+                                extract_reasoning_content(choice)
+                                or extract_reasoning_content(chunk)
+                            )
+                        if isinstance(content, str):
+                            content, reasoning_content = apply_stream_think_split(
+                                think_splitter,
+                                content,
+                                reasoning_content,
+                            )
                         # 收集 logprobs 用于置信度评分
                         chunk_logprobs = choice.get("logprobs")
                         if chunk_logprobs and isinstance(chunk_logprobs, dict):
@@ -693,6 +843,14 @@ async def call_ai_api_stream(
                                 "used_model": model,
                                 "fallback_used": False
                             }
+                    flushed_chunk = _flush_think_splitter_chunk(
+                        think_splitter, provider=provider, model=model
+                    )
+                    if flushed_chunk:
+                        _chunk_count += 1
+                        _content_chars += len(str(flushed_chunk.get("content") or "").strip())
+                        _reasoning_chars += len(str(flushed_chunk.get("reasoning_content") or ""))
+                        yield flushed_chunk
                     logger.debug(f"[Stream] end-of-stream (no [DONE]) chunks={_chunk_count}, content_chars={_content_chars}, reasoning_chars={_reasoning_chars}")
                     qa_score = None
                     if _logprobs_count > 0:
@@ -1040,6 +1198,9 @@ async def call_ai_api_stream(
         message = resp.get("choices", [{}])[0].get("message", {}) or {}
         answer = str(message.get("content") or "")
         reasoning_text = extract_reasoning_content(message)
+        tagged_reasoning, answer = split_think_tags(answer)
+        if tagged_reasoning:
+            reasoning_text = f"{reasoning_text}{tagged_reasoning}"
         used_provider = resp.get("_used_provider", provider)
         used_model = resp.get("_used_model", model)
         fallback_used = resp.get("_fallback_used", False)

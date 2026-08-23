@@ -83,7 +83,7 @@ from services.document_parse_state import (
     read_parse_manifest,
     transition_parse_manifest,
 )
-from services.mineru_progress import derive_mineru_progress
+from services.mineru_progress import derive_mineru_progress, utc_now_iso_ms
 from services.document_job_store import (
     load_document_job,
     persist_document_job,
@@ -165,6 +165,7 @@ from services.document_parse_adapter import (
     DocumentParseSubmission,
     MinerUQualityError,
     MinerUDocumentParseAdapter,
+    collect_mineru_block_validation,
     validate_mineru_block_index_quality,
 )
 from runtime_mode import runtime
@@ -183,6 +184,9 @@ from services.ocr_service import (
     get_ocr_provider_usage,
     record_ocr_provider_use,
     select_ocr_target_pages,
+    should_enable_mineru_ocr,
+    format_local_ocr_unavailable_message,
+    diagnose_local_ocr,
     normalize_mineru_model_version,
     create_mineru_direct_http_client,
     validate_external_ocr_service_url,
@@ -1743,7 +1747,7 @@ def _set_document_index_status(
     document_source_hash: str | None = None,
 ) -> None:
     manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
-    timestamp = datetime.now().isoformat()
+    timestamp = utc_now_iso_ms()
     next_parse_generation = str(parse_generation or manifest.get("generation") or "")
     next_document_source_hash = str(document_source_hash or manifest.get("source_hash") or "")
     with _INDEX_STATUS_LOCK:
@@ -1765,7 +1769,7 @@ def _set_document_index_status(
             "created_at": str(current.get("created_at") or timestamp),
             "started_at": str(
                 current.get("started_at")
-                or (timestamp if status == "running" else "")
+                or (timestamp if status in {"queued", "running"} else "")
             ),
             "stage_started_at": str(
                 timestamp
@@ -2732,14 +2736,21 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
         current_stage = str(current.get("stage") or "").strip().lower()
         current_job_id = str(current.get("job_id") or "").strip()
         incoming_job_id = str(extra.get("job_id") or "").strip()
+        incoming_generation = str(extra.get("parse_generation") or "").strip()
+        current_generation = str(current.get("parse_generation") or "").strip()
         starts_replacement_job = bool(
             status == "queued"
             and incoming_job_id
             and incoming_job_id != current_job_id
         )
-        if current_status in _DEEP_PARSE_TERMINAL_STATUSES and not starts_replacement_job:
+        starts_new_generation = bool(
+            incoming_generation
+            and current_generation
+            and incoming_generation != current_generation
+        )
+        if current_status in _DEEP_PARSE_TERMINAL_STATUSES and not starts_replacement_job and not starts_new_generation:
             return current
-        if starts_replacement_job:
+        if starts_replacement_job or starts_new_generation:
             # A retry is a distinct local task even when it resumes the same
             # remote batch. Do not let its elapsed time or remote percentage
             # inherit from the terminal task it replaces.
@@ -2757,10 +2768,17 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
                 "stage_started_at",
             ):
                 current.pop(key, None)
-        timestamp = datetime.now().isoformat()
+        timestamp = utc_now_iso_ms()
         normalized_stage = str(stage or "").strip().lower()
         if normalized_stage and normalized_stage != current_stage:
             extra.setdefault("stage_started_at", timestamp)
+        preserved_created_at = str(current.get("created_at") or "").strip()
+        preserved_started_at = str(current.get("started_at") or "").strip()
+        extra.pop("created_at", None)
+        extra.pop("started_at", None)
+        extra.pop("completed_at", None)
+        extra.pop("progress", None)
+        extra.pop("elapsed_seconds", None)
         current.update({
             "doc_id": doc_id,
             "provider": "mineru",
@@ -2768,7 +2786,7 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
             "status": status,
             "stage": stage,
             "error": error,
-            "created_at": current.get("created_at") or timestamp,
+            "created_at": preserved_created_at or timestamp,
             "updated_at": timestamp,
             **extra,
         })
@@ -2800,8 +2818,10 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
             current["shortfall"] = clean_shortfall
         elif status in {"ready", "succeeded"}:
             current.pop("shortfall", None)
-        if status == "running" and not current.get("started_at"):
-            current["started_at"] = timestamp
+        if preserved_started_at:
+            current["started_at"] = preserved_started_at
+        elif status in {"queued", "running"} and not current.get("started_at"):
+            current["started_at"] = current.get("created_at") or timestamp
         if status in {"ready", "partial_ready"} and not current.get("completed_at"):
             current["completed_at"] = timestamp
         _DEEP_PARSE_TASKS[doc_id] = current
@@ -2889,7 +2909,7 @@ def _get_deep_parse_status(doc_id: str) -> dict:
                 _DEEP_PARSE_JOB_TYPE,
                 doc_id,
                 persisted,
-                updated_at=datetime.now().isoformat(),
+                updated_at=utc_now_iso_ms(),
             )
             with _DEEP_PARSE_LOCK:
                 _DEEP_PARSE_TASKS[doc_id] = dict(current)
@@ -2964,6 +2984,7 @@ def _get_deep_parse_status(doc_id: str) -> dict:
             "error": "",
             "created_at": str(parse_manifest.get("created_at") or ""),
             "started_at": str(parse_manifest.get("started_at") or ""),
+            "parse_generation": str(parse_manifest.get("generation") or ""),
             "stage_started_at": str(
                 parse_manifest.get("updated_at")
                 or parse_manifest.get("started_at")
@@ -3020,9 +3041,23 @@ def _get_deep_parse_status(doc_id: str) -> dict:
         rag_stage = str(rag_index.get("stage") or "building_rag_index").strip().lower()
         current["status"] = "running"
         current["stage"] = rag_stage
+        if not current.get("started_at"):
+            current["started_at"] = str(
+                rag_index.get("started_at")
+                or rag_index.get("created_at")
+                or current.get("created_at")
+                or ""
+            )
+        if not current.get("created_at"):
+            current["created_at"] = str(
+                rag_index.get("created_at")
+                or current.get("started_at")
+                or ""
+            )
         current["stage_started_at"] = str(
             rag_index.get("stage_started_at")
             or current.get("stage_started_at")
+            or current.get("started_at")
             or ""
         )
         current["updated_at"] = str(
@@ -3127,15 +3162,18 @@ def _make_mineru_adapter(
     config: dict,
     access_mode: str,
     model_version: Optional[str] = None,
+    enable_ocr: Optional[bool] = None,
 ):
     effective_model_version = normalize_mineru_model_version(
         model_version if model_version is not None else config.get("model_version")
     )
+    if enable_ocr is None:
+        enable_ocr = bool(config.get("enable_ocr", False))
     if access_mode == "direct":
         return MinerUDirectAdapter(
             token=config.get("token", ""),
             base_url=config.get("base_url", "https://mineru.net/api/v4"),
-            enable_ocr=config.get("enable_ocr", False),
+            enable_ocr=enable_ocr,
             enable_formula=config.get("enable_formula", True),
             enable_table=config.get("enable_table", True),
             model_version=effective_model_version,
@@ -3145,7 +3183,7 @@ def _make_mineru_adapter(
         auth_key=config.get("auth_key", ""),
         token=config.get("token", ""),
         token_mode=config.get("token_mode", "frontend"),
-        enable_ocr=config.get("enable_ocr", False),
+        enable_ocr=enable_ocr,
         enable_formula=config.get("enable_formula", True),
         enable_table=config.get("enable_table", True),
         model_version=effective_model_version,
@@ -3316,10 +3354,25 @@ def _run_mineru_deep_parse(
             if queued_model_version is not None
             else config.get("model_version")
         )
+        doc_data = doc.get("data") if isinstance(doc, dict) else {}
+        enable_ocr = should_enable_mineru_ocr(
+            config,
+            extraction_quality=(doc_data or {}).get("extraction_quality"),
+            pages_needing_ocr=(doc_data or {}).get("pages_needing_ocr"),
+            ocr_status=(doc_data or {}).get("ocr_status"),
+        )
+        if enable_ocr and not bool(config.get("enable_ocr")):
+            logger.info(
+                "[DeepParse] 本地文本质量不足，MinerU 自动开启扫描件 OCR doc_id=%s quality=%s ocr_status=%s",
+                doc_id,
+                (doc_data or {}).get("extraction_quality"),
+                (doc_data or {}).get("ocr_status"),
+            )
         transport = _make_mineru_adapter(
             config,
             access_mode,
             model_version,
+            enable_ocr=enable_ocr,
         )
         adapter = MinerUDocumentParseAdapter(transport)
         if not adapter.is_available():
@@ -3333,7 +3386,20 @@ def _run_mineru_deep_parse(
             extra = {
                 key: value
                 for key, value in progress.items()
-                if key not in {"stage", "message"}
+                if key not in {
+                    "stage",
+                    "message",
+                    "created_at",
+                    "started_at",
+                    "completed_at",
+                    "updated_at",
+                    "stage_started_at",
+                    "progress",
+                    "elapsed_seconds",
+                    "status",
+                    "error",
+                    "doc_id",
+                }
             }
             extra.setdefault("model_version", model_version)
             _set_worker_status(
@@ -3563,6 +3629,11 @@ def _run_mineru_deep_parse(
             coverage=mineru_quality.get("coverage", 0.0),
             failed_pages=mineru_quality.get("failed_pages") or [],
             page_ledger=mineru_quality.get("page_ledger") or [],
+            structure_degraded=bool(mineru_quality.get("structure_degraded")),
+            silently_dropped_heading_count=int(
+                mineru_quality.get("silently_dropped_heading_count") or 0
+            ),
+            outline_heading_count=int(mineru_quality.get("outline_heading_count") or 0),
         )
         logger.info("[DeepParse] MinerU deep parse ready for %s: blocks=%s outline=%s", doc_id, block_count, outline_count)
     except _SupersededParseGeneration:
@@ -3818,7 +3889,7 @@ def resume_pending_mineru_deep_parse_jobs() -> list[dict]:
                     "error": "",
                     "message": "文档已重新解析，重启时拒绝恢复旧 MinerU 任务",
                     "superseded": True,
-                    "updated_at": datetime.now().isoformat(),
+                    "updated_at": utc_now_iso_ms(),
                 })
                 try:
                     persist_document_job(DATA_DIR, _DEEP_PARSE_JOB_TYPE, doc_id, stale_record)
@@ -4319,6 +4390,7 @@ def _normalize_mineru_for_document(
     )
     block_validation_error = ""
     block_validation = {}
+    candidate_block_index = None
     try:
         candidate_block_index = build_block_index_from_mineru_payload(
             doc_id=doc_id,
@@ -4327,9 +4399,14 @@ def _normalize_mineru_for_document(
             pdf_path=_resolve_document_pdf_path(current_doc or {}),
         )
         validate_mineru_block_index_quality(candidate_block_index)
+        block_validation = collect_mineru_block_validation(candidate_block_index)
     except MinerUQualityError as exc:
         block_validation_error = str(exc)
-        block_validation = exc.as_status_dict()
+        block_validation = (
+            collect_mineru_block_validation(candidate_block_index)
+            if isinstance(candidate_block_index, dict)
+            else exc.as_status_dict()
+        )
         failures = list(failures) + ["block_index_invalid"]
         ok = False
     except Exception as exc:
@@ -4337,14 +4414,22 @@ def _normalize_mineru_for_document(
         failures = list(failures) + ["block_index_invalid"]
         ok = False
     quality_report = dict(normalized.get("quality_report") or {})
+    if block_validation:
+        quality_report["block_validation"] = block_validation
+        if block_validation.get("structure_degraded"):
+            warnings = list(quality_report.get("warnings") or [])
+            dropped = int(block_validation.get("silently_dropped_heading_count") or 0)
+            warning = f"outline_heading_coverage_incomplete:silently_dropped={dropped}"
+            if warning not in warnings:
+                warnings.append(warning)
+            quality_report["warnings"] = warnings
     if failures:
         quality_report["failure_reasons"] = sorted(set(
             list(quality_report.get("failure_reasons") or []) + list(failures)
         ))
         if block_validation_error:
             quality_report["block_validation_error"] = block_validation_error
-        if block_validation:
-            quality_report["block_validation"] = block_validation
+    if block_validation or failures:
         normalized["quality_report"] = quality_report
     return normalized, ([] if ok else failures)
 
@@ -4443,6 +4528,10 @@ def _attach_mineru_quality_to_block_index(block_index: dict, normalized: dict) -
             "malformed_table_count",
         ):
             meta[key] = quality_report.get(key)
+        if "warnings" in quality_report:
+            meta["warnings"] = quality_report.get("warnings")
+        if "block_validation" in quality_report:
+            meta["block_validation"] = quality_report.get("block_validation")
     block_index["mineru_meta"] = meta
     return block_index
 
@@ -7264,16 +7353,17 @@ def extract_text_from_pdf(
         selected_ocr_backend = "auto"
     adapter = _ocr_registry.get_adapter(selected_ocr_backend)
     if adapter is None:
+        ocr_error = format_local_ocr_unavailable_message(selected_ocr_backend)
         logger.warning(
             "[PDF] 需要对 %s 页执行 OCR，但后端不可用: %s",
             len(ocr_target_pages),
-            selected_ocr_backend,
+            ocr_error,
         )
         result["ocr_status"] = "unavailable"
         result["ocr_failed_pages"] = _display_ocr_page_numbers(ocr_target_pages)
-        result["ocr_error"] = f"OCR 后端不可用: {selected_ocr_backend}"
+        result["ocr_error"] = ocr_error
         _append_ocr_warning(result, legacy_structured_ocr_warning)
-        _append_ocr_warning(result, f"OCR 后端不可用: {selected_ocr_backend}")
+        _append_ocr_warning(result, ocr_error)
         _finalize_ocr_status(result)
         return result
     
@@ -10321,7 +10411,7 @@ async def get_ocr_status():
     """
     status = is_ocr_available()
 
-    # 使用 OCRRegistry 获取后端可用性
+    # 使用 OCRRegistry 获取后端可用性（is_ocr_available 已刷新本地适配器）
     available_backends = _ocr_registry.list_available()
     available_document_parsers = _document_parser_registry.list_available()
     backends = {
@@ -10333,6 +10423,9 @@ async def get_ocr_status():
     # 检测 Poppler 可用性
     poppler_path = _find_poppler()
     poppler_available = poppler_path is not None
+    diagnostics = status.get("diagnostics") or diagnose_local_ocr()
+    local_available = bool(status.get("local_available"))
+    unavailable_reasons = list(status.get("unavailable_reasons") or [])
 
     # 自动逐页 OCR 仅推荐本地引擎；云端需要在上传时显式选择。
     recommended = None
@@ -10399,6 +10492,7 @@ async def get_ocr_status():
 
     return {
         "available": status["any"],
+        "local_available": local_available,
         "backends": backends,
         "page_ocr_backends": ["paddleocr", "tesseract"],
         "deprecated_page_ocr_backends": ["mineru", "mistral", "doc2x"],
@@ -10418,6 +10512,8 @@ async def get_ocr_status():
         "config": config,
         "online_services": online_services,
         "install_instructions": install_instructions,
+        "diagnostics": diagnostics,
+        "unavailable_reasons": unavailable_reasons,
         # [T3] Figure Extraction 能力
         "figure_extraction": {
             "configured": online_services.get("mineru", {}).get("configured", False),

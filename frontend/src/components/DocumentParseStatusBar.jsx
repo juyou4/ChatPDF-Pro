@@ -87,48 +87,27 @@ export const rememberParseNoticeKey = (noticeKey, storage) => {
 export const TASK_PILL_NOTICE_MOTION = {
   initial: {
     opacity: 0,
-    x: 0,
-    y: -52,
-    scaleX: 0.2,
-    scaleY: 0.56,
-    borderRadius: 999,
+    y: -10,
   },
   animate: {
     opacity: 1,
-    x: 0,
     y: 0,
-    scaleX: 1,
-    scaleY: 1,
-    borderRadius: 16,
     transition: {
-      type: 'spring',
-      stiffness: 470,
-      damping: 36,
-      mass: 0.72,
-      delay: 0.14,
-      opacity: { duration: 0.13, delay: 0.12, ease: [0.22, 1, 0.36, 1] },
-      borderRadius: { duration: 0.2, delay: 0.12, ease: [0.22, 1, 0.36, 1] },
+      duration: 0.16,
+      ease: [0.22, 1, 0.36, 1],
     },
   },
   exit: {
     opacity: 0,
-    x: 0,
-    y: -52,
-    scaleX: 0.2,
-    scaleY: 0.56,
-    borderRadius: 999,
+    y: -10,
     transition: {
-      type: 'spring',
-      stiffness: 520,
-      damping: 40,
-      mass: 0.68,
-      opacity: { duration: 0.11, ease: [0.4, 0, 1, 1] },
-      borderRadius: { duration: 0.16, ease: [0.4, 0, 1, 1] },
+      duration: 0.12,
+      ease: [0.4, 0, 1, 1],
     },
   },
 };
 
-const DocumentParseStatusBar = ({
+const DocumentParseStatusBar = React.memo(({
   documentId = '',
   manifest,
   parseReady,
@@ -161,13 +140,25 @@ const DocumentParseStatusBar = ({
   const canInspect = state.resolvedRoute === 'mineru'
     && ['processing', 'awaiting_publish', 'publish_failed'].includes(state.state)
     && onOpenProcessing;
+  // 进行中的解析进度已经在聊天区上传卡片里展示，右上角弹窗只保留失败/重建等提醒。
+  const isParseProgressNotice = state.state === 'processing';
+  const showMinerUProgress = !isParseProgressNotice
+    && state.resolvedRoute === 'mineru'
+    && state.state === 'awaiting_publish';
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!showMinerUProgress) return undefined;
+    setNowMs(Date.now());
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [showMinerUProgress, documentId, manifest?.generation, deepParseStatus?.started_at]);
   const minerUProgress = getMinerUProgressPresentation(deepParseStatus, {
     status: deepParseStatus?.status || manifest?.status,
     stage: deepParseStatus?.stage || manifest?.stage,
-  });
-  const showMinerUProgress = state.resolvedRoute === 'mineru'
-    && ['processing', 'awaiting_publish'].includes(state.state)
-    && Number.isFinite(minerUProgress?.percent);
+    doc_id: documentId,
+    parse_generation: manifest?.generation,
+  }, nowMs);
+  const showMinerUProgressBar = showMinerUProgress && Number.isFinite(minerUProgress?.percent);
   const showMinerUScanLoader = state.resolvedRoute === 'mineru' && state.state === 'processing';
   const shouldOfferRouteChange = ['failed', 'cancelled'].includes(state.state) && onChooseRoute;
   const noticeKey = [
@@ -175,9 +166,6 @@ const DocumentParseStatusBar = ({
     manifest?.generation,
     manifest?.source_hash,
     state.state,
-    state.routeLabel,
-    state.statusLabel,
-    state.detail,
   ].map((value) => String(value || '')).join('|');
   const [dismissedNoticeKey, setDismissedNoticeKey] = useState('');
   const seenNoticeKeysRef = useRef(null);
@@ -192,7 +180,10 @@ const DocumentParseStatusBar = ({
   useEffect(() => {
     if (suppressed) setDismissedNoticeKey(noticeKey);
   }, [noticeKey, suppressed]);
-  const visible = !suppressed && dismissedNoticeKey !== noticeKey && !wasSeenBeforeThisMount;
+  const visible = !isParseProgressNotice
+    && !suppressed
+    && dismissedNoticeKey !== noticeKey
+    && !wasSeenBeforeThisMount;
 
   useEffect(() => {
     if (!visible || shownNoticeKeyRef.current === noticeKey) return;
@@ -216,8 +207,7 @@ const DocumentParseStatusBar = ({
             initial={TASK_PILL_NOTICE_MOTION.initial}
             animate={TASK_PILL_NOTICE_MOTION.animate}
             exit={TASK_PILL_NOTICE_MOTION.exit}
-            style={{ transformOrigin: 'top right' }}
-            className={`pointer-events-auto relative w-full will-change-transform rounded-[16px] border p-3 backdrop-blur-xl ${
+            className={`pointer-events-auto relative w-full rounded-[16px] border p-3 backdrop-blur-xl ${
               darkMode
                 ? `${style.dark} shadow-[0_18px_46px_-18px_rgba(0,0,0,0.72),0_4px_12px_rgba(0,0,0,0.3)]`
                 : `${style.light} shadow-[0_18px_44px_-18px_rgba(78,64,56,0.34),0_4px_12px_rgba(78,64,56,0.1)]`
@@ -241,7 +231,7 @@ const DocumentParseStatusBar = ({
                   <span className="truncate font-semibold">{state.statusLabel}</span>
                 </div>
                 <p className="mt-1 line-clamp-2 text-[11px] leading-4 opacity-70">{state.detail}</p>
-                {showMinerUProgress && (
+                {showMinerUProgressBar && (
                   <div className="mt-2.5">
                     <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] font-semibold opacity-80">
                       <span className="truncate">{minerUProgress.detail}</span>
@@ -255,11 +245,9 @@ const DocumentParseStatusBar = ({
                       aria-valuenow={minerUProgress.percent}
                       className={`relative h-1.5 overflow-hidden rounded-full ${darkMode ? 'bg-white/10' : 'bg-current/10'}`}
                     >
-                      <motion.div
-                        initial={false}
-                        animate={{ scaleX: minerUProgress.percent / 100 }}
-                        transition={{ duration: 0.35, ease: 'easeOut' }}
-                        className="absolute inset-y-0 left-0 w-full origin-left rounded-full bg-current"
+                      <div
+                        className="mineru-progress-fill absolute inset-y-0 left-0 rounded-full bg-current"
+                        style={{ transform: `scaleX(${minerUProgress.percent / 100})` }}
                       />
                     </div>
                   </div>
@@ -314,6 +302,6 @@ const DocumentParseStatusBar = ({
       </AnimatePresence>
     </div>
   );
-};
+});
 
 export default DocumentParseStatusBar;

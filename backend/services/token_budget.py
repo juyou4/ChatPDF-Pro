@@ -175,12 +175,14 @@ class TokenBudgetManager:
         self,
         groups: List[dict],
         max_tokens: Optional[int] = None,
+        protect_full: bool = False,
     ) -> List[dict]:
         """在 Token 预算内调整意群粒度
 
         遍历意群列表，对每个意群：
         1. 根据当前粒度获取对应文本并估算 Token 数
         2. 如果累计 Token 超预算，尝试降级粒度（full→digest→summary）
+           方法/章节深讲可 protect_full：宁可不加该意群，也不要把正文降成导语
         3. 降级后仍超预算则停止添加更多意群
 
         同一意群不会同时出现多种粒度。
@@ -188,6 +190,7 @@ class TokenBudgetManager:
         Args:
             groups: 意群列表，每项格式为 {"group": SemanticGroup, "granularity": str, "tokens": int}
             max_tokens: 可用 Token 预算，默认使用 self.available_tokens
+            protect_full: True 时不把 full 降成 digest/summary，超预算则跳过该意群
 
         Returns:
             调整后的意群列表 [{"group": SemanticGroup, "granularity": str, "tokens": int}]
@@ -214,6 +217,8 @@ class TokenBudgetManager:
             added = False
             for level_idx in range(start_idx, len(GRANULARITY_LEVELS)):
                 level = GRANULARITY_LEVELS[level_idx]
+                if protect_full and granularity == "full" and level != "full":
+                    break
                 text_attr = GRANULARITY_TEXT_ATTR[level]
                 text = getattr(group, text_attr, "")
 
@@ -232,6 +237,12 @@ class TokenBudgetManager:
                 # 超预算，尝试下一个更低的粒度
 
             if not added:
+                if protect_full and granularity == "full":
+                    logger.info(
+                        f"Token 预算不足以容纳 full 意群 {group.group_id}，"
+                        f"跳过该组而不是降成 digest（已用 {used_tokens}/{max_tokens}）"
+                    )
+                    continue
                 # 所有粒度都超预算，停止添加更多意群
                 logger.info(
                     f"Token 预算已用尽（已用 {used_tokens}/{max_tokens}），"

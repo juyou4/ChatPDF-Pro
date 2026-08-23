@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { DEFAULT_PARSE_ROUTE, VALID_PARSE_ROUTES } from '../utils/parseRouteUtils';
+import { resetMinerUElapsedAnchors } from '../utils/mineruProgressUtils';
 import { normalizeChatVisualAttachments } from '../utils/visualAttachmentUtils';
 
 const VALID_PAGE_OCR_BACKENDS = ['auto', 'tesseract', 'paddleocr'];
@@ -51,6 +52,32 @@ const loadOCRSettings = () => {
 const API_BASE_URL = '';
 const UPLOAD_PROGRESS_CAP = 42;
 const PROCESSING_PROGRESS_CAP = 88;
+export const SESSION_PERSIST_DEBOUNCE_MS = 400;
+
+const sessionListIdentity = (sessions) => (
+  (Array.isArray(sessions) ? sessions : [])
+    .map((item) => `${item?.id || ''}\t${item?.filename || ''}\t${item?.parse_generation || ''}`)
+    .join('\n')
+);
+
+const readStoredSession = (session) => {
+  const sessionId = String(session?.id || session?.docId || '').trim();
+  if (!sessionId) return session;
+  try {
+    const stored = JSON.parse(localStorage.getItem('chatHistory') || '[]');
+    const fresh = (Array.isArray(stored) ? stored : []).find((item) => (
+      String(item?.id || item?.docId || '').trim() === sessionId
+    ));
+    if (!fresh) return session;
+    return {
+      ...session,
+      ...fresh,
+      messages: Array.isArray(fresh.messages) ? fresh.messages : session?.messages,
+    };
+  } catch {
+    return session;
+  }
+};
 
 const buildDocumentInfoUrl = (docId, includeContent) => (
   `${API_BASE_URL}/document/${encodeURIComponent(docId)}?include_content=${includeContent ? 'true' : 'false'}&t=${Date.now()}`
@@ -318,6 +345,10 @@ export function useDocumentState({
 
   // 会话历史
   const [history, setHistory] = useState([]);
+  const persistTimerRef = useRef(null);
+  const pendingPersistRef = useRef(null);
+  const historyListIdentityRef = useRef('');
+  const persistMountedRef = useRef(true);
 
   // 存储信息
   const [storageInfo, setStorageInfo] = useState(null);
@@ -437,7 +468,15 @@ export function useDocumentState({
    */
   const loadHistory = useCallback(() => {
     const s = localStorage.getItem('chatHistory');
-    if (s) setHistory(JSON.parse(s));
+    if (!s) return;
+    try {
+      const parsed = JSON.parse(s);
+      const next = Array.isArray(parsed) ? parsed : [];
+      historyListIdentityRef.current = sessionListIdentity(next);
+      setHistory(next);
+    } catch {
+      // 损坏的历史不阻断启动
+    }
   }, []);
 
   /**
@@ -572,6 +611,9 @@ export function useDocumentState({
       const isMinerUAccepted = uploadedManifest?.resolved_route === 'mineru'
         && full?.parse_ready !== true
         && uploadedManifest?.status !== 'ready';
+      if (isMinerUAccepted) {
+        resetMinerUElapsedAnchors();
+      }
       setUploadStatus(isMinerUAccepted ? 'accepted' : 'ready');
       setUploadProgress(100);
 
@@ -627,6 +669,8 @@ export function useDocumentState({
           docId: data.doc_id,
           filename: data.filename,
           pageCount: data.total_pages,
+          parseGeneration: String(uploadedManifest?.generation || ''),
+          startedAt: Date.now(),
           items: uploadStatusItems,
         },
       }]);
@@ -679,17 +723,18 @@ export function useDocumentState({
   const loadSession = useCallback(async (s) => {
     setIsLoading?.(true);
     try {
-      const { response, data } = await fetchDocumentInfo(s.docId);
+      const sessionRecord = readStoredSession(s);
+      const { response, data } = await fetchDocumentInfo(sessionRecord.docId || s.docId);
       if (response.ok && data) {
         // 重开当前会话时保留已展示的速览；只有实际切换文档才让旧请求失效。
-        if (String(s.docId || '') !== String(docId || '')) {
+        if (String(sessionRecord.docId || s.docId || '') !== String(docId || '')) {
           invalidateOverviewEpoch(docId);
         }
-        setDocId(s.docId);
+        setDocId(sessionRecord.docId || s.docId);
         setDocInfo(data);
         // 旧版没有可靠终态的助手消息一律按中断恢复；解析身份不匹配的
         // 历史仍可展示，但会被标记为 stale，不能进入新代际的上下文。
-        const restoredMessages = normalizeRestoredSessionMessages(s, data);
+        const restoredMessages = normalizeRestoredSessionMessages(sessionRecord, data);
         setMessages?.(restoredMessages);
         setCurrentPage?.(1);
       }
@@ -707,6 +752,7 @@ export function useDocumentState({
     const h = JSON.parse(localStorage.getItem('chatHistory') || '[]');
     const next = h.filter(x => x.id !== sid);
     localStorage.setItem('chatHistory', JSON.stringify(next));
+    historyListIdentityRef.current = sessionListIdentity(next);
     setHistory(next);
     if (sid === docId) {
       invalidateOverviewEpoch(docId, { clearDocumentCache: true });
@@ -720,16 +766,19 @@ export function useDocumentState({
    * 保存当前会话到历史
    * 需要外部传入 messages 和 docInfo，因为这些可能来自其他 hook
    */
-  const saveCurrentSession = useCallback((messages) => {
-    if (!docId || !docInfo) return;
+  const persistSessionNow = useCallback((payload) => {
+    const persistDocId = String(payload?.docId || '').trim();
+    const persistDocInfo = payload?.docInfo;
+    if (!persistDocId || !persistDocInfo) return;
+    const persistMessages = Array.isArray(payload?.messages) ? payload.messages : [];
     const h = JSON.parse(localStorage.getItem('chatHistory') || '[]');
-    const idx = h.findIndex(x => x.id === docId);
-    const parseIdentity = getDocumentParseIdentity(docInfo);
+    const idx = h.findIndex((x) => x.id === persistDocId);
+    const parseIdentity = getDocumentParseIdentity(persistDocInfo);
     const data = {
-      id: docId,
-      docId,
-      filename: docInfo.filename,
-      messages,
+      id: persistDocId,
+      docId: persistDocId,
+      filename: persistDocInfo.filename,
+      messages: persistMessages,
       ...(hasCompleteParseIdentity(parseIdentity)
         ? {
           parse_generation: parseIdentity.generation,
@@ -747,8 +796,45 @@ export function useDocumentState({
     else h.unshift(data);
     const lim = h.slice(0, 50);
     localStorage.setItem('chatHistory', JSON.stringify(lim));
-    setHistory(lim);
-  }, [docId, docInfo]);
+    const nextIdentity = sessionListIdentity(lim);
+    if (nextIdentity !== historyListIdentityRef.current) {
+      historyListIdentityRef.current = nextIdentity;
+      if (persistMountedRef.current) setHistory(lim);
+    }
+  }, []);
+
+  const flushCurrentSession = useCallback(() => {
+    if (persistTimerRef.current) {
+      window.clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+    const pending = pendingPersistRef.current;
+    pendingPersistRef.current = null;
+    if (pending) persistSessionNow(pending);
+  }, [persistSessionNow]);
+
+  const saveCurrentSession = useCallback((messages) => {
+    if (!docId || !docInfo) return;
+    pendingPersistRef.current = { docId, docInfo, messages };
+    if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = window.setTimeout(() => {
+      persistTimerRef.current = null;
+      const pending = pendingPersistRef.current;
+      pendingPersistRef.current = null;
+      if (pending) persistSessionNow(pending);
+    }, SESSION_PERSIST_DEBOUNCE_MS);
+  }, [docId, docInfo, persistSessionNow]);
+
+  useEffect(() => {
+    persistMountedRef.current = true;
+    const onUnload = () => flushCurrentSession();
+    window.addEventListener('beforeunload', onUnload);
+    return () => {
+      window.removeEventListener('beforeunload', onUnload);
+      persistMountedRef.current = false;
+      flushCurrentSession();
+    };
+  }, [flushCurrentSession]);
 
   /**
    * 获取速览数据
@@ -1018,6 +1104,7 @@ export function useDocumentState({
     loadSession,
     deleteSession,
     saveCurrentSession,
+    flushCurrentSession,
     loadHistory,
     fetchStorageInfo,
   };

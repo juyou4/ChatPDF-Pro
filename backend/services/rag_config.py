@@ -60,7 +60,7 @@ class RAGConfig:
     # ---- RAG 优化开关 ----
     enable_hyde: bool = True                  # HyDE 假设文档嵌入，用 LLM 生成假设答案做检索
     hyde_query_types: str = "analytical,overview"  # 默认仅对分析/概览类问题启用
-    hyde_evidence_allowlist: str = "section_explanation,comparison_multi_aspect"
+    hyde_evidence_allowlist: str = "section_explanation,comparison_multi_aspect,analysis_explanation"
     hyde_evidence_blocklist: str = "numeric_table,reference_trap,reference_meta"
     # P3.3 ablation: env CHATPDF_ENABLE_QUERY_EXPANSION=0 可关闭
     enable_query_expansion: bool = field(
@@ -69,7 +69,7 @@ class RAGConfig:
     query_expansion_n: int = 4               # P3.3a: 3→4，更多召回路径
     # P3.3a: 放宽 gate，覆盖 specific/extraction 类（实测召回不足）
     query_expansion_query_types: str = "analytical,overview,specific,extraction"
-    query_expansion_evidence_allowlist: str = "section_explanation,comparison_multi_aspect"
+    query_expansion_evidence_allowlist: str = "section_explanation,comparison_multi_aspect,analysis_explanation"
     # P3.3a: 移除 numeric_table 黑名单，允许 numeric_table 类查询走 multi-query
     query_expansion_evidence_blocklist: str = "reference_trap,reference_meta"
     # P3.3b: 查询简化（移除冗余词），仅在原查询长度 > 50 时触发
@@ -92,7 +92,7 @@ class RAGConfig:
     # ---- 条件 rerank gate ----
     enable_conditional_rerank: bool = True    # 按题型启用 rerank：默认纳入论文证据题型
     conditional_rerank_types: str = "extraction,analytical"  # 触发 rerank 的题型（逗号分隔）
-    conditional_rerank_evidence_needs: str = "numeric_table,section_explanation,figure_caption"
+    conditional_rerank_evidence_needs: str = "numeric_table,section_explanation,figure_caption,analysis_explanation"
     rerank_score_min: float = 0.08            # rerank/evidence gate 后的最低分阈值
     rerank_score_min_keep: int = 2            # 触发阈值过滤后最少保留条数
 

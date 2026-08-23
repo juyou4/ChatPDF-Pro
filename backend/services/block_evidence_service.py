@@ -90,6 +90,9 @@ def _is_retrievable_block(block: dict[str, Any], block_type: str) -> bool:
         return False
     if block.get("repeated_artifact"):
         return False
+    if block.get("text_duplicate") or block.get("highlight_of"):
+        # Empty-box slots keep geometry for highlight, not a second retrieval copy.
+        return False
     if block.get("visual_enhancement"):
         # Visual supplements only reach a public block index after the
         # document-level publish marker is written.  Require its revision here
@@ -111,6 +114,120 @@ def _evidence_text(block: dict[str, Any], block_type: str) -> str:
     if block_type == "table":
         text = _text(re.sub(r"<[^>]+>", " ", text))
     return text
+
+
+def _page_number(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def collect_highlight_slots(block_index: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Map a MinerU source block id to the visual boxes left after stitching."""
+    slots: dict[str, list[dict[str, Any]]] = {}
+    for page_index, page in enumerate(block_index.get("pages") or []):
+        if not isinstance(page, dict):
+            continue
+        try:
+            page_number = max(1, int(page.get("page") or page_index + 1))
+        except (TypeError, ValueError):
+            page_number = page_index + 1
+        for block in page.get("blocks") or []:
+            if not isinstance(block, dict):
+                continue
+            source_id = str(block.get("highlight_of") or block.get("linked_content_id") or "").strip()
+            if not source_id or not (block.get("text_duplicate") or block.get("highlight_of")):
+                continue
+            bbox = _bbox(block.get("bbox"))
+            if not bbox:
+                continue
+            slots.setdefault(source_id, []).append({
+                "block_id": str(block.get("block_id") or ""),
+                "page": page_number,
+                "bbox": bbox,
+            })
+    return slots
+
+
+def build_highlight_page_rects(
+    *,
+    primary_page: int,
+    primary_bbox: list[float] | None = None,
+    primary_rects: list[list[float]] | None = None,
+    slots: list[dict[str, Any]] | None = None,
+    existing_page_rects: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Group highlight boxes by page so consumers never paint a foreign-page rect."""
+    by_page: dict[int, list[list[float]]] = {}
+
+    def _add(page: int, bbox: list[float] | None) -> None:
+        normalized = _bbox(bbox)
+        if page <= 0 or not normalized:
+            return
+        rects = by_page.setdefault(page, [])
+        if normalized not in rects:
+            rects.append(normalized)
+
+    if isinstance(existing_page_rects, list):
+        for item in existing_page_rects:
+            if not isinstance(item, dict):
+                continue
+            page = _page_number(item.get("page"))
+            for rect in item.get("rects") or []:
+                _add(page, rect)
+            _add(page, item.get("bbox"))
+
+    for rect in primary_rects or []:
+        _add(primary_page, rect)
+    _add(primary_page, primary_bbox)
+
+    for slot in slots or []:
+        if not isinstance(slot, dict):
+            continue
+        _add(_page_number(slot.get("page")), slot.get("bbox"))
+        for rect in slot.get("rects") or []:
+            _add(_page_number(slot.get("page")), rect)
+
+    return [
+        {"page": page, "rects": rects[:64]}
+        for page, rects in sorted(by_page.items())
+        if rects
+    ]
+
+
+def _apply_highlight_slots(metadata: dict[str, Any], slots: list[dict[str, Any]]) -> None:
+    """Keep retrieval identity on the original block; paint the visual slot."""
+    if not slots:
+        return
+    slot_ids = [str(slot.get("block_id") or "") for slot in slots if slot.get("block_id")]
+    block_ids = list(metadata.get("block_ids") or [])
+    for slot_id in slot_ids:
+        if slot_id and slot_id not in block_ids:
+            block_ids.append(slot_id)
+    metadata["block_ids"] = block_ids
+    metadata["highlight_block_ids"] = [
+        str(metadata.get("block_id") or ""),
+        *slot_ids,
+    ]
+    primary_page = _page_number(metadata.get("page"))
+    page_rects = build_highlight_page_rects(
+        primary_page=primary_page,
+        primary_bbox=_bbox(metadata.get("bbox")),
+        primary_rects=list(metadata.get("rects") or []),
+        slots=slots,
+        existing_page_rects=metadata.get("page_rects") if isinstance(metadata.get("page_rects"), list) else None,
+    )
+    if page_rects:
+        metadata["page_rects"] = page_rects
+        primary_entry = next((item for item in page_rects if item["page"] == primary_page), None)
+        if primary_entry:
+            metadata["rects"] = list(primary_entry["rects"])
+        pages = [_page_number(item.get("page")) for item in page_rects]
+        valid_pages = [page for page in pages if page > 0]
+        if valid_pages:
+            metadata["page_range"] = [min(valid_pages), max(valid_pages)]
+    metadata["highlight_slots"] = slots
 
 
 def build_rag_source_from_block_index(
@@ -135,6 +252,7 @@ def build_rag_source_from_block_index(
         }
 
     section_paths = _section_paths(block_index)
+    highlight_slots = collect_highlight_slots(block_index)
     active_generation = str(parse_generation or block_index.get("parse_generation") or "").strip()
     active_source_hash = str(
         document_source_hash or block_index.get("document_source_hash") or ""
@@ -230,6 +348,7 @@ def build_rag_source_from_block_index(
             rects = _line_rects(block)
             if rects:
                 metadata["rects"] = rects
+            _apply_highlight_slots(metadata, highlight_slots.get(block_id) or [])
             evidence_chunks.append({
                 "text": text,
                 "heading": section_path,

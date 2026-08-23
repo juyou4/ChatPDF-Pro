@@ -1,10 +1,14 @@
 import React from 'react';
 import { Check, Loader2, TriangleAlert } from 'lucide-react';
 import MinerUScanLoader from './MinerUScanLoader';
+import { useMinerUElapsedClock } from '../hooks/useMinerUElapsedClock';
+import { applyMinerUElapsedToProgress, formatMinerUElapsed } from '../utils/mineruProgressUtils';
 
 // 卡片整体是暖色（边框 #E7E1D9、文字 #625D56、进度条 #D97A5D），
 // 成功态沿用项目既有的 #538F6C 而不是 Tailwind 的 emerald：后者偏冷，贴在奶油底上会发灰。
 const SUCCESS_TILE = 'bg-[#538F6C]/10 text-[#4B8262] dark:bg-[#538F6C]/20 dark:text-[#9DC8AF]';
+const FAILED_TILE = 'bg-[#F8EBE6] text-[#B85F47] dark:bg-[#D97A5D]/15 dark:text-[#FFA07A]';
+const WARNING_TILE = 'bg-[#F6EFE4] text-[#9A7048] dark:bg-amber-400/15 dark:text-amber-200';
 
 const STATUS_PRESENTATION = {
   processing: {
@@ -20,12 +24,12 @@ const STATUS_PRESENTATION = {
   },
   warning: {
     Icon: TriangleAlert,
-    iconClass: 'text-amber-600 dark:text-amber-400',
+    iconClass: 'text-[#9A7048] dark:text-amber-200',
     animate: false,
   },
   failed: {
     Icon: TriangleAlert,
-    iconClass: 'text-red-600 dark:text-red-400',
+    iconClass: 'text-[#B85F47] dark:text-[#FFA07A]',
     animate: false,
   },
 };
@@ -40,6 +44,13 @@ const clampPercent = (value) => {
 const isMinerUStatusItem = (item) => (
   item?.id === 'mineru_parse' || String(item?.title || '').includes('MinerU')
 );
+
+const splitDiagnosticMessage = (value) => {
+  const text = String(value || '').trim();
+  const match = text.match(/^(.*?)[:：]\s*`?([A-Za-z][A-Za-z0-9_]+)`?\s*$/);
+  if (!match) return { message: text, code: '' };
+  return { message: match[1].trim(), code: match[2] };
+};
 
 const stripLegacyStatusPrefix = (value) => String(value || '')
   .replace(/^(?:\s|\u2705|\u23F3|\u{1F50D}|\u26A0|\uFE0F)+/u, '')
@@ -120,6 +131,21 @@ export default function DocumentUploadNotice({ notice, liveParseStatus = null })
   // 终态收成一行，进行中、警告和失败仍保持完整形态。
   const allComplete = effectiveItems.length > 0
     && effectiveItems.every(({ merged }) => merged?.status === 'complete');
+  const hasLiveMinerUProcessing = effectiveItems.some(({ merged, isMinerUItem }) => (
+    isMinerUItem
+    && liveParseStatus
+    && merged?.status === 'processing'
+  ));
+  const parseStartedAt = liveParseStatus?.startedAt || notice?.startedAt;
+  const parseGeneration = liveParseStatus?.parseGeneration || notice?.parseGeneration;
+  const liveElapsedSeconds = useMinerUElapsedClock(
+    hasLiveMinerUProcessing,
+    [
+      String(notice?.docId || ''),
+      String(parseGeneration || ''),
+    ].join(':'),
+    parseStartedAt,
+  );
   const summary = allComplete
     ? (effectiveItems.find(({ isMinerUItem }) => isMinerUItem) || effectiveItems[effectiveItems.length - 1]).merged
     : null;
@@ -185,12 +211,8 @@ export default function DocumentUploadNotice({ notice, liveParseStatus = null })
       )}
 
       {!allComplete && items.length > 0 && (
-        // 分隔只留 border-t：原来的 bg-[#FCFBF9]/80 叠在 bg-white/95 上几乎不可见，
-        // 却和边框、外层卡片边框一起构成一条边界三层装置。
-        // aria-live 收窄到这里：挂在整个 section 上时，进度条每跳一个百分点
-        // 都会把文件名和页数一起重播一遍。
+        // 分隔只留 border-t。耗时每秒变化，不挂 aria-live，避免读屏和布局一起抖。
         <div
-          aria-live="polite"
           className="border-t border-[#EEE9E3] px-[18px] py-3.5 dark:border-white/10"
         >
           <div className="space-y-3">
@@ -205,22 +227,47 @@ export default function DocumentUploadNotice({ notice, liveParseStatus = null })
               const presentation = STATUS_PRESENTATION[effectiveItem?.status] || STATUS_PRESENTATION.processing;
               const StatusIcon = presentation.Icon;
               const progress = isLiveMinerUProcessing
-                ? effectiveItem?.progress
+                ? applyMinerUElapsedToProgress(effectiveItem?.progress, liveElapsedSeconds)
                 : null;
               const progressPercent = clampPercent(progress?.percent);
+              const elapsedSeconds = isLiveMinerUProcessing
+                ? liveElapsedSeconds
+                : (Number(progress?.elapsedSeconds) || 0);
+              const elapsedLabel = formatMinerUElapsed(elapsedSeconds);
+              const description = isLiveMinerUProcessing
+                ? (progress?.stageLabel || effectiveItem?.description)
+                : effectiveItem?.description;
+              const diagnostic = ['failed', 'warning'].includes(effectiveItem?.status)
+                ? splitDiagnosticMessage(description)
+                : { message: description, code: '' };
+              const statusSurfaceClass = effectiveItem?.status === 'failed'
+                ? 'rounded-[14px] border border-[#F0DDD6] bg-[#FBF4F1] px-3 py-2.5 dark:border-[#D97A5D]/20 dark:bg-[#D97A5D]/10'
+                : effectiveItem?.status === 'warning'
+                  ? 'rounded-[14px] border border-[#EDE3D4] bg-[#FBF7F1] px-3 py-2.5 dark:border-amber-400/15 dark:bg-amber-400/10'
+                  : '';
               return (
                 <div
                   key={`${item?.id || item?.title || 'status'}-${index}`}
-                  className="grid grid-cols-[20px_minmax(0,1fr)] items-start gap-3"
+                  className={`grid grid-cols-[20px_minmax(0,1fr)] items-start gap-3 ${statusSurfaceClass}`}
                 >
                   {isLiveMinerUProcessing ? (
                     <MinerUScanLoader size={19} className="mt-0.5 text-[#D97A5D] dark:text-[#FFA07A]" />
                   ) : (
-                    <StatusIcon
-                      className={`mt-0.5 h-4 w-4 ${presentation.iconClass} ${presentation.animate ? 'animate-spin' : ''}`}
-                      strokeWidth={1.9}
-                      aria-hidden="true"
-                    />
+                    <span className={`mt-0.5 flex h-5 w-5 items-center justify-center rounded-[7px] ${
+                      effectiveItem?.status === 'failed'
+                        ? FAILED_TILE
+                        : effectiveItem?.status === 'warning'
+                          ? WARNING_TILE
+                          : effectiveItem?.status === 'complete'
+                            ? SUCCESS_TILE
+                            : ''
+                    }`}>
+                      <StatusIcon
+                        className={`h-3.5 w-3.5 ${presentation.iconClass} ${presentation.animate ? 'animate-spin' : ''}`}
+                        strokeWidth={1.9}
+                        aria-hidden="true"
+                      />
+                    </span>
                   )}
                   <div className="min-w-0 text-[12.5px] leading-[1.6]">
                     <div className="flex min-w-0 items-baseline justify-between gap-3">
@@ -233,22 +280,32 @@ export default function DocumentUploadNotice({ notice, liveParseStatus = null })
                         </span>
                       )}
                     </div>
-                    {effectiveItem?.description && (
+                    {diagnostic.message && (
                       <p className="mt-0.5 text-[12px] leading-5 text-[#777068] dark:text-gray-400">
-                        {effectiveItem.description}
+                        {diagnostic.message}
                       </p>
+                    )}
+                    {isLiveMinerUProcessing && (
+                      <p className="mt-0.5 min-h-5 text-[12px] leading-5 tabular-nums text-[#777068] dark:text-gray-400">
+                        {elapsedLabel ? `已耗时 ${elapsedLabel}` : '\u00a0'}
+                      </p>
+                    )}
+                    {diagnostic.code && (
+                      <code className="mt-1.5 inline-flex rounded-[8px] bg-white/80 px-2 py-0.5 font-mono text-[11px] font-semibold tracking-tight text-[#8A5A48] dark:bg-white/5 dark:text-[#FFC4B0]">
+                        {diagnostic.code}
+                      </code>
                     )}
                     {progressPercent !== null && (
                       <div
                         role="progressbar"
-                        aria-label={`MinerU 解析：${progress?.ariaLabel || `${progressPercent}%`}`}
+                        aria-label={`MinerU 解析：${progress?.stageLabel || 'MinerU 正在解析'}，${progress?.label || `${progressPercent}%`}${elapsedLabel ? `，已耗时 ${elapsedLabel}` : ''}`}
                         aria-valuemin={0}
                         aria-valuemax={100}
                         aria-valuenow={progressPercent}
                         className="mt-2.5 h-1.5 overflow-hidden rounded-full bg-[#EDE6DF] dark:bg-white/10"
                       >
                         <div
-                          className="h-full w-full origin-left rounded-full bg-[#D97A5D] transition-transform duration-500 ease-out motion-reduce:transition-none"
+                          className="mineru-progress-fill h-full rounded-full bg-[#D97A5D] motion-reduce:transition-none"
                           style={{ transform: `scaleX(${progressPercent / 100})` }}
                         />
                       </div>

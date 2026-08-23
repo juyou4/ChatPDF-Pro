@@ -16,17 +16,18 @@ set "DANGER="
 set "MUTED="
 set "BOLD="
 set "RESET="
+set "STEP_INDEX=0"
 if not defined NO_COLOR (
     for /f "delims=#" %%e in ('"prompt #$E# & for %%e in (1) do rem"') do set "ESC=%%e"
-    set "ACCENT=!ESC![38;2;201;103;77m"
-    set "SUCCESS=!ESC![38;2;84;150;111m"
+    set "ACCENT=!ESC![38;2;217;122;93m"
+    set "SUCCESS=!ESC![38;2;90;148;112m"
     set "DANGER=!ESC![38;2;194;82;82m"
-    set "MUTED=!ESC![38;2;137;132;129m"
+    set "MUTED=!ESC![38;2;142;134;128m"
     set "BOLD=!ESC![1m"
     set "RESET=!ESC![0m"
 )
 
-title ChatPDF - Local document workspace
+title ChatPDF
 cls
 call :PRINT_HEADER
 
@@ -249,36 +250,39 @@ exit /b 0
 :: ==================== 界面组件 ====================
 :PRINT_HEADER
 echo.
-echo   !ACCENT!!BOLD!ChatPDF!RESET!
-echo   !MUTED!本地文档工作区  /  v!APP_VERSION!!RESET!
-echo   !MUTED!------------------------------------------------------------!RESET!
+echo   !ACCENT!!BOLD!ChatPDF!RESET!  !MUTED!本地文档工作区!RESET!
+echo   !MUTED!v!APP_VERSION!  ·  后端 8000  ·  前端 3000!RESET!
+echo   !MUTED!────────────────────────────────────────!RESET!
 echo.
 exit /b 0
 
 :PRINT_STEP
+set /a STEP_INDEX+=1
+set "STEP_LABEL=0!STEP_INDEX!"
+set "STEP_LABEL=!STEP_LABEL:~-2!"
 echo.
-echo   !ACCENT!^>!RESET! !BOLD!%~1!RESET!
+echo   !ACCENT!!STEP_LABEL!!RESET!  !BOLD!%~1!RESET!
 exit /b 0
 
 :PRINT_SUCCESS
-echo      !SUCCESS!done!RESET!  %~1
+echo      !SUCCESS!完成!RESET!  %~1
 exit /b 0
 
 :PRINT_INFO
-echo      !MUTED!note!RESET!  %~1
+echo      !MUTED!说明!RESET!  %~1
 exit /b 0
 
 :PRINT_ERROR
-echo      !DANGER!error!RESET! %~1
+echo      !DANGER!出错!RESET!  %~1
 exit /b 0
 
 :PRINT_READY
 echo.
-echo   !SUCCESS!!BOLD!Ready!RESET!  ChatPDF 正在运行
-echo   !MUTED!------------------------------------------------------------!RESET!
-echo   !MUTED!Web!RESET!     http://localhost:3000
-echo   !MUTED!API!RESET!     http://127.0.0.1:8000
+echo   !SUCCESS!!BOLD!就绪!RESET!  ChatPDF 正在运行
+echo   !MUTED!────────────────────────────────────────!RESET!
+echo   !MUTED!前端!RESET!   !BOLD!http://localhost:3000!RESET!
+echo   !MUTED!后端!RESET!   !BOLD!http://127.0.0.1:8000!RESET!
 echo.
-echo   !MUTED!浏览器将自动打开。关闭此窗口将停止所有服务。!RESET!
+echo   !MUTED!浏览器将自动打开。关闭此窗口会停止全部服务。!RESET!
 echo.
 exit /b 0

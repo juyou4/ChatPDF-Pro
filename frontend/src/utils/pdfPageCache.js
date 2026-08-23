@@ -1,7 +1,7 @@
 /**
  * PDF 页面 canvas 缓存
  *
- * 基于 LRU 策略缓存已渲染 PDF 页面的 canvas 数据（dataURL），
+ * 基于 LRU 策略缓存已渲染 PDF 页面的图像（blob URL 或 dataURL），
  * 在短时间内回到同一页面时直接使用缓存图像，避免重新渲染。
  *
  * 缓存键格式：`${documentKey}::${pageNumber}_${scale}`
@@ -27,6 +27,16 @@ class PdfPageCache {
   constructor(maxSize = DEFAULT_MAX_PAGES) {
     this._map = new Map();
     this._maxSize = maxSize;
+  }
+
+  _revoke(value) {
+    if (typeof value === 'string' && value.startsWith('blob:') && typeof URL !== 'undefined' && URL.revokeObjectURL) {
+      try {
+        URL.revokeObjectURL(value);
+      } catch {
+        // 过期 URL 忽略
+      }
+    }
   }
 
   /**
@@ -62,19 +72,22 @@ class PdfPageCache {
    * 缓存页面的 canvas 数据，超出容量时淘汰最久未使用的条目
    * @param {number} pageNumber - 页码
    * @param {number} scale - 缩放比例
-   * @param {string} dataURL - canvas.toDataURL() 的结果
+   * @param {string} dataURL - blob URL 或 dataURL
    */
   set(pageNumber, scale, dataURL, documentKey = '') {
     const key = PdfPageCache.makeKey(pageNumber, scale, documentKey);
     // 如果 key 已存在，先删除以更新顺序
     if (this._map.has(key)) {
+      const previous = this._map.get(key);
       this._map.delete(key);
+      if (previous !== dataURL) this._revoke(previous);
     }
     this._map.set(key, dataURL);
-    // 超出容量时淘汰最旧条目（Map 迭代器第一个）
     if (this._map.size > this._maxSize) {
       const oldestKey = this._map.keys().next().value;
+      const oldest = this._map.get(oldestKey);
       this._map.delete(oldestKey);
+      this._revoke(oldest);
     }
   }
 
@@ -100,8 +113,9 @@ class PdfPageCache {
     return this._maxSize;
   }
 
-  /** 清空缓存 */
+  /** 清空缓存并释放 blob URL */
   clear() {
+    this._map.forEach((value) => this._revoke(value));
     this._map.clear();
   }
 }

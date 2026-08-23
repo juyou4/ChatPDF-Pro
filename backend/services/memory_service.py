@@ -174,6 +174,19 @@ class MemoryService:
         self.index = MemoryIndex(
             os.path.join(data_dir, "memory_index"), embedding_model_id
         )
+        # 记忆正文只有一份；远程 embedding 只是可重建的检索快照。按完整
+        # provider/model/host 身份隔离快照，避免并发请求切换模型时污染同一
+        # FAISS 空间。API Key 只由本次构建线程持有，绝不写入这些状态或磁盘。
+        self._embedding_indexes_lock = threading.RLock()
+        self._embedding_indexes: dict[str, MemoryIndex] = {}
+        self._embedding_retrievers: dict[str, MemoryRetriever] = {}
+        self._embedding_index_locks: dict[str, threading.RLock] = {}
+        self._embedding_indexes_loaded: set[str] = set()
+        self._embedding_index_builds: dict[str, threading.Thread] = {}
+        self._embedding_index_states: dict[str, dict[str, str]] = {}
+        self._active_embedding_key = ""
+        self._active_embedding_identity: dict[str, Any] | None = None
+        self.index.on_change = self._on_primary_memory_index_changed
         # 审计日志与主存储解耦：记忆被删掉后，它的演化历史仍然查得到。
         try:
             from services.memory_audit_log import MemoryAuditLog
@@ -380,9 +393,9 @@ class MemoryService:
         except Exception as e:
             logger.warning(f"[ActivePool] 预加载失败: {e}")
 
-    def _recover_index_from_store(self) -> None:
-        """当索引缺失或损坏时，从存储快照/事件回放结果重建索引。"""
-        entries = [
+    def _retrievable_entries_for_index(self) -> list[MemoryEntry]:
+        """Return the authoritative entry set shared by every search snapshot."""
+        return [
             entry for entry in self.store.get_all_entries()
             if entry.status != "archived_raw"
             and entry.is_retrievable
@@ -391,12 +404,327 @@ class MemoryService:
                 entry.content,
             )
         ]
+
+    def _recover_index_from_store(self) -> None:
+        """当索引缺失或损坏时，从存储快照/事件回放结果重建索引。"""
+        entries = self._retrievable_entries_for_index()
         if not entries:
             logger.info("[MemoryIndex] 无可恢复条目，跳过索引重建")
             return
         self.index.safe_reindex(entries, reason="recover")
         self.index.flush_sync(reason="manual")
         logger.info(f"[MemoryIndex] 已从存储恢复并重建索引，共 {len(entries)} 条")
+
+    @staticmethod
+    def _canonical_memory_embedding_identity(
+        *,
+        embedding_model: str | None,
+        embedding_provider: str | None,
+        embedding_api_host: str | None,
+    ) -> dict[str, Any] | None:
+        """Normalize the request-selected vector space without retaining a key."""
+        fields = (
+            str(embedding_model or "").strip(),
+            str(embedding_provider or "").strip(),
+            str(embedding_api_host or "").strip(),
+        )
+        if not any(fields):
+            return None
+        if not fields[0] or not fields[1]:
+            raise ValueError("记忆向量检索需要完整的 embedding_model/provider")
+
+        from services.embedding_service import _canonicalize_embedding_identity
+
+        return _canonicalize_embedding_identity(
+            fields[0],
+            embedding_provider=fields[1],
+            base_url=fields[2] or None,
+        )
+
+    @staticmethod
+    def _memory_embedding_key(identity: dict[str, Any]) -> str:
+        raw = "\0".join(
+            (
+                str(identity.get("provider") or ""),
+                str(identity.get("model") or ""),
+                str(identity.get("api_host") or ""),
+            )
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+    def _set_embedding_index_state(
+        self,
+        key: str,
+        state: str,
+        reason: str = "",
+    ) -> None:
+        with self._embedding_indexes_lock:
+            self._embedding_index_states[key] = {
+                "state": str(state or "idle"),
+                "reason": str(reason or ""),
+            }
+
+    def _on_primary_memory_index_changed(self, reason: str) -> None:
+        """Fence remote snapshots whenever the authoritative store index changes."""
+        try:
+            entries = self._retrievable_entries_for_index()
+        except Exception as exc:
+            logger.warning("[MemoryIndex] 无法读取权威记忆，远程快照标记为陈旧: %s", exc)
+            entries = []
+
+        with self._embedding_indexes_lock:
+            snapshots = [
+                (
+                    key,
+                    index,
+                    self._embedding_index_locks[key],
+                )
+                for key, index in self._embedding_indexes.items()
+            ]
+
+        for key, index, index_lock in snapshots:
+            try:
+                with index_lock:
+                    removed = index.prune_stale_entries(
+                        entries,
+                        reason="authoritative_store_mutation",
+                    )
+                    if removed:
+                        # Deletion and content replacement are privacy-sensitive:
+                        # do not leave stale text waiting for the debounce timer.
+                        index.flush_sync(reason="manual")
+                    complete = index.matches_entries(entries)
+                self._set_embedding_index_state(
+                    key,
+                    "ready" if complete else "stale",
+                    "" if complete else f"authoritative_{reason}",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[MemoryIndex] 远程快照失效处理失败: identity=%s error=%s",
+                    key,
+                    type(exc).__name__,
+                )
+                self._set_embedding_index_state(
+                    key,
+                    "stale",
+                    "snapshot_invalidation_failed",
+                )
+
+    def _get_or_create_embedding_index(
+        self,
+        identity: dict[str, Any],
+    ) -> tuple[str, MemoryIndex, MemoryRetriever, threading.RLock]:
+        key = self._memory_embedding_key(identity)
+        with self._embedding_indexes_lock:
+            index = self._embedding_indexes.get(key)
+            if index is None:
+                index = MemoryIndex(
+                    os.path.join(self.data_dir, "memory_vector_indexes", key),
+                    str(identity.get("model") or ""),
+                    embedding_provider=str(identity.get("provider") or ""),
+                    embedding_api_host=str(identity.get("api_host") or ""),
+                    vector_search_enabled=(
+                        None if bool(identity.get("is_local")) else True
+                    ),
+                )
+                self._embedding_indexes[key] = index
+                self._embedding_retrievers[key] = MemoryRetriever(
+                    self.store,
+                    index,
+                    active_pool=self.active_pool,
+                )
+                self._embedding_index_locks[key] = threading.RLock()
+            return (
+                key,
+                index,
+                self._embedding_retrievers[key],
+                self._embedding_index_locks[key],
+            )
+
+    def _rebuild_embedding_index_worker(
+        self,
+        *,
+        key: str,
+        index: MemoryIndex,
+        index_lock: threading.RLock,
+        api_key: str,
+    ) -> None:
+        try:
+            with index_lock:
+                # A store mutation may race the remote request. Re-read once and
+                # rebuild again if needed; never publish a stale vector snapshot.
+                for attempt in range(2):
+                    entries = self._retrievable_entries_for_index()
+                    index.safe_reindex(
+                        entries,
+                        api_key=api_key,
+                        reason="embedding_identity_rebuild",
+                    )
+                    latest_entries = self._retrievable_entries_for_index()
+                    if index.matches_entries(latest_entries):
+                        index.flush_sync(reason="manual")
+                        self._set_embedding_index_state(key, "ready")
+                        logger.info(
+                            "[MemoryIndex] 远程向量快照已就绪: identity=%s entries=%d",
+                            key,
+                            len(latest_entries),
+                        )
+                        return
+                    if attempt == 0:
+                        logger.info(
+                            "[MemoryIndex] 构建期间记忆发生变化，使用最新快照重试: %s",
+                            key,
+                        )
+                self._set_embedding_index_state(
+                    key,
+                    "stale",
+                    "memory_store_changed_during_rebuild",
+                )
+        except Exception as exc:
+            logger.warning(
+                "[MemoryIndex] 远程向量快照构建失败，继续使用 BM25: identity=%s error=%s",
+                key,
+                type(exc).__name__,
+            )
+            self._set_embedding_index_state(
+                key,
+                "error",
+                "remote_embedding_unavailable",
+            )
+        finally:
+            with self._embedding_indexes_lock:
+                self._embedding_index_builds.pop(key, None)
+
+    def _schedule_embedding_index_rebuild(
+        self,
+        *,
+        key: str,
+        index: MemoryIndex,
+        index_lock: threading.RLock,
+        api_key: str,
+    ) -> None:
+        with self._embedding_indexes_lock:
+            existing = self._embedding_index_builds.get(key)
+            if existing is not None and existing.is_alive():
+                return
+            self._embedding_index_states[key] = {
+                "state": "warming",
+                "reason": "memory_vector_index_warming",
+            }
+            worker = threading.Thread(
+                target=self._rebuild_embedding_index_worker,
+                kwargs={
+                    "key": key,
+                    "index": index,
+                    "index_lock": index_lock,
+                    "api_key": api_key,
+                },
+                name=f"memory-vector-{key[:8]}",
+                daemon=True,
+            )
+            self._embedding_index_builds[key] = worker
+            worker.start()
+
+    def _select_memory_retriever(
+        self,
+        *,
+        api_key: str | None,
+        embedding_model: str | None,
+        embedding_provider: str | None,
+        embedding_api_host: str | None,
+    ) -> MemoryRetriever:
+        """Select a ready identity-bound vector index, otherwise return BM25."""
+        try:
+            identity = self._canonical_memory_embedding_identity(
+                embedding_model=embedding_model,
+                embedding_provider=embedding_provider,
+                embedding_api_host=embedding_api_host,
+            )
+        except ValueError as exc:
+            logger.warning("[MemoryIndex] 忽略无效 Embedding 身份，使用 BM25: %s", exc)
+            return self.retriever
+        if identity is None:
+            return self.retriever
+
+        key, index, retriever, index_lock = self._get_or_create_embedding_index(identity)
+        with self._embedding_indexes_lock:
+            self._active_embedding_key = key
+            self._active_embedding_identity = dict(identity)
+
+        if not index.vector_search_enabled:
+            self._set_embedding_index_state(
+                key,
+                "unavailable",
+                index.vector_disabled_reason or "local_embedding_runtime_unavailable",
+            )
+            return self.retriever
+
+        from services.embedding_service import KEYLESS_EMBEDDING_PROVIDERS
+
+        provider = str(identity.get("provider") or "").casefold()
+        if provider not in KEYLESS_EMBEDDING_PROVIDERS and not str(api_key or "").strip():
+            self._set_embedding_index_state(
+                key,
+                "missing_credentials",
+                "embedding_api_key_missing",
+            )
+            return self.retriever
+
+        with index_lock:
+            if key not in self._embedding_indexes_loaded:
+                index.load()
+                with self._embedding_indexes_lock:
+                    self._embedding_indexes_loaded.add(key)
+            entries = self._retrievable_entries_for_index()
+            if index.matches_entries(entries):
+                self._set_embedding_index_state(key, "ready")
+                return retriever
+
+        # Rebuilding remote vectors is deliberately asynchronous: the current
+        # question still gets persistent BM25 memory instead of waiting for a
+        # network round trip or losing memory entirely on timeout.
+        self._schedule_embedding_index_rebuild(
+            key=key,
+            index=index,
+            index_lock=index_lock,
+            api_key=str(api_key or ""),
+        )
+        return self.retriever
+
+    def prepare_embedding_index(
+        self,
+        *,
+        embedding_api_key: str | None,
+        embedding_model: str | None,
+        embedding_provider: str | None,
+        embedding_api_host: str | None,
+    ) -> dict[str, Any]:
+        """Bind the configured embedding identity and warm its disposable cache."""
+        # The explicit settings endpoint should report malformed configuration;
+        # chat retrieval itself remains fail-open and falls back to BM25.
+        self._canonical_memory_embedding_identity(
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
+            embedding_api_host=embedding_api_host,
+        )
+        self._select_memory_retriever(
+            api_key=embedding_api_key,
+            embedding_model=embedding_model,
+            embedding_provider=embedding_provider,
+            embedding_api_host=embedding_api_host,
+        )
+        status = self.get_status()
+        return {
+            "stored_embedding_model": status.get("stored_embedding_model", ""),
+            "embedding_provider": status.get("embedding_provider", ""),
+            "embedding_api_host": status.get("embedding_api_host", ""),
+            "vector_index_state": status.get("vector_index_state", "idle"),
+            "vector_index_size": status.get("vector_index_size", 0),
+            "lexical_index_size": status.get("lexical_index_size", 0),
+            "retrieval_mode": status.get("retrieval_mode", "bm25_only"),
+            "vector_disabled_reason": status.get("vector_disabled_reason", ""),
+        }
 
     def _page_in_active_pool(self, entry: MemoryEntry | None) -> None:
         """将可缓存记忆放入热池，供后续检索快路径复用。"""
@@ -737,6 +1065,9 @@ class MemoryService:
         self, query: str, top_k: int = DEFAULT_RETRIEVAL_TOP_K, api_key: str = None,
         doc_id: str = None, filter_by_doc: bool = False,
         parse_identity: dict | None = None,
+        embedding_model: str | None = None,
+        embedding_provider: str | None = None,
+        embedding_api_host: str | None = None,
     ) -> str:
         """检索相关记忆并返回格式化的上下文字符串
 
@@ -747,6 +1078,7 @@ class MemoryService:
             doc_id: 当前文档 ID，用于文档相关性加权（可选）
             filter_by_doc: 是否只返回当前文档的记忆，默认 False（仅加权）
             parse_identity: 当前文档解析身份；提供后自动文档记忆必须匹配
+            embedding_model/provider/api_host: 当前请求选择的完整向量空间身份
 
         Returns:
             格式化的记忆上下文字符串，无记忆时返回空字符串
@@ -763,7 +1095,13 @@ class MemoryService:
             entry_map = {e.id: e for e in self.store.get_all_entries()}
             identity = self._normalize_parse_identity(parse_identity)
             retrieval_top_k = max(top_k * 4, top_k + 8) if identity and doc_id else top_k
-            memories = self.retriever.retrieve(
+            retriever = self._select_memory_retriever(
+                api_key=api_key,
+                embedding_model=embedding_model,
+                embedding_provider=embedding_provider,
+                embedding_api_host=embedding_api_host,
+            )
+            memories = retriever.retrieve(
                 query, top_k=retrieval_top_k, api_key=api_key,
                 doc_id=doc_id, filter_by_doc=filter_by_doc
             )
@@ -793,7 +1131,7 @@ class MemoryService:
                     except Exception as e:
                         logger.debug(f"Active_Pool Page-In 失败: {e}")
             
-            return self.retriever.build_memory_context(memories)
+            return retriever.build_memory_context(memories)
         except Exception as e:
             logger.error(f"记忆检索失败: {e}")
             return ""
@@ -802,6 +1140,9 @@ class MemoryService:
         self, query: str, top_k: int = DEFAULT_RETRIEVAL_TOP_K, api_key: str = None,
         doc_id: str = None, filter_by_doc: bool = False, chat_history: list[dict] | None = None,
         parse_identity: dict | None = None,
+        embedding_model: str | None = None,
+        embedding_provider: str | None = None,
+        embedding_api_host: str | None = None,
     ) -> list[dict]:
         """检索相关记忆并返回原始记忆列表（供 ContextInjector 使用）
 
@@ -812,6 +1153,7 @@ class MemoryService:
             doc_id: 当前文档 ID
             filter_by_doc: 是否只返回当前文档的记忆
             parse_identity: 当前文档解析身份；提供后自动文档记忆必须匹配
+            embedding_model/provider/api_host: 当前请求选择的完整向量空间身份
 
         Returns:
             记忆字典列表，每条包含 content, memory_tier, importance 等字段
@@ -822,7 +1164,13 @@ class MemoryService:
             entry_map = {e.id: e for e in all_entries}
             identity = self._normalize_parse_identity(parse_identity)
             retrieval_top_k = max(top_k * 4, top_k + 8) if identity and doc_id else top_k
-            memories = self.retriever.retrieve(
+            retriever = self._select_memory_retriever(
+                api_key=api_key,
+                embedding_model=embedding_model,
+                embedding_provider=embedding_provider,
+                embedding_api_host=embedding_api_host,
+            )
+            memories = retriever.retrieve(
                 query, top_k=retrieval_top_k, api_key=api_key,
                 doc_id=doc_id, filter_by_doc=filter_by_doc
             )
@@ -3132,11 +3480,49 @@ class MemoryService:
         except Exception:
             total_entries = 0
 
-        index_size = (
-            self.index.index.ntotal
-            if self.index.index is not None
-            else 0
-        )
+        base_index_status = self.index.get_status()
+        active_identity: dict[str, Any] | None = None
+        active_index: MemoryIndex | None = None
+        active_state: dict[str, str] = {}
+        with self._embedding_indexes_lock:
+            if self._active_embedding_identity:
+                active_identity = dict(self._active_embedding_identity)
+                active_index = self._embedding_indexes.get(self._active_embedding_key)
+                active_state = dict(
+                    self._embedding_index_states.get(self._active_embedding_key) or {}
+                )
+
+        index_status = dict(base_index_status)
+        if active_identity is not None:
+            if active_index is not None:
+                index_status.update(active_index.get_status())
+            state = str(active_state.get("state") or "idle")
+            reason = str(active_state.get("reason") or "")
+            ready = bool(state == "ready" and active_index is not None)
+            index_status.update({
+                "stored_embedding_model": str(active_identity.get("model") or ""),
+                "embedding_provider": str(active_identity.get("provider") or ""),
+                "embedding_api_host": str(active_identity.get("api_host") or ""),
+                "vector_index_state": state,
+                "vector_search_enabled": ready,
+                "vector_disabled_reason": "" if ready else reason,
+                "retrieval_mode": (
+                    "hybrid"
+                    if ready
+                    else "bm25_warming"
+                    if state == "warming"
+                    else "bm25_only"
+                ),
+                # The lexical baseline is authoritative even while a remote
+                # vector snapshot is warming or unavailable.
+                "lexical_index_size": int(
+                    base_index_status.get("lexical_index_size") or 0
+                ),
+            })
+        else:
+            index_status.setdefault("vector_index_state", "idle")
+
+        index_size = int(index_status.get("vector_index_size") or 0)
 
         profile = self.store.load_profile()
         focus_areas = profile.get("focus_areas", [])
@@ -3148,5 +3534,5 @@ class MemoryService:
             "profile_focus_areas": focus_areas,
             "llm_calls_per_turn": self._llm_calls_per_turn(),
             **self.store.get_storage_status(),
-            **self.index.get_status(),
+            **index_status,
         }

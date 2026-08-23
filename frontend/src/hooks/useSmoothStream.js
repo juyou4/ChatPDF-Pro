@@ -277,9 +277,9 @@ export const useSmoothStream = ({
    */
   const reset = useCallback(
     (newText = '') => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current)
-      }
+      // renderLoop 在 streamDone=false 时是常驻消费者。重置只应清空本轮数据，
+      // 不能取消唯一的 rAF；首次请求的 streamDone 本来就是 false，取消后不会
+      // 触发 effect 重启，后续分片会一直积压到 flushNow 才整段出现。
       clearQueue()
       displayedTextRef.current = newText
       finalTextRef.current = newText

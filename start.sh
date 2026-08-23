@@ -11,11 +11,11 @@ fi
 # 颜色和样式定义；NO_COLOR 可用于关闭 ANSI 颜色。
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     BOLD='\033[1m'
-    ACCENT='\033[38;2;201;103;77m'
-    GREEN='\033[38;2;84;150;111m'
+    ACCENT='\033[38;2;217;122;93m'
+    GREEN='\033[38;2;90;148;112m'
     YELLOW='\033[38;2;190;139;63m'
     RED='\033[38;2;194;82;82m'
-    MUTED='\033[38;2;137;132;129m'
+    MUTED='\033[38;2;142;134;128m'
     NC='\033[0m'
 else
     BOLD=''
@@ -27,30 +27,47 @@ else
     NC=''
 fi
 
+STEP_INDEX=0
+
+print_header() {
+    printf '\n'
+    printf "  ${ACCENT}${BOLD}ChatPDF${NC}  ${MUTED}本地文档工作区${NC}\n"
+    printf "  ${MUTED}v%s  ·  后端 8000  ·  前端 3000${NC}\n" "$APP_VERSION"
+    printf "  ${MUTED}────────────────────────────────────────${NC}\n\n"
+}
+
+show_progress() {
+    STEP_INDEX=$((STEP_INDEX + 1))
+    printf "\n  ${ACCENT}%02d${NC}  ${BOLD}%s${NC}\n" "$STEP_INDEX" "$1"
+}
+
+show_success() {
+    printf "     ${GREEN}完成${NC}  %s\n" "$1"
+}
+
+show_info() {
+    printf "     ${MUTED}说明${NC}  %s\n" "$1"
+}
+
+show_error() {
+    printf "     ${RED}出错${NC}  %s\n" "$1"
+}
+
+show_ready() {
+    printf '\n'
+    printf "  ${GREEN}${BOLD}就绪${NC}  ChatPDF 正在运行\n"
+    printf "  ${MUTED}────────────────────────────────────────${NC}\n"
+    printf "  ${MUTED}前端${NC}   ${BOLD}http://localhost:3000${NC}\n"
+    printf "  ${MUTED}后端${NC}   ${BOLD}http://127.0.0.1:8000${NC}\n"
+    printf '\n'
+    printf "  ${MUTED}浏览器将自动打开。按 ${BOLD}Ctrl+C${NC}${MUTED} 停止全部服务。${NC}\n\n"
+}
+
 if [ -t 1 ] && [ -n "${TERM:-}" ]; then
     clear
 fi
 
-printf '\n'
-printf "  ${ACCENT}${BOLD}ChatPDF${NC}\n"
-printf "  ${MUTED}本地文档工作区  /  v%s${NC}\n" "$APP_VERSION"
-printf "  ${MUTED}------------------------------------------------------------${NC}\n\n"
-
-show_progress() {
-    printf "\n  ${ACCENT}>${NC} ${BOLD}%s${NC}\n" "$1"
-}
-
-show_success() {
-    printf "     ${GREEN}done${NC}  %s\n" "$1"
-}
-
-show_info() {
-    printf "     ${MUTED}note${NC}  %s\n" "$1"
-}
-
-show_error() {
-    printf "     ${RED}error${NC} %s\n" "$1"
-}
+print_header
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
@@ -248,6 +265,11 @@ while [ "$WAIT_COUNT" -lt 90 ]; do
     if ! ps -p "$BACKEND_PID" >/dev/null 2>&1; then
         break
     fi
+    if [ "$WAIT_COUNT" -eq 10 ]; then
+        show_info "后端正在加载检索与文档服务"
+    elif [ "$WAIT_COUNT" -eq 30 ]; then
+        show_info "后端仍在初始化，请稍候"
+    fi
     sleep 1
 done
 
@@ -257,7 +279,7 @@ else
     show_error "后端启动失败或超时"
     if [ -f "$BACKEND_LOG" ]; then
         printf '\n'
-        printf "     ${YELLOW}log${NC}   后端错误日志\n"
+        printf "     ${YELLOW}日志${NC}  后端错误日志\n"
         tail -80 "$BACKEND_LOG"
     fi
     exit 1
@@ -268,13 +290,7 @@ show_progress "启动前端服务"
  open http://localhost:3000 2>/dev/null || \
  xdg-open http://localhost:3000 2>/dev/null) &
 
-printf '\n'
-printf "  ${GREEN}${BOLD}Ready${NC}  ChatPDF 正在运行\n"
-printf "  ${MUTED}------------------------------------------------------------${NC}\n"
-printf "  ${MUTED}Web${NC}     ${BOLD}http://localhost:3000${NC}\n"
-printf "  ${MUTED}API${NC}     ${BOLD}http://127.0.0.1:8000${NC}\n"
-printf '\n'
-printf "  ${MUTED}浏览器将自动打开。按 ${BOLD}Ctrl+C${NC}${MUTED} 停止所有服务。${NC}\n\n"
+show_ready
 
 cd frontend || exit 1
 npm run dev

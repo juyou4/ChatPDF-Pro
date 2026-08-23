@@ -14,6 +14,21 @@ export const normalizeCitationBBox = (value) => {
   return bbox;
 };
 
+export const citationPageRectsForPage = (pageRects, pageNumber) => {
+  if (!Array.isArray(pageRects) || !pageNumber) return [];
+  const match = pageRects.find((item) => Number(item?.page) === Number(pageNumber));
+  return Array.isArray(match?.rects) ? match.rects.filter((rect) => normalizeCitationBBox(rect)) : [];
+};
+
+export const hasCitationPageRects = (pageRects) => (
+  Array.isArray(pageRects)
+  && pageRects.some((item) => (
+    Number(item?.page) > 0
+    && Array.isArray(item?.rects)
+    && item.rects.some((rect) => normalizeCitationBBox(rect))
+  ))
+);
+
 const roundCoordinate = (value) => Math.round(Number(value) * 1000) / 1000;
 
 const resolveAxisPadding = (padding, axis) => Math.max(0, Number(

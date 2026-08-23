@@ -172,11 +172,11 @@ const WebSearchActivity = ({
           className={`absolute -left-[31px] top-[9px] z-[1] grid h-[22px] w-[22px] place-items-center rounded-full border ring-[3px] ${
             isSearching
               ? darkMode
-                ? 'border-[#FFA07A] bg-[#FFA07A] text-[#24272d] ring-[#2b2e34]'
-                : 'border-[#a8624e] bg-[#a8624e] text-white ring-[#faf8f6]'
+                ? 'border-white/16 bg-[#454b55] text-gray-100 ring-[#2b2e34]'
+                : 'border-[#cfc6bd] bg-[#efe8e1] text-[#4a453f] ring-[#faf8f6]'
               : darkMode
-                ? 'border-white/15 bg-[#444850] text-gray-100 ring-[#2b2e34]'
-                : 'border-[#d8cec7] bg-[#f2ece7] text-[#5c5049] ring-[#faf8f6]'
+                ? 'border-white/12 bg-[#3d424b] text-gray-300 ring-[#2b2e34]'
+                : 'border-[#ddd5cd] bg-[#f5f1ec] text-[#6a635c] ring-[#faf8f6]'
           } ${isSearching ? 'agent-timeline-node-active' : ''}`}
           aria-hidden="true"
         >
@@ -195,8 +195,8 @@ const WebSearchActivity = ({
           aria-expanded={expanded}
           className={`flex min-h-9 w-full items-center gap-2.5 rounded-[8px] px-2.5 py-1.5 text-left transition-[background-color,transform] duration-200 active:scale-[0.995] focus-visible:outline-none focus-visible:ring-2 ${
             darkMode
-              ? 'hover:bg-white/[0.035] focus-visible:ring-[#FFA07A]/35'
-              : 'hover:bg-[#f6f3f1] focus-visible:ring-[#D99178]/35'
+              ? 'hover:bg-white/[0.035] focus-visible:ring-gray-100/35'
+              : 'hover:bg-[#f6f3f1] focus-visible:ring-[#1a1a1a]/25'
           }`}
         >
           <span className={`min-w-0 flex-1 truncate text-[13.5px] ${
@@ -256,8 +256,8 @@ const WebSearchActivity = ({
                   onClick={() => setShowAllSources(true)}
                   className={`rounded-[7px] px-2 py-1.5 text-[12px] transition-colors focus-visible:outline-none focus-visible:ring-2 ${
                     darkMode
-                      ? 'text-gray-500 hover:bg-white/[0.04] hover:text-gray-300 focus-visible:ring-[#FFA07A]/35'
-                      : 'text-gray-400 hover:bg-[#f6f3f1] hover:text-gray-600 focus-visible:ring-[#D99178]/35'
+                      ? 'text-gray-500 hover:bg-white/[0.04] hover:text-gray-300 focus-visible:ring-gray-100/35'
+                      : 'text-gray-400 hover:bg-[#f6f3f1] hover:text-gray-600 focus-visible:ring-[#1a1a1a]/25'
                   }`}
                 >
                   另外 {hiddenSourceCount} 个来源
@@ -300,11 +300,11 @@ const WebSearchActivity = ({
         aria-expanded={expanded}
         className={`group -ml-1 flex min-h-8 max-w-full items-center gap-2 rounded-[9px] px-1.5 py-1 text-left transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 ${
           darkMode
-            ? 'hover:bg-white/[0.04] focus-visible:ring-[#FFA07A]/40'
-            : 'hover:bg-[#f6f3f1] focus-visible:ring-[#D99178]/40'
+            ? 'hover:bg-white/[0.04] focus-visible:ring-gray-100/35'
+            : 'hover:bg-[#f6f3f1] focus-visible:ring-[#1a1a1a]/25'
         }`}
       >
-        <span className={`grid h-5 w-5 flex-shrink-0 place-items-center ${darkMode ? 'text-gray-400' : 'text-[#8b817b]'}`} aria-hidden="true">
+        <span className={`grid h-5 w-5 flex-shrink-0 place-items-center ${darkMode ? 'text-gray-400' : 'text-[#6a635c]'}`} aria-hidden="true">
           {isSearching ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" strokeWidth={1.9} />
           ) : completed ? (
@@ -317,7 +317,7 @@ const WebSearchActivity = ({
           {title}
         </span>
         {isSearching && (
-          <span className={`h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full motion-reduce:animate-none ${darkMode ? 'bg-[#FFA07A]' : 'bg-[#B85F47]'}`} aria-hidden="true" />
+          <span className={`h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full motion-reduce:animate-none ${darkMode ? 'bg-gray-400' : 'bg-[#8a827b]'}`} aria-hidden="true" />
         )}
         <ChevronDown
           className={`h-3.5 w-3.5 flex-shrink-0 transition-transform duration-300 ${
@@ -398,8 +398,8 @@ const WebSearchActivity = ({
                 onClick={() => setShowAllSources(true)}
                 className={`mt-0.5 rounded-[7px] px-1.5 py-1 text-[11.5px] transition-colors focus-visible:outline-none focus-visible:ring-2 ${
                   darkMode
-                    ? 'text-gray-500 hover:bg-white/[0.04] hover:text-gray-300 focus-visible:ring-[#FFA07A]/35'
-                    : 'text-gray-400 hover:bg-[#f6f3f1] hover:text-gray-600 focus-visible:ring-[#D99178]/35'
+                    ? 'text-gray-500 hover:bg-white/[0.04] hover:text-gray-300 focus-visible:ring-gray-100/35'
+                    : 'text-gray-400 hover:bg-[#f6f3f1] hover:text-gray-600 focus-visible:ring-[#1a1a1a]/25'
                 }`}
               >
                 另外 {hiddenSourceCount} 个来源

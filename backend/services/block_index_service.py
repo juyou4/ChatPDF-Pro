@@ -1166,18 +1166,23 @@ def _inject_visual_blocks(
         require_committed=not include_uncommitted_visual_supplements,
     ):
         page_num = int(supplement.get("page") or 0)
-        bbox = _normalize_bbox(supplement.get("bbox"))
-        if page_num not in page_map or not bbox:
+        analysis_bbox = _normalize_bbox(supplement.get("analysis_bbox")) or _normalize_bbox(supplement.get("bbox"))
+        if page_num not in page_map or not analysis_bbox:
             continue
         item_id = str(supplement.get("id") or "").strip()
         if not item_id:
             continue
+        reading_bbox = _visual_supplement_reading_bbox(
+            page_map[page_num],
+            figure_id=str(supplement.get("figure_id") or ""),
+            analysis_bbox=analysis_bbox,
+        )
         _append_visual_block(
             page_map[page_num],
             existing_ids,
             block_id=item_id,
             block_type="caption",
-            bbox=bbox,
+            bbox=reading_bbox,
             text=str(supplement.get("text") or supplement.get("analysis") or "").strip(),
             extra={
                 "visual_enhancement": True,
@@ -1193,6 +1198,8 @@ def _inject_visual_blocks(
                 "visual_supplement_revision": str(parse_identity.get("visual_supplement_revision") or ""),
                 "visual_model": dict(supplement.get("visual_model") or {}),
                 "figure_id": str(supplement.get("figure_id") or ""),
+                "linked_content_id": str(supplement.get("figure_id") or ""),
+                "analysis_bbox": analysis_bbox,
             },
         )
 
@@ -1205,6 +1212,41 @@ def _inject_visual_blocks(
             key=lambda b: (float((b.get("bbox") or [0, 0, 0, 0])[1]), float((b.get("bbox") or [0, 0, 0, 0])[0])),
         )
         page["blocks"] = [*base_blocks, *visual_blocks]
+
+
+def _visual_supplement_reading_bbox(
+    page: dict[str, Any],
+    *,
+    figure_id: str,
+    analysis_bbox: list[float],
+) -> list[float]:
+    """Keep VLM analysis on the figure crop, but do not paint the figure body."""
+    figure_id = str(figure_id or "").strip()
+    caption_box = None
+    body_box = None
+    for block in page.get("blocks") or []:
+        if not isinstance(block, dict) or block.get("visual_enhancement"):
+            continue
+        block_figure_id = str(block.get("figure_id") or block.get("block_id") or "").strip()
+        if figure_id and block_figure_id != figure_id and str(block.get("block_id") or "") != figure_id:
+            continue
+        if block.get("type") == "caption" and _normalize_bbox(block.get("bbox")):
+            caption_box = _normalize_bbox(block.get("bbox"))
+            break
+        if block.get("type") in {"figure", "table"}:
+            body_box = _normalize_bbox(block.get("bbox"))
+    if caption_box:
+        return caption_box
+    if body_box:
+        height = max(18.0, min(36.0, (body_box[3] - body_box[1]) * 0.12))
+        page_height = float(page.get("height_pts") or body_box[3] + height)
+        return [
+            body_box[0],
+            min(body_box[3], page_height - height),
+            body_box[2],
+            min(page_height, body_box[3] + height),
+        ]
+    return analysis_bbox
 
 
 def _append_visual_block(

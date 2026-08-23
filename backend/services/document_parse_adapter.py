@@ -101,10 +101,70 @@ def _coerce_quality_details(normalized: Any) -> dict[str, Any]:
     }
 
 
-def validate_mineru_block_index_quality(normalized: Any) -> None:
-    """Fail closed before an empty or materially incomplete MinerU block index can publish."""
+_QUALITY_ERROR_FIELDS = (
+    "quality_status",
+    "expected_page_count",
+    "covered_page_count",
+    "coverage",
+    "failed_pages",
+    "page_ledger",
+    "block_count",
+    "body_text_chars",
+    "structure_degraded",
+)
+
+
+def _quality_error_kwargs(quality: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: quality[key] for key in _QUALITY_ERROR_FIELDS if key in quality}
+
+
+def collect_mineru_block_validation(normalized: Any) -> dict[str, Any]:
+    """Heading/outline diagnostics for jobs and quality_report; never a publish reject."""
     quality = _coerce_quality_details(normalized)
-    failed_quality = {**quality, "quality_status": "failed"}
+    meta: dict[str, Any] = {}
+    if isinstance(normalized, Mapping):
+        raw_meta = normalized.get("mineru_meta")
+        if isinstance(raw_meta, Mapping):
+            meta = dict(raw_meta)
+
+    def _to_int(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    missing_run_in_paths = [
+        str(item).strip()
+        for item in (meta.get("missing_run_in_outline_paths") or [])
+        if str(item).strip()
+    ]
+    return {
+        **quality,
+        "silently_dropped_heading_count": _to_int(meta.get("silently_dropped_heading_count")),
+        "raw_text_level_heading_count": _to_int(meta.get("raw_text_level_heading_count")),
+        "covered_text_level_heading_count": _to_int(meta.get("covered_text_level_heading_count")),
+        "raw_native_heading_count": _to_int(meta.get("raw_native_heading_count")),
+        "covered_native_heading_count": _to_int(meta.get("covered_native_heading_count")),
+        "raw_run_in_heading_count": _to_int(meta.get("raw_run_in_heading_count")),
+        "covered_run_in_heading_count": _to_int(meta.get("covered_run_in_heading_count")),
+        "missing_run_in_outline_paths": missing_run_in_paths,
+        "outline_heading_count": _to_int(meta.get("outline_heading_count")),
+        "emitted_heading_count": _to_int(
+            meta.get("emitted_heading_count") or meta.get("emitted_heading_block_count")
+        ),
+        "outline_is_fallback_only": bool(meta.get("outline_is_fallback_only")),
+        "flat_structure_without_headings": bool(meta.get("flat_structure_without_headings")),
+    }
+
+
+def validate_mineru_block_index_quality(normalized: Any) -> None:
+    """Fail closed only when pages, blocks, or body text are missing.
+
+    Outline/heading shortfalls stay on ``structure_degraded`` for navigation
+    recovery. They must not refuse a parse that MinerU already completed.
+    """
+    quality = _coerce_quality_details(normalized)
+    failed_quality = {**_quality_error_kwargs(quality), "quality_status": "failed"}
     if not isinstance(normalized, Mapping):
         raise MinerUQualityError("MinerU 结果标准化格式无效", **failed_quality)
     pages = normalized.get("pages")
@@ -131,8 +191,6 @@ def validate_mineru_block_index_quality(normalized: Any) -> None:
         raise MinerUQualityError("MinerU 存在失败页面，拒绝发布", **failed_quality)
     if quality["quality_status"] != "success":
         raise MinerUQualityError("MinerU 解析质量未达到完整发布标准", **failed_quality)
-    if quality["structure_degraded"]:
-        raise MinerUQualityError("MinerU 文档结构不完整，拒绝发布", **failed_quality)
 
 
 @dataclass(frozen=True)

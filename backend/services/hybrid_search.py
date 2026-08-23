@@ -51,6 +51,29 @@ def _merge_retrieval_sources(target: dict, source_item: dict, fallback: str = ""
         target["retrieval_source"] = "+".join(sources)
 
 
+def _fusion_item_key(item: dict, chunk_key: str = "chunk") -> str:
+    """Stable RRF identity. Prefer chunk/entry ids so we do not hash full passage text."""
+    if not isinstance(item, dict):
+        return ""
+    chunk_id = item.get("chunk_id")
+    if chunk_id is not None and str(chunk_id).strip() != "":
+        return f"chunk:{chunk_id}"
+    child_id = item.get("child_chunk_id")
+    if child_id is not None and str(child_id).strip() != "":
+        return f"child:{child_id}"
+    entry_id = item.get("entry_id")
+    if entry_id not in (None, ""):
+        return f"entry:{entry_id}"
+    doc_id = item.get("doc_id")
+    chunk_index = item.get("chunk_index")
+    if doc_id not in (None, "") and chunk_index not in (None, ""):
+        return f"doc:{doc_id}:{chunk_index}"
+    text = item.get(chunk_key, "")
+    if text:
+        return f"text:{text}"
+    return ""
+
+
 def get_query_type_params(query_type: Optional[str]) -> Tuple[float, float, float]:
     """根据查询类型返回 (alpha, min_score, candidate_multiplier)"""
     if not query_type:
@@ -76,30 +99,27 @@ def reciprocal_rank_fusion(
     Returns:
         融合后的结果列表，按RRF分数降序排列
     """
-    # chunk文本 -> (rrf_score, 原始结果dict)
     scores: Dict[str, float] = {}
     chunk_data: Dict[str, dict] = {}
 
     for result_list in result_lists:
         for rank, item in enumerate(result_list):
-            chunk_text = item.get(chunk_key, '')
-            if not chunk_text:
+            item_key = _fusion_item_key(item, chunk_key)
+            if not item_key:
                 continue
 
             rrf_score = 1.0 / (k + rank + 1)
-            scores[chunk_text] = scores.get(chunk_text, 0.0) + rrf_score
+            scores[item_key] = scores.get(item_key, 0.0) + rrf_score
 
-            # 保留第一次出现的完整数据（通常是向量检索的，包含更多元数据）
-            if chunk_text not in chunk_data:
-                chunk_data[chunk_text] = item.copy()
-            _merge_retrieval_sources(chunk_data[chunk_text], item)
+            if item_key not in chunk_data:
+                chunk_data[item_key] = item.copy()
+            _merge_retrieval_sources(chunk_data[item_key], item)
 
-    # 按RRF分数排序
     sorted_chunks = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
     results = []
-    for chunk_text, rrf_score in sorted_chunks[:top_k]:
-        item = chunk_data[chunk_text]
+    for item_key, rrf_score in sorted_chunks[:top_k]:
+        item = chunk_data[item_key]
         item['rrf_score'] = rrf_score
         item['hybrid'] = True
         results.append(item)
@@ -137,39 +157,35 @@ def hybrid_search_merge(
     if not vector_results:
         return bm25_results[:top_k]
 
-    # 使用加权RRF
     k = 60
     scores: Dict[str, float] = {}
     chunk_data: Dict[str, dict] = {}
 
-    # 向量检索结果（权重alpha）
     for rank, item in enumerate(vector_results):
-        chunk_text = item.get('chunk', '')
-        if not chunk_text:
+        item_key = _fusion_item_key(item)
+        if not item_key:
             continue
         rrf_score = alpha / (k + rank + 1)
-        scores[chunk_text] = scores.get(chunk_text, 0.0) + rrf_score
-        if chunk_text not in chunk_data:
-            chunk_data[chunk_text] = item.copy()
-        _merge_retrieval_sources(chunk_data[chunk_text], item, "vector")
+        scores[item_key] = scores.get(item_key, 0.0) + rrf_score
+        if item_key not in chunk_data:
+            chunk_data[item_key] = item.copy()
+        _merge_retrieval_sources(chunk_data[item_key], item, "vector")
 
-    # BM25检索结果（权重1-alpha）
     for rank, item in enumerate(bm25_results):
-        chunk_text = item.get('chunk', '')
-        if not chunk_text:
+        item_key = _fusion_item_key(item)
+        if not item_key:
             continue
         rrf_score = (1 - alpha) / (k + rank + 1)
-        scores[chunk_text] = scores.get(chunk_text, 0.0) + rrf_score
-        if chunk_text not in chunk_data:
-            chunk_data[chunk_text] = item.copy()
-        _merge_retrieval_sources(chunk_data[chunk_text], item, "bm25")
+        scores[item_key] = scores.get(item_key, 0.0) + rrf_score
+        if item_key not in chunk_data:
+            chunk_data[item_key] = item.copy()
+        _merge_retrieval_sources(chunk_data[item_key], item, "bm25")
 
-    # 排序
     sorted_chunks = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
     results = []
-    for chunk_text, rrf_score in sorted_chunks[:top_k]:
-        item = chunk_data[chunk_text]
+    for item_key, rrf_score in sorted_chunks[:top_k]:
+        item = chunk_data[item_key]
         item['rrf_score'] = rrf_score
         item['hybrid'] = True
         results.append(item)
@@ -220,7 +236,7 @@ def merge_multi_query_results(
         for results in valid_lists:
             seen_in_this_list = set()
             for item in results:
-                ct = item.get(chunk_key, "")
+                ct = _fusion_item_key(item, chunk_key)
                 if not ct or ct in seen_in_this_list:
                     continue
                 seen_in_this_list.add(ct)
@@ -250,7 +266,7 @@ def merge_multi_query_results(
         chunk_data: Dict[str, dict] = {}
         for results in valid_lists:
             for item in results:
-                ct = item.get(chunk_key, "")
+                ct = _fusion_item_key(item, chunk_key)
                 if not ct:
                     continue
                 score = float(item.get("similarity") or item.get("score") or 0.0)
@@ -276,7 +292,7 @@ def merge_multi_query_results(
         out: List[dict] = []
         for results in valid_lists:
             for item in results:
-                ct = item.get(chunk_key, "")
+                ct = _fusion_item_key(item, chunk_key)
                 if not ct or ct in seen:
                     continue
                 seen.add(ct)

@@ -4,14 +4,12 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
-  Crop,
   Download,
   Eye,
   EyeOff,
   FileSearch,
   FolderOpen,
   Globe,
-  Info,
   Key,
   Loader2,
   RefreshCw,
@@ -42,22 +40,22 @@ const OCR_MODES = [
   {
     value: 'auto',
     label: '自动',
-    description: '仅对质量较差的页面执行 OCR',
-    icon: FileSearch,
+    description: '只给抽不出字的页面补识别',
   },
   {
     value: 'always',
     label: '始终',
-    description: '对所有页面执行 OCR 处理',
-    icon: Eye,
+    description: '每一页都重新识别',
   },
   {
     value: 'never',
     label: '关闭',
-    description: '不执行任何 OCR 处理',
-    icon: EyeOff,
+    description: '只用 PDF 里已有的文字层',
   },
 ]
+
+const FIELD_INPUT_CLASS =
+  'w-full pl-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white focus:border-[#ed8c68]/50 focus:ring-2 focus:ring-[#ed8c68]/20 outline-none transition-all placeholder:text-gray-300'
 
 /**
  * 文档上传时的主解析路线。OCR、YOLO 等能力只作为路线内的增强，
@@ -74,14 +72,6 @@ const PARSE_ROUTE_OPTIONS = SHARED_PARSE_ROUTE_OPTIONS.map((option) => ({
   icon: PARSE_ROUTE_ICONS[option.value],
 }))
 
-/**
- * 面板分区导航定义
- */
-const PANEL_TABS = [
-  { id: 'basic', label: '常用设置', icon: FileSearch },
-  { id: 'services', label: 'MinerU 服务', icon: Globe },
-  { id: 'advanced', label: '高级选项', icon: SlidersHorizontal },
-]
 
 /**
  * 后端名称到中文显示名称的映射
@@ -127,6 +117,61 @@ const VALID_MODES = ['auto', 'always', 'never']
  * 合法的 OCR 引擎后端值
  */
 const VALID_BACKENDS = ['auto', 'tesseract', 'paddleocr']
+
+/**
+ * 本地逐页 OCR 不可用时才展示安装指引。
+ * MinerU 可用不能掩盖 Tesseract/PaddleOCR 缺失。
+ */
+export function shouldShowLocalOcrInstallGuide(ocrStatus) {
+  if (!ocrStatus) return false
+  if (typeof ocrStatus.local_available === 'boolean') {
+    return ocrStatus.local_available === false
+  }
+  const backends = ocrStatus.backends || {}
+  return !['tesseract', 'paddleocr'].some((name) => Boolean(backends[name]))
+}
+
+/** 底部状态栏文案：按当前路线显示，不把 OCR 说成第三条解析方式。 */
+export function parseSettingsStatusText({
+  parseRoute,
+  mineruConfigured,
+  ocrModeLabel,
+  ocrBackendLabel,
+}) {
+  if (parseRoute === 'local') {
+    return `本地解析 · ${ocrModeLabel || '自动'} · ${ocrBackendLabel || '自动选择'}`
+  }
+  return mineruConfigured ? 'MinerU · 已连接' : 'MinerU · 待配置'
+}
+
+function OptionToggle({ title, description, checked, onToggle }) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-3 py-2.5 rounded-xl bg-gray-50/80 border border-gray-100">
+      <span className="min-w-0">
+        <span className="block text-xs text-gray-700">{title}</span>
+        {description ? (
+          <span className="block text-[10px] leading-4 text-gray-400 mt-0.5">{description}</span>
+        ) : null}
+      </span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={title}
+        onClick={onToggle}
+        className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 flex-shrink-0 ${
+          checked ? 'accent-control' : 'bg-gray-300'
+        }`}
+      >
+        <span
+          className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] rounded-full bg-white shadow-sm transition-transform ${
+            checked ? 'translate-x-[18px]' : 'translate-x-0'
+          }`}
+        />
+      </button>
+    </div>
+  )
+}
 
 /**
  * 合法的主解析路线值
@@ -209,10 +254,23 @@ export function saveOCRSettings(settings) {
   }
 }
 
+const formatApiDetail = (data, fallback) => {
+  const detail = data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (Array.isArray(detail)) {
+    const joined = detail
+      .map((item) => item?.msg || item?.message || (typeof item === 'string' ? item : ''))
+      .filter(Boolean)
+      .join('；')
+    if (joined) return joined
+  }
+  return data?.message || fallback
+}
+
 const getApiErrorMessage = async (res, fallback) => {
   try {
     const data = await res.json()
-    return data?.detail || data?.message || fallback
+    return formatApiDetail(data, fallback)
   } catch {
     return fallback
   }
@@ -227,8 +285,8 @@ const getApiErrorMessage = async (res, fallback) => {
  * @param {function} props.onClose - 关闭面板的回调
  */
 export default function OCRSettingsPanel({ isOpen, onClose }) {
-  // 首屏只展示上传前必须理解的主路线；服务与解析细节按需进入。
-  const [activePanelTab, setActivePanelTab] = useState('basic')
+  // 首屏按路线展示对应配置；图表兜底默认收起。
+  const [moreOpen, setMoreOpen] = useState(false)
   // OCR 模式状态
   const [mode, setMode] = useState('auto')
   // OCR 引擎后端选择状态
@@ -297,6 +355,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
       setMode(settings.mode)
       setBackend(settings.backend)
       setParseRoute(settings.parseRoute)
+      setMoreOpen(false)
     }
   }, [isOpen])
 
@@ -383,6 +442,8 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
         if (data.mineru.model_version) {
           setMineruModelVersion(data.mineru.model_version)
         }
+        const configured = Boolean(data.mineru.worker_url || data.mineru.token_configured)
+        if (!configured) setMineruExpanded(true)
       }
     } catch (err) {
       console.error('获取在线 OCR 配置失败:', err)
@@ -393,11 +454,22 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
    * MinerU 测试连接：验证 Worker 可达性
    */
   const handleMineruValidate = useCallback(async () => {
-    if (mineruAccessMode === 'worker' && !mineruWorkerUrl.trim()) return
-    if (mineruAccessMode === 'direct' && !mineruToken.trim() && !onlineConfig?.mineru?.token_configured) return
+    const hasDirectToken = Boolean(mineruToken.trim() || onlineConfig?.mineru?.token_configured)
+    const hasWorker = Boolean(mineruWorkerUrl.trim() || onlineConfig?.mineru?.worker_url)
+    if (mineruAccessMode === 'worker' && !hasWorker) {
+      setMineruValidateStatus('error')
+      setMineruValidateMessage('请先填写 Worker URL')
+      return
+    }
+    if (mineruAccessMode === 'direct' && !hasDirectToken) {
+      setMineruValidateStatus('error')
+      setMineruValidateMessage('请先填写 MinerU Token')
+      return
+    }
     setMineruValidating(true)
     setMineruValidateStatus(null)
-    setMineruValidateMessage('')
+    setMineruValidateMessage('正在测试连接')
+    setMineruSaveMessage('')
     try {
       const res = await fetch(`${API_BASE_URL}/api/ocr/validate-key`, {
         method: 'POST',
@@ -413,11 +485,10 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
           model_version: mineruModelVersion,
         }),
       })
-      const data = await res.json()
-      // 处理 HTTP 错误（如 400）：FastAPI 返回 {"detail": "..."}
+      const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         setMineruValidateStatus('error')
-        setMineruValidateMessage(data.detail || `请求失败 (HTTP ${res.status})`)
+        setMineruValidateMessage(formatApiDetail(data, `请求失败 (HTTP ${res.status})`))
         return
       }
       setMineruValidateStatus(data.valid ? 'success' : 'error')
@@ -442,7 +513,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
         const saveData = await saveRes.json().catch(() => ({}))
         if (!saveRes.ok || !saveData.success) {
           setMineruValidateStatus('error')
-          setMineruValidateMessage(saveData.detail || saveData.message || '连接成功，但配置保存失败')
+          setMineruValidateMessage(formatApiDetail(saveData, '连接成功，但配置保存失败'))
           return
         }
         setMineruValidateMessage(`${data.message || '连接成功'}，已保存配置`)
@@ -472,6 +543,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
     mineruEnableFormula,
     mineruEnableTable,
     onlineConfig?.mineru?.token_configured,
+    onlineConfig?.mineru?.worker_url,
     fetchOnlineConfig,
     fetchOCRStatus,
   ])
@@ -681,6 +753,12 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
     setParseRoute(newRoute)
     const settings = loadOCRSettings()
     saveOCRSettings({ ...settings, parseRoute: newRoute })
+    if (newRoute !== 'local') {
+      const configured = Boolean(
+        onlineConfig?.mineru?.worker_url || onlineConfig?.mineru?.token_configured
+      )
+      if (!configured) setMineruExpanded(true)
+    }
   }
 
   const yoloReady = yoloStatus?.available === true
@@ -696,11 +774,19 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   const mineruConfigured = Boolean(
     onlineConfig?.mineru?.worker_url || onlineConfig?.mineru?.token_configured
   )
+  const mineruCanTest = mineruAccessMode === 'direct'
+    ? Boolean(mineruToken.trim() || onlineConfig?.mineru?.token_configured)
+    : Boolean(mineruWorkerUrl.trim() || onlineConfig?.mineru?.worker_url)
   const localOcrBackends = Object.entries(ocrStatus?.backends || {}).filter(
     ([name]) => VALID_BACKENDS.includes(name) && name !== 'auto'
   )
-  const localOcrAvailable = localOcrBackends.some(([, available]) => available)
+  const localOcrAvailable = Boolean(
+    typeof ocrStatus?.local_available === 'boolean'
+      ? ocrStatus.local_available
+      : localOcrBackends.some(([, available]) => available)
+  )
   const recommendedLocalBackend = BACKEND_LABELS[ocrStatus?.recommended]
+  const showLocalOcrInstallGuide = shouldShowLocalOcrInstallGuide(ocrStatus)
 
   return (
     <AnimatePresence initial={false}>
@@ -738,7 +824,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     文档解析
                   </div>
                   <div className="text-[12px] font-medium text-gray-500">
-                    先选择上传路线，其他能力按需配置
+                    先选上传路线，再只配置这条路线需要的内容
                   </div>
                 </div>
               </div>
@@ -757,1087 +843,644 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 </div>
               )}
 
-              {/* 主解析与能力配置分区展示；图表兜底不是第三条主解析路线。 */}
-              <div className="settings-segment relative flex items-center p-1 rounded-2xl">
-                <motion.div
-                  className="settings-segment-indicator absolute inset-y-1 left-1 rounded-xl"
-                  initial={false}
-                  animate={{ x: `${PANEL_TABS.findIndex((t) => t.id === activePanelTab) * 100}%` }}
-                  transition={{ type: 'spring', stiffness: 420, damping: 32, mass: 0.7 }}
-                  style={{ width: 'calc((100% - 0.5rem) / 3)' }}
-                />
-                {PANEL_TABS.map(({ id, label, icon: TabIcon }) => {
-                  const isActive = activePanelTab === id
-                  return (
-                    <button
-                      key={id}
-                      type="button"
-                      onClick={() => setActivePanelTab(id)}
-                      className={`relative z-10 flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-[13px] font-semibold transition-colors duration-200 ${
-                        isActive
-                          ? 'text-[#ed8c68]'
-                          : 'text-gray-500 hover:text-gray-700'
-                      }`}
-                    >
-                      <motion.span
-                        className="flex items-center gap-1.5"
-                        animate={{ scale: isActive ? 1 : 0.97 }}
-                        transition={{ duration: 0.15 }}
-                      >
-                        <TabIcon className="w-3.5 h-3.5" />
-                        {label}
-                      </motion.span>
-                    </button>
-                  )
-                })}
-              </div>
-
-              <AnimatePresence mode="wait">
-              {activePanelTab === 'basic' && (
-              <motion.div
-                key="tab-basic"
-                className="space-y-4"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18, ease: 'easeOut' }}
-              >
-                {/* 上传前确定一份文档的主解析来源，避免正文、索引和阅读块混用不同路线。 */}
-                <section className="px-1 py-1" aria-labelledby="parse-route-heading">
-                  <div className="flex items-start justify-between gap-4 mb-4">
-                    <div>
-                      <div id="parse-route-heading" className="text-sm font-semibold text-gray-800">选择上传方式</div>
-                      <p className="text-[12px] leading-5 text-gray-500 mt-1">
-                        这里只需选择一项。上传后，阅读、总结、大纲、翻译、速览和问答都会沿用同一路线。
-                      </p>
-                    </div>
-                    <span className="shrink-0 rounded-lg bg-gray-100 px-2 py-1 text-[10px] font-semibold text-gray-500">
-                      影响后续上传
-                    </span>
+              <section className="px-1" aria-labelledby="parse-route-heading">
+                <div className="flex items-start justify-between gap-4 mb-4">
+                  <div>
+                    <div id="parse-route-heading" className="text-sm font-semibold text-gray-800">上传路线</div>
+                    <p className="text-[12px] leading-5 text-gray-500 mt-1">
+                      阅读、总结、大纲、翻译、速览和问答都会沿用这一条。已上传的文档不会跟着改。
+                    </p>
                   </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    {PARSE_ROUTE_OPTIONS.map((option) => {
-                      const Icon = option.icon
-                      const isActive = parseRoute === option.value
-                      const isMinerU = option.value === 'mineru'
-                      return (
-                        <button
-                          key={option.value}
-                          type="button"
-                          aria-pressed={isActive}
-                          onClick={() => handleParseRouteChange(option.value)}
-                          className={`relative min-h-[150px] rounded-[16px] border p-4 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#ed8c68]/35 ${
-                            isActive
-                              ? 'border-[#ed8c68]/40 bg-[#fff8f5] shadow-[0_8px_24px_-20px_rgba(184,95,71,0.7)]'
-                              : 'border-gray-200 bg-white hover:-translate-y-0.5 hover:border-[#ed8c68]/25 hover:bg-[#fffbf9]'
-                          }`}
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className={`grid h-9 w-9 place-items-center rounded-[11px] ${
-                              isActive ? 'bg-[#fcede8] text-[#d96f50]' : 'bg-gray-100 text-gray-500'
-                            }`}>
-                              <Icon className="h-4 w-4" />
-                            </div>
-                            <span className={`rounded-md px-2 py-1 text-[10px] font-semibold ${
-                              isMinerU
-                                ? 'bg-[#fcede8] text-[#b85f47]'
-                                : 'bg-gray-100 text-gray-500'
-                            }`}>
-                              {isMinerU ? '结构优先' : '隐私优先'}
-                            </span>
-                          </div>
-                          <div className="mt-4 flex items-center gap-2 text-sm font-semibold text-gray-800">
-                            {option.label}
-                            {isActive && <CheckCircle2 className="h-4 w-4 text-[#d96f50]" />}
-                          </div>
-                          <p className="mt-1.5 text-[11px] leading-5 text-gray-500">
-                            {isMinerU
-                              ? '结构、公式和表格更完整，适合论文、扫描件与复杂版面。'
-                              : '文件在设备内处理，适合文字层完整的普通 PDF。'}
-                          </p>
-                        </button>
-                      )
-                    })}
-                  </div>
-
-                  <div className="mt-4 flex items-center justify-between gap-4 rounded-[13px] border border-gray-100 bg-gray-50/80 px-4 py-3">
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-gray-700">
-                        {parseRoute === 'local' ? '当前使用本地解析' : '当前使用 MinerU 深度解析'}
-                      </div>
-                      <p className="mt-0.5 text-[11px] leading-5 text-gray-500">
-                        {parseRoute === 'local'
-                          ? '无需配置云服务；扫描页会按高级选项中的 OCR 规则补充识别。'
-                          : mineruConfigured
-                            ? 'MinerU 服务已配置，下一份文档会上传并完成结构化解析。'
-                            : '首次使用前需要在“MinerU 服务”中完成连接。'}
-                      </p>
-                    </div>
-                    {parseRoute !== 'local' && (
-                      <button
-                        type="button"
-                        onClick={() => setActivePanelTab('services')}
-                        className="shrink-0 rounded-[10px] border border-gray-200 bg-white px-3 py-2 text-[11px] font-semibold text-gray-700 transition-all hover:border-[#ed8c68]/30 hover:bg-[#fff8f5] active:translate-y-px"
-                      >
-                        {mineruConfigured ? '查看配置' : '去配置'}
-                      </button>
-                    )}
-                  </div>
-                </section>
-
-                <div className="flex items-start gap-2 px-4 py-3 text-[11px] leading-5 text-gray-500">
-                  <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gray-400" />
-                  <span>已经上传的文档不会因这里的选择改变路线。OCR 和图表定位是路线内的补充能力，不是第三种解析方式。</span>
-                </div>
-              </motion.div>
-              )}
-              </AnimatePresence>
-
-              <AnimatePresence mode="wait">
-              {activePanelTab === 'advanced' && (
-              <motion.div
-                key="tab-advanced-ocr"
-                className="space-y-5"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18, ease: 'easeOut' }}
-              >
-              <div className="flex items-start gap-2 px-4 py-3 rounded-[14px] border border-gray-200/80 bg-white/70 text-[11px] leading-5 text-gray-500">
-                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-gray-400" />
-                <span>通常保持“自动”即可。只有扫描页缺字、识别异常或图表定位不准时，才需要调整下面的选项。</span>
-              </div>
-              {/* OCR 可用状态卡片 */}
-              <div className="settings-card bg-white p-5 border border-gray-200/90">
-                <div className="flex items-center gap-2 mb-4">
-                  <Info className="w-4 h-4 text-gray-500" />
-                  <span className="text-sm font-semibold text-gray-800">
-                    OCR 引擎状态
-                  </span>
-                  {loading && (
-                    <span className="text-xs text-gray-400 ml-auto">
-                      加载中...
-                    </span>
-                  )}
-                </div>
-
-                {ocrStatus ? (
-                  <div className="space-y-3">
-                    {/* 总体可用性 */}
-                    <div className="flex items-center gap-2">
-                      <div
-                        className={`w-2.5 h-2.5 rounded-full ${
-                          localOcrAvailable
-                            ? 'bg-emerald-500'
-                            : 'bg-gray-300'
-                        }`}
-                      />
-                      <span className="text-sm text-gray-700">
-                        OCR 服务：
-                        {localOcrAvailable ? (
-                          <span className="text-green-600 font-medium">
-                            可用
-                          </span>
-                        ) : (
-                          <span className="text-gray-500 font-medium">
-                            不可用
-                          </span>
-                        )}
-                      </span>
-                      {recommendedLocalBackend && (
-                        <span className="ml-auto text-xs text-[#ed8c68] bg-purple-50 px-2 py-0.5 rounded-full border border-purple-100">
-                          推荐：{recommendedLocalBackend}
-                        </span>
-                      )}
-                    </div>
-
-                    {/* 各后端可用性 */}
-                    {localOcrBackends.length > 0 && (
-                      <div className="grid grid-cols-2 gap-2">
-                        {localOcrBackends.map(
-                          ([name, available]) => (
-                            <div
-                              key={name}
-                              className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100"
-                            >
-                              <div
-                                className={`w-2 h-2 rounded-full ${
-                                  available ? 'bg-emerald-500' : 'bg-gray-300'
-                                }`}
-                              />
-                              <span className="text-sm text-gray-700">
-                                {BACKEND_LABELS[name] || name}
-                              </span>
-                              {available ? (
-                                <CheckCircle2 className="w-3.5 h-3.5 text-green-500 ml-auto" />
-                              ) : (
-                                <XCircle className="w-3.5 h-3.5 text-gray-300 ml-auto" />
-                              )}
-                            </div>
-                          )
-                        )}
-                      </div>
-                    )}
-
-                    {/* Poppler 状态 */}
-                    {ocrStatus.poppler_available !== undefined && (
-                      <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100">
-                        <div
-                          className={`w-2 h-2 rounded-full ${
-                            ocrStatus.poppler_available
-                              ? 'bg-emerald-500'
-                              : 'bg-amber-400'
-                          }`}
-                        />
-                        <span className="text-sm text-gray-700">
-                          Poppler (PDF 转图像)
-                        </span>
-                        {ocrStatus.poppler_available ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-green-500 ml-auto" />
-                        ) : (
-                          <AlertTriangle className="w-3.5 h-3.5 text-amber-500 ml-auto" />
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  !loading &&
-                  !error && (
-                    <div className="text-sm text-gray-400 text-center py-4">
-                      暂无状态信息
-                    </div>
-                  )
-                )}
-              </div>
-
-              {/* OCR 模式选择 */}
-              <div className="settings-card bg-white p-5 border border-gray-200/90">
-                <div className="flex items-center gap-2 mb-4">
-                  <ScanText className="w-4 h-4 text-gray-500" />
-                  <span className="text-sm font-semibold text-gray-800">
-                    OCR 模式
+                  <span className="shrink-0 rounded-lg bg-gray-100 px-2 py-1 text-[10px] font-semibold text-gray-500">
+                    影响后续上传
                   </span>
                 </div>
 
-                <div className="space-y-2">
-                  {OCR_MODES.map((option) => {
+                <div className="grid grid-cols-2 gap-3">
+                  {PARSE_ROUTE_OPTIONS.map((option) => {
                     const Icon = option.icon
-                    const isActive = mode === option.value
-                    return (
-                      <button
-                        key={option.value}
-                        onClick={() => handleModeChange(option.value)}
-                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all ${
-                          isActive
-                            ? 'border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] shadow-sm'
-                            : 'border-gray-100 hover:border-[#ed8c68]/30 hover:bg-[#ed8c68]/5 text-gray-700'
-                        }`}
-                      >
-                        <div
-                          className={`p-1.5 rounded-lg ${
-                            isActive
-                              ? 'bg-purple-100 text-[#ed8c68]'
-                              : 'bg-gray-100 text-gray-500'
-                          }`}
-                        >
-                          <Icon className="w-4 h-4" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium">
-                            {option.label}
-                          </div>
-                          <div
-                            className={`text-xs mt-0.5 ${
-                              isActive ? 'text-[#ed8c68]' : 'text-gray-400'
-                            }`}
-                          >
-                            {option.description}
-                          </div>
-                        </div>
-                        {isActive && (
-                          <CheckCircle2 className="w-5 h-5 text-[#ed8c68] flex-shrink-0" />
-                        )}
-                      </button>
-                    )
-                  })}
-                </div>
-              </div>
-
-              {/* OCR 引擎选择 */}
-              <div className="settings-card bg-white p-5 border border-gray-200/90">
-                <div className="flex items-center gap-2 mb-4">
-                  <ScanText className="w-4 h-4 text-gray-500" />
-                  <span className="text-sm font-semibold text-gray-800">
-                    OCR 引擎选择
-                  </span>
-                </div>
-
-                <div className="space-y-2">
-                  {BACKEND_OPTIONS.map((option) => {
-                    const isActive = backend === option.value
-                    const localProviderUnavailable =
-                      ['tesseract', 'paddleocr'].includes(option.value) &&
-                      ocrStatus?.backends?.[option.value] === false
-                    const disabled = Boolean(option.deprecatedForPageOcr || localProviderUnavailable)
+                    const isActive = parseRoute === option.value
+                    const isMinerU = option.value === 'mineru'
                     return (
                       <button
                         key={option.value}
                         type="button"
-                        disabled={disabled}
-                        onClick={() => !disabled && handleBackendChange(option.value)}
-                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all ${
+                        aria-pressed={isActive}
+                        onClick={() => handleParseRouteChange(option.value)}
+                        className={`relative min-h-[132px] rounded-[16px] border p-4 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#ed8c68]/35 ${
                           isActive
-                            ? 'border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] shadow-sm'
-                            : disabled
-                              ? 'border-gray-100 bg-gray-50 text-gray-400 cursor-not-allowed opacity-70'
-                              : 'border-gray-100 hover:border-[#ed8c68]/30 hover:bg-[#ed8c68]/5 text-gray-700'
+                            ? 'border-[#ed8c68]/40 bg-[#fff8f5] shadow-[0_8px_24px_-20px_rgba(184,95,71,0.7)]'
+                            : 'border-gray-200 bg-white hover:-translate-y-0.5 hover:border-[#ed8c68]/25 hover:bg-[#fffbf9]'
                         }`}
                       >
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium">
-                            {option.label}
+                        <div className="flex items-start justify-between gap-3">
+                          <div className={`grid h-9 w-9 place-items-center rounded-[11px] ${
+                            isActive ? 'bg-[#fcede8] text-[#d96f50]' : 'bg-gray-100 text-gray-500'
+                          }`}>
+                            <Icon className="h-4 w-4" />
                           </div>
-                          <div
-                            className={`text-xs mt-0.5 ${
-                              isActive ? 'text-[#ed8c68]' : 'text-gray-400'
-                            }`}
-                          >
-                            {option.description}
-                          </div>
+                          <span className={`rounded-md px-2 py-1 text-[10px] font-semibold ${
+                            isMinerU
+                              ? 'bg-[#fcede8] text-[#b85f47]'
+                              : 'bg-gray-100 text-gray-500'
+                          }`}>
+                            {isMinerU ? '结构优先' : '文件不出机'}
+                          </span>
                         </div>
-                        {isActive && (
-                          <CheckCircle2 className="w-5 h-5 text-[#ed8c68] flex-shrink-0" />
-                        )}
+                        <div className="mt-3 flex items-center gap-2 text-sm font-semibold text-gray-800">
+                          {option.label}
+                          {isActive && <CheckCircle2 className="h-4 w-4 text-[#d96f50]" />}
+                        </div>
+                        <p className="mt-1.5 text-[11px] leading-5 text-gray-500">
+                          {isMinerU
+                            ? '适合论文、扫描件和复杂版面，公式表格更完整。'
+                            : '适合文字层完整的普通 PDF，扫描页可在下方补识别。'}
+                        </p>
                       </button>
                     )
                   })}
                 </div>
-              </div>
-              </motion.div>
-              )}
-              </AnimatePresence>
+              </section>
 
-              <AnimatePresence mode="wait">
-              {activePanelTab === 'services' && (
-              <motion.div
-                key="tab-services"
-                className="space-y-5"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18, ease: 'easeOut' }}
-              >
-              {/* MinerU 是唯一的云端主解析服务；逐页 OCR 仅保留本地引擎。 */}
-              <div className="flex items-start gap-2 px-4 py-3 rounded-2xl bg-[#ed8c68]/5 border border-[#ed8c68]/15 text-xs text-[#d2633b]">
-                <Info className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-                <span>MinerU 是唯一的云端解析服务。配置完成后，正文、阅读结构、总结、大纲、翻译、速览和问答索引都会使用同一份解析结果。</span>
-              </div>
-
-              {/* MinerU 服务配置卡片（可折叠） */}
-              <div className="settings-card bg-white p-5 border border-gray-200/90">
-                {/* 卡片标题栏（点击展开/折叠） */}
-                <button
-                  onClick={() => setMineruExpanded(!mineruExpanded)}
-                  className="w-full flex items-center gap-2"
-                >
-                  <Globe className="w-4 h-4 text-gray-500" />
-                  <span className="text-sm font-semibold text-gray-800">
-                    MinerU 深度解析服务
-                  </span>
-                  {/* 已配置状态指示 */}
-                  {(onlineConfig?.mineru?.worker_url || onlineConfig?.mineru?.token_configured) && (
-                    <span className="ml-auto mr-2 text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded-full border border-green-100 flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3" />
-                      已配置
-                    </span>
-                  )}
-                  <ChevronDown
-                    className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${
-                      mineruExpanded ? 'rotate-180' : ''
-                    } ${(onlineConfig?.mineru?.worker_url || onlineConfig?.mineru?.token_configured) ? '' : 'ml-auto'}`}
-                  />
-                </button>
-
-                {/* 已配置状态预览（折叠时显示） */}
-                {!mineruExpanded && (onlineConfig?.mineru?.worker_url || onlineConfig?.mineru?.token_configured) && (
-                  <div className="mt-3 space-y-1.5">
-                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-50/80 text-xs text-gray-600">
-                      <Globe className="w-3 h-3 text-gray-400" />
-                      <span>模式：</span>
-                      <code className="font-mono text-gray-700">{onlineConfig.mineru.access_mode === 'direct' ? '直连 MinerU API' : 'Worker 代理'}</code>
-                    </div>
-                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-50/80 text-xs text-gray-600">
-                      <Globe className="w-3 h-3 text-gray-400" />
-                      <span>{onlineConfig.mineru.access_mode === 'direct' ? 'Base URL：' : 'Worker URL：'}</span>
-                      <code className="font-mono text-gray-700">{onlineConfig.mineru.access_mode === 'direct' ? onlineConfig.mineru.base_url : onlineConfig.mineru.worker_url}</code>
-                    </div>
-                    {onlineConfig.mineru.auth_key_configured && (
-                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-50/80 text-xs text-gray-600">
-                        <Key className="w-3 h-3 text-gray-400" />
-                        <span>Auth Key：</span>
-                        <code className="font-mono text-gray-700">{onlineConfig.mineru.auth_key_preview}</code>
-                      </div>
-                    )}
-                    {onlineConfig.mineru.token_configured && (
-                      <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-50/80 text-xs text-gray-600">
-                        <Key className="w-3 h-3 text-gray-400" />
-                        <span>Token：</span>
-                        <code className="font-mono text-gray-700">{onlineConfig.mineru.token_preview}</code>
-                        <span className="text-gray-400 ml-1">
-                          ({onlineConfig.mineru.token_mode === 'worker' ? 'Worker 配置' : '前端透传'})
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* 展开的配置表单 */}
-                <AnimatePresence initial={false}>
-                {mineruExpanded && (
-                  <motion.div
-                    key="mineru-expanded"
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 'auto', opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.22, ease: 'easeInOut' }}
-                    style={{ overflow: 'hidden' }}
-                  >
-                  <div className="mt-4 space-y-4">
-                    {/* 已有配置预览 */}
-                    {(onlineConfig?.mineru?.worker_url || onlineConfig?.mineru?.token_configured) && (
-                      <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-green-50/60 border border-green-100">
-                        <Globe className="w-3.5 h-3.5 text-green-600" />
-                        <span className="text-xs text-green-700">
-                          当前模式：
-                          <code className="font-mono ml-1">
-                            {onlineConfig.mineru.access_mode === 'direct' ? '直连 MinerU API' : 'Worker 代理'}
-                          </code>
-                          {onlineConfig.mineru.access_mode === 'direct' ? ' · Base URL：' : ' · Worker URL：'}
-                          <code className="font-mono ml-1">
-                            {onlineConfig.mineru.access_mode === 'direct' ? onlineConfig.mineru.base_url : onlineConfig.mineru.worker_url}
-                          </code>
-                        </span>
-                      </div>
-                    )}
-
-                    {/* 接入模式选择 */}
-                    <div>
-                      <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                        接入模式
-                      </label>
-                      <SettingsSegmentedControl
-                        ariaLabel="MinerU 接入模式"
-                        value={mineruAccessMode}
-                        onChange={setMineruAccessMode}
-                        options={[
-                          { value: 'worker', label: 'Worker 代理' },
-                          { value: 'direct', label: '直连 API' },
-                        ]}
-                        buttonClassName="px-3 py-2 text-xs font-medium text-center rounded-[10px]"
-                      />
-                      <div className="text-xs text-gray-400 mt-1">
-                        {mineruAccessMode === 'worker'
-                          ? '通过你部署的 pb-ocr-proxy 转发 MinerU 请求'
-                          : '后端直接调用 MinerU 官方 API，仍会上传当前 PDF 到 MinerU'}
-                      </div>
-                    </div>
-
-                    {mineruAccessMode === 'direct' && (
+              {parseRoute !== 'local' && (
+                <section className="space-y-4" aria-labelledby="mineru-settings-heading">
+                  <div className="settings-card bg-white p-5 border border-gray-200/90">
+                    <div className="flex items-start justify-between gap-3 mb-4">
                       <div>
-                        <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                          MinerU API Base URL
-                        </label>
-                        <div className="relative">
-                          <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-                            <Globe className="w-4 h-4" />
-                          </div>
-                          <input
-                            type="text"
-                            value={mineruBaseUrl}
-                            onChange={(e) => setMineruBaseUrl(e.target.value)}
-                            placeholder="https://mineru.net/api/v4"
-                            className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Worker URL 输入框 */}
-                    {mineruAccessMode === 'worker' && (
-                    <div>
-                      <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                        Worker URL
-                      </label>
-                      <div className="relative">
-                        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-                          <Globe className="w-4 h-4" />
-                        </div>
-                        <input
-                          type="text"
-                          value={mineruWorkerUrl}
-                          onChange={(e) => setMineruWorkerUrl(e.target.value)}
-                          placeholder="https://your-worker.workers.dev"
-                          className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
-                        />
-                      </div>
-                    </div>
-                    )}
-
-                    {/* Auth Key 输入框（可选，带显示/隐藏切换） */}
-                    {mineruAccessMode === 'worker' && (
-                    <div>
-                      <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                        Auth Key（可选）
-                      </label>
-                      <div className="relative">
-                        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-                          <Key className="w-4 h-4" />
-                        </div>
-                        <input
-                          type={showMineruAuthKey ? 'text' : 'password'}
-                          value={mineruAuthKey}
-                          onChange={(e) => {
-                            setMineruAuthKey(e.target.value)
-                            setMineruValidateStatus(null)
-                            setMineruValidateMessage('')
-                          }}
-                          placeholder={
-                            onlineConfig?.mineru?.auth_key_configured
-                              ? '输入新 Auth Key 以更新（留空保持不变）'
-                              : '如果 Worker 启用了访问控制，填写这里'
-                          }
-                          className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowMineruAuthKey(!showMineruAuthKey)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                        >
-                          {showMineruAuthKey ? (
-                            <EyeOff className="w-4 h-4" />
-                          ) : (
-                            <Eye className="w-4 h-4" />
-                          )}
-                        </button>
-                      </div>
-                    </div>
-                    )}
-
-                    {/* Token Mode 选择 */}
-                    {mineruAccessMode === 'worker' && (
-                    <div>
-                      <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                        Token 模式
-                      </label>
-                      <SettingsSegmentedControl
-                        ariaLabel="MinerU Token 模式"
-                        value={mineruTokenMode}
-                        onChange={setMineruTokenMode}
-                        options={[
-                          { value: 'frontend', label: '前端透传' },
-                          { value: 'worker', label: 'Worker 配置' },
-                        ]}
-                        buttonClassName="px-3 py-2 text-xs font-medium text-center rounded-[10px]"
-                      />
-                      <div className="text-xs text-gray-400 mt-1">
-                        {mineruTokenMode === 'frontend'
-                          ? '由前端传递 Token 到 Worker'
-                          : 'Token 在 Worker 环境变量中配置，无需前端提供'}
-                      </div>
-                    </div>
-                    )}
-
-                    {/* Token 输入框（仅 frontend 模式显示，带显示/隐藏切换） */}
-                    {(mineruAccessMode === 'direct' || mineruTokenMode === 'frontend') && (
-                      <div>
-                        <label className="text-xs font-medium text-gray-600 mb-1.5 block">
-                          MinerU Token
-                        </label>
-                        <div className="relative">
-                          <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
-                            <Key className="w-4 h-4" />
-                          </div>
-                          <input
-                            type={showMineruToken ? 'text' : 'password'}
-                            value={mineruToken}
-                            onChange={(e) => setMineruToken(e.target.value)}
-                            placeholder={
-                              onlineConfig?.mineru?.token_configured
-                                ? '输入新 Token 以更新（留空保持不变）'
-                                : '输入 MinerU API Token'
-                            }
-                            className="w-full pl-10 pr-10 py-2.5 text-sm rounded-xl border border-gray-200 bg-white/60 focus:border-purple-300 focus:ring-2 focus:ring-purple-100 outline-none transition-all placeholder:text-gray-300"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowMineruToken(!showMineruToken)}
-                            className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
-                          >
-                            {showMineruToken ? (
-                              <EyeOff className="w-4 h-4" />
-                            ) : (
-                              <Eye className="w-4 h-4" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* OCR 选项开关 */}
-                    <div>
-                      <label className="text-xs font-medium text-gray-600 mb-2 block">
-                        OCR 处理选项
-                      </label>
-                      <div className="space-y-2">
-                    {/* 深度解析中的扫描件识别 */}
-                    <label className="flex items-center justify-between px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100 cursor-pointer">
-                      <span>
-                        <span className="block text-xs text-gray-700">扫描件 OCR</span>
-                        <span className="block text-[10px] text-gray-400 mt-0.5">仅影响 MinerU 深度解析；普通论文建议关闭，扫描 PDF 再开启</span>
-                          </span>
-                          <div
-                            onClick={() => setMineruEnableOcr(!mineruEnableOcr)}
-                            className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none flex-shrink-0 cursor-pointer ${
-                              mineruEnableOcr ? 'accent-control' : 'bg-gray-300'
-                            }`}
-                          >
-                            <div
-                              className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] rounded-full bg-white shadow-sm transition-transform ${
-                                mineruEnableOcr ? 'translate-x-[18px]' : 'translate-x-0'
-                              }`}
-                            />
-                          </div>
-                        </label>
-                        {/* 启用公式识别 */}
-                        <label className="flex items-center justify-between px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100 cursor-pointer">
-                          <span className="text-xs text-gray-700">启用公式识别</span>
-                          <div
-                            onClick={() => setMineruEnableFormula(!mineruEnableFormula)}
-                            className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none flex-shrink-0 cursor-pointer ${
-                              mineruEnableFormula ? 'accent-control' : 'bg-gray-300'
-                            }`}
-                          >
-                            <div
-                              className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] rounded-full bg-white shadow-sm transition-transform ${
-                                mineruEnableFormula ? 'translate-x-[18px]' : 'translate-x-0'
-                              }`}
-                            />
-                          </div>
-                        </label>
-                        {/* 启用表格识别 */}
-                        <label className="flex items-center justify-between px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100 cursor-pointer">
-                          <span className="text-xs text-gray-700">启用表格识别</span>
-                          <div
-                            onClick={() => setMineruEnableTable(!mineruEnableTable)}
-                            className={`relative w-[42px] h-[24px] rounded-full transition-colors duration-200 outline-none flex-shrink-0 cursor-pointer ${
-                              mineruEnableTable ? 'accent-control' : 'bg-gray-300'
-                            }`}
-                          >
-                            <div
-                              className={`absolute top-[2px] left-[2px] w-[20px] h-[20px] rounded-full bg-white shadow-sm transition-transform ${
-                                mineruEnableTable ? 'translate-x-[18px]' : 'translate-x-0'
-                              }`}
-                            />
-                          </div>
-                        </label>
-                        <div className="px-3 py-2 rounded-xl bg-gray-50/80 border border-gray-100">
-                          <div className="flex items-center justify-between gap-3">
-                            <span>
-                              <span className="block text-xs text-gray-700">解析模型</span>
-                              <span className="block text-[10px] text-gray-400 mt-0.5">VLM 适合复杂版式和表格；Pipeline 可作为兼容回退</span>
-                            </span>
-                            <SettingsSegmentedControl
-                              ariaLabel="MinerU 解析模型"
-                              value={mineruModelVersion}
-                              onChange={setMineruModelVersion}
-                              options={[
-                                { value: 'vlm', label: 'VLM' },
-                                { value: 'pipeline', label: 'Pipeline' },
-                              ]}
-                              className="w-[152px] rounded-lg"
-                              buttonClassName="px-2 py-1 text-[11px] font-medium text-center rounded-md"
-                              indicatorClassName="rounded-md"
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* MinerU 测试连接结果 */}
-                    {mineruValidateStatus && (
-                      <div
-                        className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
-                          mineruValidateStatus === 'success'
-                            ? 'bg-green-50/60 border border-green-100 text-green-700'
-                            : 'bg-red-50/60 border border-red-100 text-red-700'
-                        }`}
-                      >
-                        {mineruValidateStatus === 'success' ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
-                        ) : (
-                          <XCircle className="w-3.5 h-3.5 text-red-500" />
-                        )}
-                        <span>{mineruValidateMessage}</span>
-                      </div>
-                    )}
-
-                    {/* MinerU 保存结果消息 */}
-                    {mineruSaveMessage && (
-                      <div
-                        className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
-                          mineruSaveMessage === '配置已保存'
-                            ? 'bg-green-50/60 border border-green-100 text-green-700'
-                            : 'bg-red-50/60 border border-red-100 text-red-700'
-                        }`}
-                      >
-                        {mineruSaveMessage === '配置已保存' ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
-                        ) : (
-                          <XCircle className="w-3.5 h-3.5 text-red-500" />
-                        )}
-                        <span>{mineruSaveMessage}</span>
-                      </div>
-                    )}
-
-                    {/* MinerU 操作按钮区域 */}
-                    <div className="flex items-center gap-2">
-                      {/* 测试连接按钮 */}
-                      <button
-                        onClick={handleMineruValidate}
-                        disabled={
-                          mineruValidating
-                          || (mineruAccessMode === 'worker' && !mineruWorkerUrl.trim())
-                          || (mineruAccessMode === 'direct' && !mineruToken.trim() && !onlineConfig?.mineru?.token_configured)
-                        }
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] hover:bg-[#ed8c68]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                      >
-                        {mineruValidating ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Wifi className="w-3.5 h-3.5" />
-                        )}
-                        测试连接
-                      </button>
-
-                      {/* 保存配置按钮 */}
-                      <button
-                        onClick={handleMineruSave}
-                        disabled={
-                          mineruSaving
-                          || (mineruAccessMode === 'worker' && !mineruWorkerUrl.trim())
-                          || (mineruAccessMode === 'direct' && !mineruToken.trim() && !onlineConfig?.mineru?.token_configured)
-                        }
-                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-green-200 bg-green-50/60 text-green-700 hover:bg-green-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                      >
-                        {mineruSaving ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Save className="w-3.5 h-3.5" />
-                        )}
-                        保存配置
-                      </button>
-                    </div>
-                  </div>
-                  </motion.div>
-                )}
-                </AnimatePresence>
-              </div>
-
-              </motion.div>
-              )}
-              </AnimatePresence>
-
-              <AnimatePresence mode="wait">
-              {activePanelTab === 'advanced' && (
-              <motion.div
-                key="tab-advanced-figure"
-                className="space-y-5"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18, ease: 'easeOut' }}
-              >
-              {/* 图表定位遵循主解析路线，视觉模型只在结构结果缺失时兜底。 */}
-              <div className="settings-card bg-white p-5 border border-gray-200/90">
-                <div className="flex items-center gap-2 mb-4">
-                  <Crop className="w-4 h-4 text-gray-500" />
-                  <span className="text-sm font-semibold text-gray-800">
-                    图表兜底
-                  </span>
-                </div>
-
-                <div className="rounded-[12px] border border-[#eadfd9] bg-[#faf7f5] px-4 py-3">
-                  <div className="flex items-start gap-2.5">
-                    <Info className="mt-0.5 h-4 w-4 shrink-0 text-[#b85f47]" />
-                    <div>
-                      <div className="text-xs font-semibold text-gray-700">自动跟随当前文档的主解析路线</div>
-                      <p className="mt-1 text-[11px] leading-5 text-gray-500">
-                        MinerU 文档优先使用结构化图表，本地文档优先使用 PDF 原生结构；只有主结果未定位到图表时，才调用本地图表定位兜底。
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-4 px-1">
-                  <div className="mt-3 rounded-2xl border border-gray-100 bg-gray-50/70 p-3 space-y-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-medium text-gray-700">本地图表定位模型</span>
-                          <span
-                            className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
-                              yoloReady
-                                ? 'bg-green-50 border-green-100 text-green-700'
-                                : yoloDependencyMissing
-                                  ? 'bg-red-50 border-red-100 text-red-700'
-                                  : 'bg-amber-50 border-amber-100 text-amber-700'
-                            }`}
-                          >
-                            {yoloStatusLabel}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-gray-400 mt-0.5">
-                          DocLayout-YOLO 仅负责版面定位和裁切；图表内容理解在设置中心的「阅读」中单独选择
+                        <div id="mineru-settings-heading" className="text-sm font-semibold text-gray-800">MinerU 连接</div>
+                        <p className="text-[11px] leading-5 text-gray-500 mt-1">
+                          深度解析会把当前 PDF 发到 MinerU。连好一次后，解析增强可单独保存。
                         </p>
                       </div>
-                      <button
-                        onClick={fetchYoloStatus}
-                        disabled={yoloBusy}
-                        className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium rounded-lg border border-gray-200 bg-white text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                      >
-                        <RefreshCw className={`w-3 h-3 ${yoloBusy ? 'animate-spin' : ''}`} />
-                        刷新
-                      </button>
+                      {mineruConfigured && (
+                        <span className="shrink-0 text-[11px] text-green-700 bg-green-50 px-2 py-0.5 rounded-full border border-green-100 flex items-center gap-1">
+                          <CheckCircle2 className="w-3 h-3" />
+                          已连接
+                        </span>
+                      )}
                     </div>
 
-                    {yoloStatus?.model_path && (
-                      <div className="min-w-0 rounded-lg bg-white/80 border border-gray-100 px-3 py-2">
-                        <div className="text-[10px] text-gray-400 mb-1">当前权重路径</div>
-                        <div className="font-mono text-[11px] text-gray-600 break-all">{yoloStatus.model_path}</div>
+                    {mineruConfigured && !mineruExpanded && (
+                      <div className="space-y-1.5 mb-4">
+                        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-50/80 text-xs text-gray-600">
+                          <Globe className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                          <span>{onlineConfig.mineru.access_mode === 'direct' ? '直连 API' : 'Worker 代理'}</span>
+                          <code className="font-mono text-gray-700 truncate">
+                            {onlineConfig.mineru.access_mode === 'direct' ? onlineConfig.mineru.base_url : onlineConfig.mineru.worker_url}
+                          </code>
+                        </div>
+                        {onlineConfig.mineru.token_configured && (
+                          <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-50/80 text-xs text-gray-600">
+                            <Key className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+                            <span>Token {onlineConfig.mineru.token_preview}</span>
+                          </div>
+                        )}
                       </div>
                     )}
 
-                    {yoloDependencyMissing && (
-                      <div className="flex items-start gap-2 px-3 py-2 rounded-xl bg-red-50/70 border border-red-100 text-xs text-red-700">
-                        <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-                        <span>当前后端缺少 YOLO 运行依赖。桌面完整包会保留运行库，但权重需在软件内下载或指定。</span>
-                      </div>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => setMineruExpanded(!mineruExpanded)}
+                      className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-gray-600 hover:text-[#b85f47]"
+                    >
+                      <ChevronDown className={`w-4 h-4 transition-transform ${mineruExpanded ? 'rotate-180' : ''}`} />
+                      {mineruExpanded ? '收起连接设置' : mineruConfigured ? '修改连接' : '填写连接信息'}
+                    </button>
 
-                    <div className="space-y-2">
-                      <label className="block text-[11px] font-medium text-gray-500">一键下载到目录</label>
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={yoloInstallDir}
-                          onChange={(e) => setYoloInstallDir(e.target.value)}
-                          placeholder={yoloStatus?.default_install_dir || '默认用户数据目录'}
-                          className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:border-[#ed8c68]/50"
-                        />
-                        {window.chatpdfDesktop?.selectDirectory && (
-                          <button
-                            onClick={handleSelectYoloInstallDir}
-                            disabled={yoloBusy}
-                            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-gray-200 bg-white text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                          >
-                            <FolderOpen className="w-3.5 h-3.5" />
-                            选择
-                          </button>
-                        )}
-                        <button
-                          onClick={handleDownloadYoloModel}
-                          disabled={yoloBusy}
-                          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] hover:bg-[#ed8c68]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                    <AnimatePresence initial={false}>
+                      {mineruExpanded && (
+                        <motion.div
+                          key="mineru-connection"
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: 'auto', opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          transition={{ duration: 0.2, ease: 'easeInOut' }}
+                          style={{ overflow: 'hidden' }}
                         >
-                          {yoloBusy ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <Download className="w-3.5 h-3.5" />
-                          )}
-                          下载
-                        </button>
-                      </div>
-                    </div>
+                          <div className="mt-4 space-y-4">
+                            <div>
+                              <label className="text-xs font-medium text-gray-600 mb-1.5 block">接入方式</label>
+                              <SettingsSegmentedControl
+                                ariaLabel="MinerU 接入模式"
+                                value={mineruAccessMode}
+                                onChange={setMineruAccessMode}
+                                options={[
+                                  { value: 'direct', label: '直连 API' },
+                                  { value: 'worker', label: 'Worker 代理' },
+                                ]}
+                                buttonClassName="px-3 py-2 text-xs font-medium text-center rounded-[10px]"
+                              />
+                              <div className="text-xs text-gray-400 mt-1">
+                                {mineruAccessMode === 'worker'
+                                  ? '经你部署的代理转发 MinerU 请求'
+                                  : '后端直接调用 MinerU 官方 API'}
+                              </div>
+                            </div>
 
+                            {mineruAccessMode === 'direct' && (
+                              <div>
+                                <label className="text-xs font-medium text-gray-600 mb-1.5 block">API 地址</label>
+                                <div className="relative">
+                                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+                                    <Globe className="w-4 h-4" />
+                                  </div>
+                                  <input
+                                    type="text"
+                                    value={mineruBaseUrl}
+                                    onChange={(e) => setMineruBaseUrl(e.target.value)}
+                                    placeholder="https://mineru.net/api/v4"
+                                    className={FIELD_INPUT_CLASS}
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            {mineruAccessMode === 'worker' && (
+                              <div>
+                                <label className="text-xs font-medium text-gray-600 mb-1.5 block">Worker URL</label>
+                                <div className="relative">
+                                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+                                    <Globe className="w-4 h-4" />
+                                  </div>
+                                  <input
+                                    type="text"
+                                    value={mineruWorkerUrl}
+                                    onChange={(e) => setMineruWorkerUrl(e.target.value)}
+                                    placeholder="https://your-worker.workers.dev"
+                                    className={FIELD_INPUT_CLASS}
+                                  />
+                                </div>
+                              </div>
+                            )}
+
+                            {mineruAccessMode === 'worker' && (
+                              <div>
+                                <label className="text-xs font-medium text-gray-600 mb-1.5 block">Auth Key（可选）</label>
+                                <div className="relative">
+                                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+                                    <Key className="w-4 h-4" />
+                                  </div>
+                                  <input
+                                    type={showMineruAuthKey ? 'text' : 'password'}
+                                    value={mineruAuthKey}
+                                    onChange={(e) => {
+                                      setMineruAuthKey(e.target.value)
+                                      setMineruValidateStatus(null)
+                                      setMineruValidateMessage('')
+                                    }}
+                                    placeholder={
+                                      onlineConfig?.mineru?.auth_key_configured
+                                        ? '输入新 Auth Key 以更新（留空保持不变）'
+                                        : 'Worker 开启访问控制时填写'
+                                    }
+                                    className={`${FIELD_INPUT_CLASS} pr-10`}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowMineruAuthKey(!showMineruAuthKey)}
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                                    aria-label={showMineruAuthKey ? '隐藏 Auth Key' : '显示 Auth Key'}
+                                  >
+                                    {showMineruAuthKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {mineruAccessMode === 'worker' && (
+                              <div>
+                                <label className="text-xs font-medium text-gray-600 mb-1.5 block">Token 来源</label>
+                                <SettingsSegmentedControl
+                                  ariaLabel="MinerU Token 模式"
+                                  value={mineruTokenMode}
+                                  onChange={setMineruTokenMode}
+                                  options={[
+                                    { value: 'frontend', label: '在此填写' },
+                                    { value: 'worker', label: 'Worker 环境变量' },
+                                  ]}
+                                  buttonClassName="px-3 py-2 text-xs font-medium text-center rounded-[10px]"
+                                />
+                              </div>
+                            )}
+
+                            {(mineruAccessMode === 'direct' || mineruTokenMode === 'frontend') && (
+                              <div>
+                                <label className="text-xs font-medium text-gray-600 mb-1.5 block">MinerU Token</label>
+                                <div className="relative">
+                                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+                                    <Key className="w-4 h-4" />
+                                  </div>
+                                  <input
+                                    type={showMineruToken ? 'text' : 'password'}
+                                    value={mineruToken}
+                                    onChange={(e) => setMineruToken(e.target.value)}
+                                    placeholder={
+                                      onlineConfig?.mineru?.token_configured
+                                        ? '输入新 Token 以更新（留空保持不变）'
+                                        : '输入 MinerU API Token'
+                                    }
+                                    className={`${FIELD_INPUT_CLASS} pr-10`}
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowMineruToken(!showMineruToken)}
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                                    aria-label={showMineruToken ? '隐藏 Token' : '显示 Token'}
+                                  >
+                                    {showMineruToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
+                  <div className="settings-card bg-white p-5 border border-gray-200/90">
+                    <div className="mb-4">
+                      <div className="text-sm font-semibold text-gray-800">解析增强</div>
+                      <p className="text-[11px] leading-5 text-gray-500 mt-1">
+                        只作用于 MinerU 深度解析。扫描件即使关掉 OCR，本地抽字很差时仍会自动打开。
+                      </p>
+                    </div>
                     <div className="space-y-2">
-                      <label className="block text-[11px] font-medium text-gray-500">手动指定已有权重</label>
-                      <div className="flex gap-2">
-                        <input
-                          type="text"
-                          value={yoloModelPath}
-                          onChange={(e) => setYoloModelPath(e.target.value)}
-                          placeholder="选择或输入 doclayout_yolo_*.pt 路径"
-                          className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:border-[#ed8c68]/50"
-                        />
-                        {window.chatpdfDesktop?.selectFile && (
-                          <button
-                            onClick={handleSelectYoloModelFile}
-                            disabled={yoloBusy}
-                            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-gray-200 bg-white text-gray-600 hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                          >
-                            <FolderOpen className="w-3.5 h-3.5" />
-                            选择
-                          </button>
-                        )}
-                        <button
-                          onClick={handleSaveYoloModelPath}
-                          disabled={yoloBusy || !yoloModelPath.trim()}
-                          className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-green-200 bg-green-50/60 text-green-700 hover:bg-green-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                        >
-                          <Save className="w-3.5 h-3.5" />
-                          保存
-                        </button>
+                      <OptionToggle
+                        title="扫描件识别"
+                        description="图片型 PDF 需要打开；普通论文可关"
+                        checked={mineruEnableOcr}
+                        onToggle={() => setMineruEnableOcr(!mineruEnableOcr)}
+                      />
+                      <OptionToggle
+                        title="公式"
+                        checked={mineruEnableFormula}
+                        onToggle={() => setMineruEnableFormula(!mineruEnableFormula)}
+                      />
+                      <OptionToggle
+                        title="表格"
+                        checked={mineruEnableTable}
+                        onToggle={() => setMineruEnableTable(!mineruEnableTable)}
+                      />
+                      <div className="px-3 py-2.5 rounded-xl bg-gray-50/80 border border-gray-100">
+                        <div className="flex items-center justify-between gap-3">
+                          <span>
+                            <span className="block text-xs text-gray-700">解析模型</span>
+                            <span className="block text-[10px] text-gray-400 mt-0.5">复杂版式用 VLM</span>
+                          </span>
+                          <SettingsSegmentedControl
+                            ariaLabel="MinerU 解析模型"
+                            value={mineruModelVersion}
+                            onChange={setMineruModelVersion}
+                            options={[
+                              { value: 'vlm', label: 'VLM' },
+                              { value: 'pipeline', label: 'Pipeline' },
+                            ]}
+                            className="w-[152px] rounded-lg"
+                            buttonClassName="px-2 py-1 text-[11px] font-medium text-center rounded-md"
+                            indicatorClassName="rounded-md"
+                          />
+                        </div>
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="text-[11px] text-gray-400">
-                        默认目录：{yoloStatus?.default_install_dir || '读取中'}
-                      </span>
-                      <button
-                        onClick={handleResetYoloModelPath}
-                        disabled={yoloBusy}
-                        className="text-[11px] text-gray-500 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        恢复默认
-                      </button>
-                    </div>
-
-                    {yoloMessage && (
+                    {(mineruValidateMessage || mineruSaveMessage) && (
                       <div
-                        className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
-                          yoloMessageType === 'success'
-                            ? 'bg-green-50/70 border border-green-100 text-green-700'
-                            : yoloMessageType === 'error'
-                              ? 'bg-red-50/70 border border-red-100 text-red-700'
-                              : 'bg-blue-50/70 border border-blue-100 text-blue-700'
+                        className={`mt-3 flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
+                          mineruValidateStatus === 'success' || mineruSaveMessage === '配置已保存'
+                            ? 'bg-green-50/60 border border-green-100 text-green-700'
+                            : mineruValidating
+                              ? 'bg-gray-50 border border-gray-100 text-gray-600'
+                              : 'bg-red-50/60 border border-red-100 text-red-700'
                         }`}
                       >
-                        {yoloMessageType === 'success' ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0" />
-                        ) : yoloMessageType === 'error' ? (
-                          <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
-                        ) : (
+                        {mineruValidating ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                        ) : mineruValidateStatus === 'success' || mineruSaveMessage === '配置已保存' ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0" />
+                        ) : (
+                          <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
                         )}
-                        <span>{yoloMessage}</span>
+                        <span>{mineruValidateMessage || mineruSaveMessage}</span>
+                      </div>
+                    )}
+
+                    <div className="mt-4 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleMineruValidate}
+                        disabled={mineruValidating || mineruSaving || !mineruCanTest}
+                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] hover:bg-[#ed8c68]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                      >
+                        {mineruValidating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wifi className="w-3.5 h-3.5" />}
+                        {mineruValidating ? '测试中' : '测试连接'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleMineruSave}
+                        disabled={mineruSaving || mineruValidating || !mineruCanTest}
+                        className="flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-xl border border-green-200 bg-green-50/60 text-green-700 hover:bg-green-100/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                      >
+                        {mineruSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                        保存
+                      </button>
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {parseRoute === 'local' && (
+                <section className="space-y-4" aria-labelledby="local-ocr-heading">
+                  <div className="settings-card bg-white p-5 border border-gray-200/90">
+                    <div className="mb-4">
+                      <div id="local-ocr-heading" className="text-sm font-semibold text-gray-800">扫描页补字</div>
+                      <p className="text-[11px] leading-5 text-gray-500 mt-1">
+                        只给本地解析补识别，不是另一条上传路线。默认自动即可。
+                      </p>
+                    </div>
+
+                    <div className="mb-4">
+                      <SettingsSegmentedControl
+                        ariaLabel="扫描页补字时机"
+                        value={mode}
+                        onChange={handleModeChange}
+                        options={OCR_MODES.map((option) => ({
+                          value: option.value,
+                          label: option.label,
+                        }))}
+                        buttonClassName="px-3 py-2 text-xs font-medium text-center rounded-[10px]"
+                      />
+                      <p className="text-[11px] text-gray-400 mt-2">
+                        {OCR_MODES.find((option) => option.value === mode)?.description}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                      <span className="text-xs font-medium text-gray-600">本地引擎</span>
+                      <span className={`text-[11px] ${localOcrAvailable ? 'text-green-700' : 'text-gray-500'}`}>
+                        {loading
+                          ? '正在检查'
+                          : localOcrAvailable
+                            ? `可用${recommendedLocalBackend ? ` · 推荐 ${recommendedLocalBackend}` : ''}`
+                            : '未就绪'}
+                      </span>
+                    </div>
+
+                    <div className="space-y-2">
+                      {BACKEND_OPTIONS.map((option) => {
+                        const isActive = backend === option.value
+                        const localProviderUnavailable =
+                          ['tesseract', 'paddleocr'].includes(option.value) &&
+                          ocrStatus?.backends?.[option.value] === false
+                        const disabled = Boolean(option.deprecatedForPageOcr || localProviderUnavailable)
+                        const reason = option.value !== 'auto' ? ocrStatus?.diagnostics?.[option.value]?.reason : ''
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            disabled={disabled}
+                            onClick={() => !disabled && handleBackendChange(option.value)}
+                            className={`w-full flex items-start gap-3 px-3 py-2.5 rounded-xl border text-left transition-all ${
+                              isActive
+                                ? 'border-[#ed8c68]/30 bg-[#ed8c68]/5'
+                                : disabled
+                                  ? 'border-gray-100 bg-gray-50 cursor-not-allowed opacity-70'
+                                  : 'border-gray-100 hover:border-[#ed8c68]/30 hover:bg-[#fffbf9]'
+                            }`}
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className={`text-sm font-medium ${isActive ? 'text-[#ed8c68]' : 'text-gray-700'}`}>
+                                {option.label}
+                              </div>
+                              <div className="text-[11px] text-gray-400 mt-0.5">
+                                {reason || option.description}
+                              </div>
+                            </div>
+                            {isActive && <CheckCircle2 className="w-4 h-4 text-[#ed8c68] mt-0.5 shrink-0" />}
+                          </button>
+                        )
+                      })}
+                    </div>
+
+                    {ocrStatus?.poppler_available === false && (
+                      <div className="mt-3 text-[11px] leading-5 text-amber-700 bg-amber-50/80 border border-amber-100 rounded-xl px-3 py-2">
+                        还缺 Poppler，PDF 无法转成图片，本地补字不能工作。
                       </div>
                     )}
                   </div>
-                </div>
-              </div>
-              </motion.div>
-              )}
-              </AnimatePresence>
 
-              <AnimatePresence mode="wait">
-              {activePanelTab === 'advanced' && (
-              <motion.div
-                key="tab-advanced-diagnostics"
-                className="space-y-5"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                transition={{ duration: 0.18, ease: 'easeOut' }}
-              >
-              {/* Poppler 不可用时的安装指引 */}
-              {ocrStatus && !ocrStatus.poppler_available && (
-                <div className="settings-card bg-white p-5 border border-gray-200/90">
-                  <div className="flex items-start gap-3">
-                    <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
-                    <div>
-                      <div className="text-sm font-semibold text-amber-800">
-                        Poppler 未安装
-                      </div>
-                      <div className="text-xs text-amber-700 mt-1 leading-relaxed">
-                        Poppler 用于将 PDF 页面转换为图像以进行 OCR
-                        处理。未安装时 OCR 功能将不可用。
-                      </div>
-                      {ocrStatus.install_instructions && (
-                        <div className="mt-3 space-y-1.5">
-                          {Object.entries(ocrStatus.install_instructions).map(
-                            ([platform, instruction]) => (
-                              <div
-                                key={platform}
-                                className="text-xs bg-amber-50 border border-amber-100 rounded-lg px-3 py-2"
-                              >
-                                <span className="font-medium text-amber-800">
-                                  {platform}：
-                                </span>
-                                <code className="text-amber-700 ml-1">
-                                  {instruction}
-                                </code>
-                              </div>
-                            )
+                  {ocrStatus && showLocalOcrInstallGuide && (
+                    <div className="settings-card bg-white p-5 border border-gray-200/90">
+                      <div className="flex items-start gap-3">
+                        <AlertTriangle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+                        <div>
+                          <div className="text-sm font-semibold text-gray-800">本机还不能补字</div>
+                          <p className="text-xs text-gray-500 mt-1 leading-relaxed">
+                            需要 Tesseract 或 PaddleOCR。走 MinerU 深度解析则不必安装。
+                          </p>
+                          {ocrStatus.install_instructions && (
+                            <div className="mt-3 space-y-1.5">
+                              {Object.entries(ocrStatus.install_instructions).map(([key, instruction]) => (
+                                <div key={key} className="text-xs bg-gray-50 border border-gray-100 rounded-lg px-3 py-2">
+                                  <span className="font-medium text-gray-700">{key}：</span>
+                                  <code className="text-gray-600 ml-1 break-all">{instruction}</code>
+                                </div>
+                              ))}
+                            </div>
                           )}
                         </div>
-                      )}
+                      </div>
                     </div>
-                  </div>
-                </div>
+                  )}
+                </section>
               )}
 
-              {/* OCR 后端不可用时的安装指引 */}
-              {ocrStatus && !ocrStatus.available && (
-                <div className="settings-card bg-white p-5 border border-gray-200/90">
-                  <div className="flex items-start gap-3">
-                    <AlertTriangle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
-                    <div>
-                      <div className="text-sm font-semibold text-red-800">
-                        无可用 OCR 引擎
-                      </div>
-                      <div className="text-xs text-red-700 mt-1 leading-relaxed">
-                        未检测到任何可用的 OCR 后端。请安装 Tesseract 或
-                        PaddleOCR 以启用 OCR 功能。
-                      </div>
-                      {ocrStatus.install_instructions && (
-                        <div className="mt-3 space-y-1.5">
-                          {Object.entries(ocrStatus.install_instructions).map(
-                            ([key, instruction]) => (
-                              <div
-                                key={key}
-                                className="text-xs bg-red-50 border border-red-100 rounded-lg px-3 py-2"
-                              >
-                                <span className="font-medium text-red-800">
-                                  {key}：
-                                </span>
-                                <code className="text-red-700 ml-1">
-                                  {instruction}
-                                </code>
-                              </div>
-                            )
-                          )}
+              <section className="settings-card bg-white border border-gray-200/90 overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setMoreOpen(!moreOpen)}
+                  className="w-full flex items-center gap-2 px-5 py-4 text-left"
+                  aria-expanded={moreOpen}
+                >
+                  <SlidersHorizontal className="w-4 h-4 text-gray-400" />
+                  <span className="flex-1">
+                    <span className="block text-sm font-semibold text-gray-800">图表兜底</span>
+                    <span className="block text-[11px] text-gray-400 mt-0.5">可选。主解析没定位到图时，才用本地模型裁切</span>
+                  </span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full border ${
+                    yoloReady
+                      ? 'bg-green-50 border-green-100 text-green-700'
+                      : yoloDependencyMissing
+                        ? 'bg-red-50 border-red-100 text-red-700'
+                        : 'bg-gray-50 border-gray-200 text-gray-500'
+                  }`}>
+                    {yoloStatusLabel}
+                  </span>
+                  <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${moreOpen ? 'rotate-180' : ''}`} />
+                </button>
+
+                <AnimatePresence initial={false}>
+                  {moreOpen && (
+                    <motion.div
+                      key="figure-fallback"
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.2, ease: 'easeInOut' }}
+                      style={{ overflow: 'hidden' }}
+                    >
+                      <div className="px-5 pb-5 space-y-3">
+                        <div className="rounded-[12px] border border-[#eadfd9] bg-[#faf7f5] px-4 py-3">
+                          <p className="text-[11px] leading-5 text-gray-500">
+                            MinerU 文档优先用结构化图表，本地文档优先用 PDF 原生结构。DocLayout-YOLO 只负责定位和裁切。
+                          </p>
                         </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-              </motion.div>
-              )}
-              </AnimatePresence>
+
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-xs font-medium text-gray-700">本地图表定位模型</span>
+                          <button
+                            type="button"
+                            onClick={fetchYoloStatus}
+                            disabled={yoloBusy}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium rounded-lg border border-gray-200 bg-white text-gray-600 hover:bg-gray-100 disabled:opacity-40"
+                          >
+                            <RefreshCw className={`w-3 h-3 ${yoloBusy ? 'animate-spin' : ''}`} />
+                            刷新
+                          </button>
+                        </div>
+
+                        {yoloStatus?.model_path && (
+                          <div className="rounded-lg bg-gray-50 border border-gray-100 px-3 py-2">
+                            <div className="text-[10px] text-gray-400 mb-1">当前权重</div>
+                            <div className="font-mono text-[11px] text-gray-600 break-all">{yoloStatus.model_path}</div>
+                          </div>
+                        )}
+
+                        {yoloDependencyMissing && (
+                          <div className="flex items-start gap-2 px-3 py-2 rounded-xl bg-red-50/70 border border-red-100 text-xs text-red-700">
+                            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                            <span>当前后端缺少 YOLO 运行依赖。桌面完整包会保留运行库，权重需在软件内下载或指定。</span>
+                          </div>
+                        )}
+
+                        <div className="space-y-2">
+                          <label className="block text-[11px] font-medium text-gray-500">下载到目录</label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={yoloInstallDir}
+                              onChange={(e) => setYoloInstallDir(e.target.value)}
+                              placeholder={yoloStatus?.default_install_dir || '默认用户数据目录'}
+                              className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:border-[#ed8c68]/50"
+                            />
+                            {typeof window !== 'undefined' && window.chatpdfDesktop?.selectDirectory && (
+                              <button
+                                type="button"
+                                onClick={handleSelectYoloInstallDir}
+                                disabled={yoloBusy}
+                                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-gray-200 bg-white text-gray-600 hover:bg-gray-100 disabled:opacity-40"
+                              >
+                                <FolderOpen className="w-3.5 h-3.5" />
+                                选择
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={handleDownloadYoloModel}
+                              disabled={yoloBusy}
+                              className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-[#ed8c68]/30 bg-[#ed8c68]/5 text-[#ed8c68] hover:bg-[#ed8c68]/10 disabled:opacity-40"
+                            >
+                              {yoloBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                              下载
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="block text-[11px] font-medium text-gray-500">指定已有权重</label>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={yoloModelPath}
+                              onChange={(e) => setYoloModelPath(e.target.value)}
+                              placeholder="选择或输入 doclayout_yolo_*.pt 路径"
+                              className="flex-1 min-w-0 px-3 py-2 rounded-xl border border-gray-200 bg-white text-xs text-gray-700 focus:outline-none focus:border-[#ed8c68]/50"
+                            />
+                            {typeof window !== 'undefined' && window.chatpdfDesktop?.selectFile && (
+                              <button
+                                type="button"
+                                onClick={handleSelectYoloModelFile}
+                                disabled={yoloBusy}
+                                className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-gray-200 bg-white text-gray-600 hover:bg-gray-100 disabled:opacity-40"
+                              >
+                                <FolderOpen className="w-3.5 h-3.5" />
+                                选择
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={handleSaveYoloModelPath}
+                              disabled={yoloBusy || !yoloModelPath.trim()}
+                              className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border border-green-200 bg-green-50/60 text-green-700 hover:bg-green-100/60 disabled:opacity-40"
+                            >
+                              <Save className="w-3.5 h-3.5" />
+                              保存
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-[11px] text-gray-400">
+                            默认目录：{yoloStatus?.default_install_dir || '读取中'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleResetYoloModelPath}
+                            disabled={yoloBusy}
+                            className="text-[11px] text-gray-500 hover:text-gray-700 disabled:opacity-40"
+                          >
+                            恢复默认
+                          </button>
+                        </div>
+
+                        {yoloMessage && (
+                          <div
+                            className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
+                              yoloMessageType === 'success'
+                                ? 'bg-green-50/70 border border-green-100 text-green-700'
+                                : yoloMessageType === 'error'
+                                  ? 'bg-red-50/70 border border-red-100 text-red-700'
+                                  : 'bg-[#ed8c68]/10 border border-[#ed8c68]/15 text-[#b85f47]'
+                            }`}
+                          >
+                            {yoloMessageType === 'success' ? (
+                              <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0" />
+                            ) : yoloMessageType === 'error' ? (
+                              <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                            ) : (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                            )}
+                            <span>{yoloMessage}</span>
+                          </div>
+                        )}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </section>
             </div>
 
-            {/* 底部状态栏 */}
             <div className="settings-chrome px-6 py-3 border-t border-gray-200 flex items-center justify-between">
               <div className="text-xs text-gray-400">
-                设置已自动保存到本地
+                {parseRoute === 'local' ? '扫描页补字已保存到本机' : '连接信息保存在后端，路线选择保存在本机'}
               </div>
-              <div className="text-xs text-gray-400">
-                {activePanelTab === 'basic' && (
-                  <>上传路线：<span className="font-medium text-gray-600">{parseRoute === 'local' ? '本地解析' : 'MinerU 深度解析'}</span></>
-                )}
-                {activePanelTab === 'services' && (
-                  <>MinerU：<span className="font-medium text-gray-600">{mineruConfigured ? '已配置' : '待配置'}</span></>
-                )}
-                {activePanelTab === 'advanced' && (
-                  <>
-                    本地 OCR：<span className="font-medium text-gray-600">{OCR_MODES.find((m) => m.value === mode)?.label || mode}</span>
-                    {' · '}
-                    <span className="font-medium text-gray-600">{BACKEND_OPTIONS.find((b) => b.value === backend)?.label || backend}</span>
-                  </>
-                )}
+              <div className="text-xs font-medium text-gray-600">
+                {parseSettingsStatusText({
+                  parseRoute,
+                  mineruConfigured,
+                  ocrModeLabel: OCR_MODES.find((item) => item.value === mode)?.label,
+                  ocrBackendLabel: BACKEND_OPTIONS.find((item) => item.value === backend)?.label,
+                })}
               </div>
             </div>
           </motion.div>

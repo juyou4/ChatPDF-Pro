@@ -45,6 +45,14 @@ class MemoryGraphRebuild(BaseModel):
     api_provider: str
 
 
+class MemoryEmbeddingPrepare(BaseModel):
+    """预热记忆向量快照；凭证只用于本次后台构建，不会持久化。"""
+    embedding_api_key: str = ""
+    embedding_model: str
+    embedding_provider: str
+    embedding_api_host: str = ""
+
+
 class MemoryEntryResponse(BaseModel):
     """记忆条目响应模型"""
     id: str
@@ -78,6 +86,14 @@ class MemoryStatusResponse(BaseModel):
     index_version: int = 1
     pending_sync: bool = False
     stored_embedding_model: str = ""
+    embedding_provider: str = ""
+    embedding_api_host: str = ""
+    vector_index_state: str = "idle"
+    vector_index_size: int = 0
+    vector_search_enabled: bool = True
+    vector_disabled_reason: str = ""
+    lexical_index_size: int = 0
+    retrieval_mode: str = "hybrid"
     rebuild_required: bool = False
     rebuild_reason: str = ""
     llm_calls_per_turn: int = 3
@@ -231,6 +247,21 @@ async def get_status():
     """获取记忆系统状态"""
     svc = _get_service()
     return svc.get_status()
+
+
+@router.post("/embedding/prepare")
+async def prepare_embedding(body: MemoryEmbeddingPrepare):
+    """Bind the selected embedding identity and start a non-blocking rebuild."""
+    svc = _get_service()
+    try:
+        return svc.prepare_embedding_index(
+            embedding_api_key=body.embedding_api_key,
+            embedding_model=body.embedding_model,
+            embedding_provider=body.embedding_provider,
+            embedding_api_host=body.embedding_api_host,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/entries", response_model=MemoryEntryResponse)

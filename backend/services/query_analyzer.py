@@ -5,6 +5,7 @@ import re
 from typing import Literal, Optional
 
 from services.block_inventory_service import detect_inventory_kind
+from services.paper_section_router import is_figure_identity_query, is_structure_map_query
 
 QueryType = Literal['overview', 'extraction', 'analytical', 'specific', 'inventory']
 EvidenceNeed = Literal[
@@ -14,6 +15,7 @@ EvidenceNeed = Literal[
     'reference_meta',
     'comparison_multi_aspect',
     'analysis_explanation',
+    'figure_caption',
 ]
 
 
@@ -405,7 +407,11 @@ def extract_hl_ll_terms(
     if "comparison_multi_aspect" in evidence_need:
         preferred.extend(["compare", "comparison", "difference", "vs", "对比", "比较", "差异"])
     if "section_explanation" in evidence_need:
-        preferred.extend(["method", "design", "implementation", "section", "方法", "设计", "实现", "细节"])
+        preferred.extend([
+            "method", "design", "implementation", "section", "contribution",
+            "limitation", "dataset", "方法", "设计", "实现", "细节",
+            "贡献", "结论", "局限", "数据集", "相关工作",
+        ])
     if "analysis_explanation" in evidence_need:
         preferred.extend(["reason", "cause", "analysis", "comparison", "原因", "分析", "比较"])
 
@@ -464,7 +470,12 @@ def is_section_explanation_query(query: str) -> bool:
 def is_overview_query(query: str) -> bool:
     if not query:
         return False
-    if is_section_explanation_query(query):
+    if (
+        is_section_explanation_query(query)
+        or is_paper_facet_identity_query(query)
+        or is_figure_identity_query(query)
+        or is_structure_map_query(query)
+    ):
         return False
     query_lower = query.lower()
     if re.search(
@@ -609,6 +620,82 @@ _MECHANISM_TEMPLATE_RE = re.compile(
 )
 
 
+_METHOD_IDENTITY_ZH_RE = re.compile(
+    r"(?:核心方法|研究方法|本文方法|所用方法|提出的方法|"
+    r"(?:使用|采用|用了)了?什么(?:研究)?方法|"
+    r"方法(?:是什么|有哪些|是怎样))"
+)
+_METHOD_IDENTITY_EN_RE = re.compile(
+    r"(?:what\s+(?:is|are|was)\s+(?:the\s+)?(?:core|main|proposed|overall)?\s*"
+    r"(?:method|approach|methodology)|"
+    r"what\s+(?:method|approach|methodology)\s+(?:does|did|is)\b)",
+    re.IGNORECASE,
+)
+_METHOD_IDENTITY_BLOCK_RE = re.compile(
+    r"(?:表\s*\d+|table\s*\d+|准确率|f1\b|多少|highest|lowest|best\s+result)",
+    re.IGNORECASE,
+)
+
+
+def is_method_identity_query(query: str) -> bool:
+    """识别“核心方法/研究方法是什么”这类需要读方法节正文的身份问句。
+
+    有意比机制解释更窄：不把「表 4 里的模型是什么」或指标抽取收进来。
+    """
+    if not query:
+        return False
+    if _METHOD_IDENTITY_BLOCK_RE.search(query):
+        return False
+    if is_overview_query(query):
+        return False
+    return bool(
+        _METHOD_IDENTITY_ZH_RE.search(query)
+        or _METHOD_IDENTITY_EN_RE.search(query)
+    )
+
+
+_FACET_IDENTITY_BLOCK_RE = re.compile(
+    r"(?:表\s*\d+|table\s*\d+|准确率|f1\b|多少|highest|lowest|best\s+result|"
+    r"how\s+(?:much|many)|分别是多少|提升多少)",
+    re.IGNORECASE,
+)
+_FACET_IDENTITY_RE = re.compile(
+    r"(?:"
+    r"(?:主要|核心|关键)(?:贡献|创新点|贡献点)|贡献(?:是什么|有哪些|有什么)|"
+    r"(?:有哪些|有什么)(?:主要|核心|关键)?(?:贡献|创新点|贡献点|结论|发现|局限|不足)|"
+    r"(?:主要|实验)结论|结论是什么|(?:主要)?发现是什么|"
+    r"(?:局限性|不足之处|主要缺陷)|局限(?:性|之处)?(?:是什么|有哪些|在哪)|"
+    r"不足(?:之处)?(?:是什么|有哪些)|"
+    r"(?:实验设置|实验设计|实验配置|实现细节)|"
+    r"(?:用了?(?:哪些|什么)数据集|数据集是什么|使用了?什么数据)|"
+    r"(?:相关工作|related\s+works?)(?:部分|章节|section)?\s*"
+    r"(?:讲了?什么|介绍|总结|概述|discuss|cover|review|say)|"
+    r"(?:要解决什么问题|解决了什么问题|研究动机)|"
+    r"(?:网络结构|模型结构|整体架构)\s*(?:是什么|是怎样|如何)|"
+    r"(?:实验结果|实验发现)\s*(?:是什么|有哪些|如何|怎么样)|"
+    r"experimental\s+setup|implementation\s+details?|"
+    r"what\s+(?:datasets?|data)\s+(?:does|did|is|are)\b|"
+    r"which\s+datasets?\b|"
+    r"what\s+(?:problem|motivation)\b|"
+    r"what\s+(?:are|is)\s+(?:the\s+)?(?:main\s+|key\s+|core\s+)?"
+    r"(?:contributions?|limitations?|conclusions?|findings?|results)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_paper_facet_identity_query(query: str) -> bool:
+    """识别贡献/结论/局限/设置/数据集/相关工作等需要读对应节正文的身份问句。
+
+    与 ``is_method_identity_query`` 并列：不收表格数值，也不把整篇概览收进来。
+    """
+    if not query:
+        return False
+    if _FACET_IDENTITY_BLOCK_RE.search(query):
+        return False
+    return bool(_FACET_IDENTITY_RE.search(query))
+
+
 def is_mechanism_explanation_query(query: str) -> bool:
     """识别论文方法机制类解释问题，用于触发 Agent 多轮取证。
 
@@ -663,7 +750,7 @@ def is_analysis_explanation_query(query: str) -> bool:
         '为什么', '原因', '成因', '理由', '根本不同', '本质区别',
         '相比', '比较', '对比', '区别', '差异', '如何分析', '影响最大',
         'why', 'because', 'reason', 'compare', 'comparison', 'difference',
-        'versus', 'vs', 'ablation',
+        'versus', 'vs', 'ablation', '消融',
         'reasons', 'compared', 'comparisons', 'differences', 'ablations',
     ]
     # 通用学术论文范围词（不绑定特定论文/领域）
@@ -815,8 +902,12 @@ def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
     # 只把 numeric 的**计算**提前；下游有按 evidence_need 顺序取首项的消费者。
     if (
         not table_first
-        and not is_overview_query(query)
-        and (is_section_explanation_query(query) or is_mechanism_explanation_query(query))
+        and (
+            is_section_explanation_query(query)
+            or is_mechanism_explanation_query(query)
+            or is_method_identity_query(query)
+            or is_paper_facet_identity_query(query)
+        )
     ):
         evidence_need.append('section_explanation')
 
@@ -825,6 +916,9 @@ def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
 
     if numeric_table_hit:
         evidence_need.append('numeric_table')
+
+    if is_figure_identity_query(query) and not numeric_table_hit:
+        evidence_need.append('figure_caption')
 
     reference_trap_patterns = [
         '参考文献', 'references', 'bibliography', 'citation', 'cite',
@@ -898,7 +992,14 @@ def analyze_query_type(query: str) -> QueryType:
     if is_overview_query(query):
         return 'overview'
 
-    if 'section_explanation' in evidence_need or 'analysis_explanation' in evidence_need:
+    if is_structure_map_query(query):
+        return 'analytical'
+
+    if (
+        'section_explanation' in evidence_need
+        or 'analysis_explanation' in evidence_need
+        or 'figure_caption' in evidence_need
+    ):
         return 'analytical'
 
     if 'numeric_table' in evidence_need:
@@ -972,6 +1073,7 @@ def get_dynamic_top_k(
     if query_type == 'analytical' and (
         'section_explanation' in evidence_need
         or 'analysis_explanation' in evidence_need
+        or 'figure_caption' in evidence_need
     ):
         return 16
     

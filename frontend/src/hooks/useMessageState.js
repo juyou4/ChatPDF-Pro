@@ -9,6 +9,11 @@ import {
 import { buildChatHistory, isFailedChatHistoryAssistant } from '../utils/chatContextUsageUtils';
 import { normalizeChatVisualAttachments } from '../utils/visualAttachmentUtils';
 import { requiresPreservedReasoning } from '../services/reasoningEffortService';
+import {
+  cloneAgentTrace,
+  publishLiveAgentTrace,
+  shouldCommitAgentTrace,
+} from '../utils/agentTraceLive';
 
 // API base URL
 // Web 开发模式下绕过 Vite /chat 代理，避免 SSE 被 dev proxy 缓冲后“最后一股脑显示”。
@@ -42,6 +47,22 @@ const RETRY_CONTROL_INPUTS = new Set([
   '继续', '重新回答', '重新生成', '重答', '再回答一次', '再答一次',
   '请重新回答', '请重答', 'continue', 'retry', 'tryagain', 'regenerate',
 ]);
+
+/**
+ * 正文开始后每个 token 都会走到这里。状态没变就交回原对象，
+ * 避免 setMessages 每字换一条新消息把整列重绘一遍。
+ */
+export function applyAnswerStartedFlags(message, { generating = false, hasVisibleAnswer = false } = {}) {
+  const answerGenerating = Boolean(generating) && !hasVisibleAnswer;
+  if (message?.answerStarted === true && message?.answerGenerating === answerGenerating) {
+    return message;
+  }
+  return {
+    ...message,
+    answerStarted: true,
+    answerGenerating,
+  };
+}
 const CHAT_INTERACTION_MODES = new Set([
   'default', 'selection', 'image', 'preset', 'retry_failed_turn',
 ]);
@@ -261,12 +282,23 @@ const STREAM_RENDER_PROFILES = {
   slow: { minDelay: 48, frameChars: 1, flushChars: 2 },
 };
 
-// 终态包可能携带一整段正文。仅当平滑队列连续一段时间没有任何渲染进展时
-// 才退回一次性提交；前台逐字动画会持续排空，不能被固定总时长打断。
-export const STREAM_FINAL_FLUSH_GRACE_MS = 3000;
+// 思考区使用连续但不过快的独立节奏。大块 reasoning 仍由 useSmoothStream
+// 自适应追赶，小分片则保留肉眼可见的逐步输出，避免 64 字/帧造成整段跳显。
+const THINKING_STREAM_RENDER_PROFILE = {
+  minDelay: 24,
+  frameChars: 2,
+  flushChars: 4,
+};
+
+// 终态包可能携带一整段正文。仅当平滑队列短时间没有任何渲染进展时
+// 才退回一次性提交；500ms 足够覆盖正常绘制，也不会在后台标签页 / rAF
+// 暂停时留下一个肉眼明显的空白等待。
+export const STREAM_FINAL_FLUSH_GRACE_MS = 500;
 
 export const resolveStreamRenderProfile = (streamSpeed = 'normal') =>
   STREAM_RENDER_PROFILES[streamSpeed] || STREAM_RENDER_PROFILES.normal;
+
+export const resolveThinkingStreamProfile = () => THINKING_STREAM_RENDER_PROFILE;
 
 // 这些 phase 由 AgentTracePanel 作为唯一展示入口。把它们同时写入
 // thinking 文本会让同一条 SSE 进度在思考区和工具时间线各出现一次。
@@ -371,7 +403,7 @@ export const formatThinkingStageEvent = (payload, options = {}) => {
     const message = payload.phase === 'complete'
       ? '检索完成，正在整理上下文...'
       : rawMessage;
-    const stablePhaseKey = ['llm_waiting', 'llm_structuring_citations', 'answer_generating'].includes(payload.phase)
+    const stablePhaseKey = ['llm_waiting', 'llm_answer_waiting', 'llm_structuring_citations', 'answer_generating'].includes(payload.phase)
       ? `retrieval:${payload.phase}`
       : null;
     const keyParts = [payload.phase, payload.round, payload.step, message]
@@ -384,6 +416,65 @@ export const formatThinkingStageEvent = (payload, options = {}) => {
   }
 
   return null;
+};
+
+export const upsertRetrievalProgressEntry = (entries, stage, limit = 32) => {
+  if (!stage?.text) return Array.isArray(entries) ? entries : [];
+  const current = Array.isArray(entries) ? entries : [];
+  const key = String(stage.key || stage.text);
+  const nextEntry = {
+    key,
+    text: String(stage.text).trim(),
+    phase: String(stage.phase || ''),
+  };
+  const previousEntry = current.find((entry) => entry.key === key);
+  if (
+    previousEntry
+    && previousEntry.text === nextEntry.text
+    && previousEntry.phase === nextEntry.phase
+  ) return current;
+  return [
+    ...current.filter((entry) => entry.key !== key),
+    nextEntry,
+  ].slice(-Math.max(1, Number(limit) || 32));
+};
+
+const extractSseReasoningText = (payload, delta) => {
+  const candidates = [
+    delta?.reasoning_content,
+    delta?.reasoning,
+    delta?.reasoning_text,
+    payload?.reasoning_content,
+    payload?.reasoning,
+    payload?.reasoning_text,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate) return candidate;
+    if (candidate && typeof candidate === 'object') {
+      const text = candidate.text || candidate.content || candidate.thinking || '';
+      if (typeof text === 'string' && text) return text;
+    }
+  }
+  return '';
+};
+
+const extractSseVisibleContent = (payload, delta) => {
+  const raw = delta?.content || payload?.content || '';
+  if (typeof raw === 'string') return raw;
+  if (!Array.isArray(raw)) {
+    if (raw && typeof raw === 'object') {
+      return String(raw.text || raw.content || '');
+    }
+    return '';
+  }
+  return raw.map((part) => {
+    if (typeof part === 'string') return part;
+    const partType = String(part?.type || '').toLowerCase();
+    if (['thinking', 'reasoning', 'reasoning_text', 'thought'].includes(partType)) {
+      return '';
+    }
+    return String(part?.text || part?.content || '');
+  }).join('');
 };
 
 export { buildChatHistory } from '../utils/chatContextUsageUtils';
@@ -781,6 +872,7 @@ export const applyAgentTraceEvent = (trace, payload) => {
     entry.operations.push({
       tool: payload.tool || '',
       message: payload.message || '',
+      query: payload.query || '',
       status: 'executing',
     });
     return trace;
@@ -799,6 +891,7 @@ export const applyAgentTraceEvent = (trace, payload) => {
         op.elapsedMs = Number.isFinite(Number(payload.elapsed_ms))
           ? Number(payload.elapsed_ms)
           : (op.elapsedMs ?? null);
+        if (payload.query) op.query = payload.query;
         op.status = 'done';
         matched = true;
         break;
@@ -808,6 +901,7 @@ export const applyAgentTraceEvent = (trace, payload) => {
       entry.operations.push({
         tool: payload.tool || '',
         message: '',
+        query: payload.query || '',
         resultMessage: payload.message || '',
         resultCount: Number.isFinite(Number(payload.result_count))
           ? Number(payload.result_count)
@@ -1102,11 +1196,12 @@ export function useMessageState({
     paragraphPauseMs: 180,
   });
 
+  const thinkingStreamProfile = resolveThinkingStreamProfile();
   const thinkingStream = useSmoothStream({
     streamDone: thinkingStreamDone,
-    minDelay: streamRenderProfile.minDelay,
-    frameChars: streamRenderProfile.frameChars,
-    flushChars: streamRenderProfile.flushChars,
+    minDelay: thinkingStreamProfile.minDelay,
+    frameChars: thinkingStreamProfile.frameChars,
+    flushChars: thinkingStreamProfile.flushChars,
     smoothFlush: true,
   });
 
@@ -1657,6 +1752,8 @@ export function useMessageState({
         let currentRetrievalProgress = [];
         let hasRealThinking = false;
         let hasPublishedRealThinking = false;
+        let thinkingStreamFinalized = false;
+        let lastThinkingPublishAt = 0;
         let lastThinkingStageKey = null;
         let pendingReasoningRoleLabel = '';
         let thinkingStartTime = null;
@@ -1682,22 +1779,24 @@ export function useMessageState({
 
         const appendRetrievalProgress = (stage) => {
           if (!stage?.text || !isRequestCurrent()) return;
-          const key = String(stage.key || stage.text);
-          if (currentRetrievalProgress.some((entry) => entry.key === key)) return;
-
-          currentRetrievalProgress = [
-            ...currentRetrievalProgress,
-            {
-              key,
-              text: String(stage.text).trim(),
-              phase: String(stage.phase || ''),
-            },
-          ].slice(-32);
+          // llm_waiting 等稳定阶段会持续收到心跳。更新并移到队尾，避免首个
+          // 状态占住 key 后吞掉后续“等待正文”等更准确的实时状态。
+          const nextProgress = upsertRetrievalProgressEntry(currentRetrievalProgress, stage);
+          if (nextProgress === currentRetrievalProgress) return;
+          currentRetrievalProgress = nextProgress;
           markThinkingActivity();
           setMessages(prev => prev.map(m => (
             m.id === tempMsgId
               ? { ...m, retrievalProgress: currentRetrievalProgress }
               : m
+          )));
+        };
+
+        const commitAgentTrace = () => {
+          if (!isRequestCurrent() || !streamAgentTraceRef.current?.enabled) return;
+          const liveTrace = cloneAgentTrace(streamAgentTraceRef.current);
+          setMessages(prev => prev.map(m => (
+            m.id === tempMsgId ? { ...m, agentTrace: liveTrace } : m
           )));
         };
 
@@ -1740,39 +1839,58 @@ export function useMessageState({
           markThinkingActivity();
           currentThinking += normalized.text;
           thinkingStream.addChunk(normalized.text);
-          // 流式阶段由 ref 增量写入 DOM；完整文本只在终态一次性同步到 React。
-          // 避免每个 reasoning token 都覆盖整段 DOM 并重渲染完整消息列表。
-          if (!hasPublishedRealThinking) {
+          // 流式阶段由 ref 增量写入 DOM；React 侧只需要知道“已经有真思考”，
+          // 以便 ThinkingBlock 立刻取消 hidden。正文内容仍走 ref，避免整列重绘。
+          const now = Date.now();
+          if (!hasPublishedRealThinking || now - lastThinkingPublishAt >= 80) {
             hasPublishedRealThinking = true;
+            lastThinkingPublishAt = now;
             setMessages(prev => prev.map(m =>
               m.id === tempMsgId
-                ? { ...m, thinking: currentThinking }
+                ? { ...m, thinking: currentThinking, thinkingLive: true }
                 : m
             ));
           }
           return true;
         };
 
-        const markAnswerStarted = ({ generating = false } = {}) => {
-          const now = Date.now();
-          if (!contentStartTime) contentStartTime = now;
-          const nextGenerating = Boolean(generating) && !String(currentText || '').trim();
-          // 思考结束后立刻结束思考 UI。结构化引文可能先隐藏 CITATION LIST，
-          // 若等到可见 FINAL ANSWER 才切换，会出现“思考完了却半天不出字”。
-          setMessages(prev => prev.map(m => (
-            m.id === tempMsgId
-              ? {
-                ...m,
-                answerStarted: true,
-                answerGenerating: nextGenerating,
-              }
-              : m
+        const finalizeThinkingStream = () => {
+          if (thinkingStreamFinalized) return;
+          thinkingStreamFinalized = true;
+          // 正文可以立即开始，但思考队列继续独立、平滑地排空。这里不能
+          // flushNow，否则上游最后一个大 reasoning chunk 会整段跳到屏幕上。
+          setThinkingStreamDone(true);
+          // appendRealThinking 为避免高频重绘会节流 React state。正文首字出现时
+          // 必须发布一次完整目标文本，让 ThinkingBlock 能精确判断字符队列何时
+          // 展示完毕，并在那个时刻自动收起，而不是用整条 SSE 结束来猜。
+          setMessages((prev) => prev.map((item) => (
+            item.id === tempMsgId
+              ? { ...item, thinking: currentThinking, thinkingLive: hasRealThinking }
+              : item
           )));
+        };
+
+        const markAnswerStarted = ({ generating = false } = {}) => {
+          if (!contentStartTime) contentStartTime = Date.now();
+          const hasVisibleAnswer = Boolean(String(currentText || '').trim());
+          // thinking_complete 与首个可见正文 token 共用这组状态，避免过程区、
+          // “正在生成回答”和正文三者在交接时互相覆盖。
+          setMessages((prev) => {
+            let changed = false;
+            const next = prev.map((item) => {
+              if (item.id !== tempMsgId) return item;
+              const updated = applyAnswerStartedFlags(item, { generating, hasVisibleAnswer });
+              if (updated !== item) changed = true;
+              return updated;
+            });
+            return changed ? next : prev;
+          });
         };
 
         const markThinkingComplete = (message = '') => {
           if (!isRequestCurrent()) return;
-          // 思考阶段结束：折叠为“已深度思考”，并进入“正在生成回答”过渡态。
+          // 后端完成事件可能先于同一模型 chunk 中的最后一段 reasoning 到达。
+          // 这里只切换 UI 过渡态；思考流由首个可见正文 token 原子关闭。
           if (message) {
             appendThinkingStage(message, 'model:thinking_complete');
           }
@@ -1781,12 +1899,14 @@ export function useMessageState({
 
         const appendAnswerContent = (text) => {
           if (!text || !isRequestCurrent()) return;
+          const hadVisibleAnswer = Boolean(String(currentText || '').trim());
           currentText += text;
           contentStream.addChunk(text);
           // 模型从 reasoning 切到正文时常先发换行。只有真正出现可见字符后
           // 才结束思考状态，避免“已深度思考”与首字之间出现空白等待。
           // 若后端已发 thinking_complete，这里清除 generating 过渡态。
           if (currentText.trim()) {
+            if (!hadVisibleAnswer) finalizeThinkingStream();
             markAnswerStarted({ generating: false });
           }
         };
@@ -1898,7 +2018,11 @@ export function useMessageState({
               if (!streamAgentTraceRef.current) {
                 streamAgentTraceRef.current = createInitialAgentTrace();
               }
+              const wasEnabled = Boolean(streamAgentTraceRef.current.enabled);
               applyAgentTraceEvent(streamAgentTraceRef.current, p);
+              if (streamAgentTraceRef.current.enabled) {
+                publishLiveAgentTrace(tempMsgId, streamAgentTraceRef.current);
+              }
               if (
                 p.phase === 'tool_result'
                 && String(p.tool || '').trim().toLowerCase() === 'web_search'
@@ -1916,30 +2040,18 @@ export function useMessageState({
               if (thinkingStageEvent) {
                 appendRetrievalProgress(thinkingStageEvent);
               }
-              // 思考已结束、正文可能仍在结构化引文阶段：立刻结束“思考中”UI。
-              if (
-                p.phase === 'answer_generating'
-                || p.phase === 'llm_structuring_citations'
-              ) {
+              // 只有首个可见正文已经开始生成时才结束思考。结构化引文阶段
+              // 仍可能只是在生成隐藏协议，不能提前制造“思考完成后的空档”。
+              if (p.phase === 'answer_generating') {
                 markThinkingComplete(
                   typeof p.message === 'string' && p.message.trim()
                     ? p.message.trim()
                     : '思考完成，正在生成回答...'
                 );
               }
-              // 实时把 trace 快照推给正在流式的消息，让检索轨迹面板边执行边更新。
-              // 传入新的顶层对象引用（并浅拷贝 rounds/operations）以触发 React 重渲染。
-              if (streamAgentTraceRef.current.enabled) {
-                const liveTrace = {
-                  ...streamAgentTraceRef.current,
-                  rounds: streamAgentTraceRef.current.rounds.map((r) => ({
-                    ...r,
-                    operations: [...(r.operations || [])],
-                  })),
-                };
-                setMessages(prev => prev.map(m =>
-                  m.id === tempMsgId ? { ...m, agentTrace: liveTrace } : m
-                ));
+              const justEnabled = agentTraceEnabled && !wasEnabled;
+              if (agentTraceEnabled && shouldCommitAgentTrace(p.phase, justEnabled)) {
+                commitAgentTrace();
               }
               return;
             }
@@ -2042,20 +2154,25 @@ export function useMessageState({
               return;
             }
             const delta = p.choices?.[0]?.delta || {};
-            const cc = delta.content || p.content || '';
-            const ct = delta.reasoning_content || p.reasoning_content || '';
+            const cc = extractSseVisibleContent(p, delta);
+            const ct = extractSseReasoningText(p, delta);
             if (!p.done && !p.choices?.[0]?.finish_reason) {
-              if (cc) {
-                appendAnswerContent(cc);
-              }
               if (ct) {
                 if (!appendRealThinking(ct)) {
                   appendThinkingStage('模型正在准备思考内容...', 'model:preparing_reasoning');
                 }
-              } else if (!cc) {
+              }
+              if (cc) {
+                appendAnswerContent(cc);
+              } else if (!ct) {
                 appendThinkingStage('正在等待模型输出思考内容...', 'model:waiting_reasoning');
               }
             } else {
+              if (ct) {
+                if (!appendRealThinking(ct)) {
+                  appendThinkingStage('模型正在准备思考内容...', 'model:preparing_reasoning');
+                }
+              }
               const finalContentFromEvent = typeof p.final_content === 'string' ? p.final_content : '';
               if (finalContentFromEvent.trim()) {
                 streamFinalContentRef.current = finalContentFromEvent;
@@ -2120,11 +2237,6 @@ export function useMessageState({
                       }
                       : m
                   )));
-                }
-              }
-              if (ct) {
-                if (!appendRealThinking(ct)) {
-                  appendThinkingStage('模型正在准备思考内容...', 'model:preparing_reasoning');
                 }
               }
               // ``done`` 表示主答案已完成；后端还会继续发送追问、会话名、
@@ -2198,9 +2310,10 @@ export function useMessageState({
           return;
         }
 
-        // 流结束，标记 streamDone 触发短暂的自适应冲刷。
+        // 流结束，标记正文 streamDone 触发短暂的自适应冲刷。思考流在
+        // 正文首个可见 token 到达时独立完成；异常终止则在此兜底。
         setContentStreamDone(true);
-        setThinkingStreamDone(true);
+        finalizeThinkingStream();
         const streamedContent = [streamFinalContentRef.current, currentText]
           .find((value) => typeof value === 'string' && value.trim())
           || '❌ AI未返回正文，请重新生成';
@@ -2226,19 +2339,28 @@ export function useMessageState({
           });
         });
 
-        // 在切换到最终 Markdown 渲染前，先让 ref 直写队列排空。模型若只在
-        // 终态事件给出整段正文，也会按段落与字符逐步显现。只有队列连续无进展
-        // 时才强制收尾，避免后台标签页/异常 rAF 让消息永久停在流式状态。
+        // 在切换到最终 Markdown 渲染前，让正文与思考两个 ref 直写队列都排空。
+        // 两者并行推进，不阻塞正文首 token；只有队列连续无进展时才强制收尾，
+        // 避免后台标签页或异常 rAF 让消息永久停在流式状态。
         {
-          const getPendingStreamChars = () => (
-            Math.max(0, Number(contentStream.getPendingChars?.()) || 0)
-            + Math.max(0, Number(thinkingStream.getPendingChars?.()) || 0)
+          const drainTargets = [
+            { stream: contentStream, finalText: streamedContent },
+            ...(currentThinking
+              ? [{ stream: thinkingStream, finalText: currentThinking }]
+              : []),
+          ];
+          const allStreamsFlushed = () => drainTargets.every(
+            ({ stream }) => stream.isFlushComplete?.() !== false
+          );
+          const getPendingStreamChars = () => drainTargets.reduce(
+            (total, { stream }) => total + Math.max(0, Number(stream.getPendingChars?.()) || 0),
+            0
           );
           let previousPendingChars = getPendingStreamChars();
           let lastProgressAt = Date.now();
           while (
             isRequestCurrent() &&
-            (!contentStream.isFlushComplete() || !thinkingStream.isFlushComplete())
+            !allStreamsFlushed()
           ) {
             await waitForNextPaint();
             const pendingChars = getPendingStreamChars();
@@ -2248,21 +2370,17 @@ export function useMessageState({
             previousPendingChars = pendingChars;
             if (Date.now() - lastProgressAt >= STREAM_FINAL_FLUSH_GRACE_MS) break;
           }
+          drainTargets.forEach(({ stream, finalText }) => {
+            if (stream.isFlushComplete?.() === false) {
+              stream.flushNow?.(finalText);
+            }
+          });
         }
         if (!isRequestCurrent()) return;
-        if (!contentStream.isFlushComplete()) {
-          contentStream.flushNow?.(streamedContent);
-        }
-        if (!thinkingStream.isFlushComplete()) {
-          thinkingStream.flushNow?.(currentThinking);
-        }
         // 直写模式下最后一批字符已经进入 DOM，但其模糊渐显仍在播放。
-        // 先等待动画尾巴，再切换到最终 Markdown，避免用户只看到整段跳出。
+        // 只等待正文自己的动画尾巴；思考动画绝不能延迟最终回答。
         const revealShouldContinue = () => isRequestCurrent();
-        await Promise.all([
-          contentStream.waitForRevealComplete?.(revealShouldContinue),
-          thinkingStream.waitForRevealComplete?.(revealShouldContinue),
-        ]);
+        await contentStream.waitForRevealComplete?.(revealShouldContinue);
         if (!isRequestCurrent()) return;
         const finalThinkingMs = finalizeThinkingDurationMs({
           thinkingStartTime,
@@ -2287,7 +2405,7 @@ export function useMessageState({
         }
         setMessages(prev => prev.map(m =>
            m.id === tempMsgId
-             ? { ...m, content: finalContent, thinking: currentThinking, reasoningContent: hasRealThinking ? currentThinking : '', retrievalProgress: currentRetrievalProgress, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, finishReason: streamFinishReason, completionStatus: streamCompletionStatus, truncated: streamWasTruncated, citations: finalCitations, citationBindings: streamCitationBindingsRef.current || null, visualAttachments: streamVisualAttachmentsRef.current || [], maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchReads: streamWebSearchReadsRef.current || [], webSearchAudit: streamWebSearchAuditRef.current || null, webSearchQuery: streamWebSearchQueryRef.current || m.webSearchQuery || '', webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? streamAgentTraceRef.current : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, reasoningResolution: streamReasoningResolutionRef.current || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
+             ? { ...m, content: finalContent, thinking: currentThinking, thinkingLive: hasRealThinking, reasoningContent: hasRealThinking ? currentThinking : '', retrievalProgress: currentRetrievalProgress, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, finishReason: streamFinishReason, completionStatus: streamCompletionStatus, truncated: streamWasTruncated, citations: finalCitations, citationBindings: streamCitationBindingsRef.current || null, visualAttachments: streamVisualAttachmentsRef.current || [], maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchReads: streamWebSearchReadsRef.current || [], webSearchAudit: streamWebSearchAuditRef.current || null, webSearchQuery: streamWebSearchQueryRef.current || m.webSearchQuery || '', webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? cloneAgentTrace(streamAgentTraceRef.current) : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, reasoningResolution: streamReasoningResolutionRef.current || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
             : m
         ));
         startVisualVerificationPolling(

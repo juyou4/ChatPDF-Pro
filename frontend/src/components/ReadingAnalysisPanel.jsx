@@ -57,6 +57,7 @@ const TYPE_LABEL = {
   figure: '图表',
   table: '表格',
   formula: '公式',
+  code: '代码',
 };
 
 const RAW_TABLE_MARKUP_RE = /<table\b|<\/?(?:thead|tbody|tfoot|tr|td|th)\b/i;

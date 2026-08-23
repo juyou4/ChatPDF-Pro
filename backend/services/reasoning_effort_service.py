@@ -738,7 +738,7 @@ def get_reasoning_profile(
             ))
         return _finish(ReasoningProfile("unsupported", ("off",), note="当前 Grok 模型未声明思考能力"))
 
-    if pid in {"aliyun", "qwen"} or "qwen3" in mid or "qwq" in mid:
+    if pid in {"aliyun", "qwen", "dashscope", "bailian", "tongyi"} or "qwen3" in mid or "qwq" in mid:
         if "qwen3.8-max" in mid:
             return _finish(ReasoningProfile(
                 "openai_effort", ("off", "low", "medium", "xhigh"),
@@ -896,7 +896,32 @@ _REASONING_BODY_KEYS = {
     "output_config",
     "reasoning",
     "think",
+    "incremental_output",
 }
+
+_INCREMENTAL_OUTPUT_PROVIDERS = frozenset({
+    "aliyun",
+    "qwen",
+    "dashscope",
+    "bailian",
+    "tongyi",
+})
+
+
+def _wants_incremental_output(provider: str, model: str = "") -> bool:
+    """DashScope 兼容网关默认攒完思考再吐；开增量后才能流式展示。"""
+    pid = str(provider or "").strip().lower()
+    mid = str(model or "").strip().lower()
+    if pid == "deepseek":
+        return False
+    if pid in _INCREMENTAL_OUTPUT_PROVIDERS:
+        return True
+    if any(token in pid for token in ("dashscope", "aliyun", "bailian", "tongyi")):
+        return True
+    # 第三方 OpenAI 兼容口上的 DeepSeek 也常把思考攒完再一次性吐出。
+    if "deepseek" in mid:
+        return True
+    return False
 
 
 def _clear_reasoning_controls(body: dict[str, Any]) -> None:
@@ -1009,6 +1034,8 @@ def apply_reasoning_to_payload(
         body["think"] = True
     if resolution.profile.split_reasoning_output:
         body["reasoning_split"] = True
+    if _wants_incremental_output(provider, model):
+        body["incremental_output"] = True
     return resolution
 
 

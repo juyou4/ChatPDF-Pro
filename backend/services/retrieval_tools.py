@@ -36,6 +36,10 @@ from services.citation_authorization import (
 )
 from services.formula_text import formula_term_matches, looks_formula_like
 from services.query_analyzer import analyze_evidence_need, expand_academic_bilingual_terms
+from services.paper_section_router import (
+    match_outline_sections,
+    outline_entries_from_block_index,
+)
 from services.visual_retriever import (
     VisualRetrieverRequest,
     deterministic_ranked_assets,
@@ -2375,11 +2379,25 @@ def compute_document_aware_evidence_score(
     return score
 
 
+def _passage_identity_token(value: Any) -> str:
+    """Keep numeric ids such as chunk_id=0; only drop missing/boolean sentinels."""
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    if not text or text.casefold() in {"none", "null"}:
+        return ""
+    return text
+
+
 def _result_key(item: dict) -> str:
     if not isinstance(item, dict):
         return ""
     for key in ("chunk_id", "parent_id", "doc_id"):
-        value = item.get(key)
+        value = _passage_identity_token(item.get(key))
         if value:
             return f"{key}:{value}"
     text = item.get("chunk") or item.get("child_chunk") or item.get("raw_chunk_text") or ""
@@ -3223,12 +3241,25 @@ def _search_document_component_failure(channel: str, exc: Exception) -> dict:
 
 
 def _search_document_item_key(item: Any, meta: dict | None = None) -> str:
+    """Stable identity for unifying search_document channels.
+
+    chunk_id / child_chunk_id are passage-level. block_id / context_id /
+    group_id are layout or section keys: citation-anchor attachment often
+    stamps the same Methods heading block onto every hit on that page.
+    Using those coarser keys as exclusive identity collapses a whole
+    section down to the first intro sentence.
+    """
     metadata = meta if isinstance(meta, dict) else {}
-    for field in ("evidence_id", "block_id", "chunk_id", "child_chunk_id", "context_id"):
-        value = str(metadata.get(field) or "").strip()
+    for field in ("chunk_id", "child_chunk_id"):
+        value = _passage_identity_token(metadata.get(field))
         if value:
             return f"{field}:{value.casefold()}"
+    evidence_id = _passage_identity_token(metadata.get("evidence_id"))
+    if evidence_id:
+        return f"evidence_id:{evidence_id.casefold()}"
     text = str(item or "").strip()
+    if not text and isinstance(metadata, dict):
+        text = str(metadata.get("text") or metadata.get("chunk") or "").strip()
     normalized = re.sub(r"\s+", " ", text).casefold()
     digest = hashlib.sha1(normalized[:1600].encode("utf-8", errors="ignore")).hexdigest()
     return f"text:{digest}"
@@ -3323,16 +3354,29 @@ def _merge_search_document_components(
         name for name, detail in channel_stats.items()
         if detail.get("result_count", 0) > 0
     ]
+    suggested_groups: list[str] = []
+    seen_groups: set[str] = set()
+    for meta in chunk_meta:
+        gid = str((meta or {}).get("group_id") or "").strip()
+        if gid and gid not in seen_groups:
+            seen_groups.add(gid)
+            suggested_groups.append(gid)
+            if len(suggested_groups) >= 5:
+                break
+    summary = (
+        f"统一检索（{'、'.join(successful_channels) or '无命中通道'}）"
+        f"返回 {len(results)} 个去重结果"
+    )
+    if suggested_groups:
+        summary += f"；可 fetch(full): {', '.join(suggested_groups)}"
     result = {
         "results": results,
         "chunk_meta": chunk_meta,
         "candidate_meta": candidate_meta,
         "result_count": len(results),
         "channels": channel_stats,
-        "summary": (
-            f"统一检索（{'、'.join(successful_channels) or '无命中通道'}）"
-            f"返回 {len(results)} 个去重结果"
-        ),
+        "suggested_groups": suggested_groups,
+        "summary": summary,
     }
     if errors:
         result["channel_errors"] = errors
@@ -3360,6 +3404,22 @@ def _merge_search_document_components(
     return result
 
 
+def _attach_suggested_sections(result: dict, args: dict, ctx: DocContext) -> None:
+    """把问句对上这篇论文大纲里的真实章节，供 planner / read_section 使用。"""
+    if not isinstance(result, dict):
+        return
+    query = str((args or {}).get("query") or "").strip()
+    outline = outline_entries_from_block_index(getattr(ctx, "block_index", None))
+    matches = match_outline_sections(query, outline)
+    if not matches:
+        return
+    result["suggested_sections"] = matches
+    titles = [f"{item['section_id']} {item['title']}" for item in matches]
+    summary = str(result.get("summary") or "").rstrip()
+    suffix = f"；可 read_section: {', '.join(titles)}"
+    result["summary"] = (summary + suffix) if summary else suffix.lstrip("；")
+
+
 def _exec_search_document(args: dict, ctx: DocContext) -> dict:
     components = _search_document_components(args, ctx)
     if not components:
@@ -3381,6 +3441,7 @@ def _exec_search_document(args: dict, ctx: DocContext) -> dict:
         component_results,
         limit=_bounded_search_limit(args.get("limit"), 14),
     )
+    _attach_suggested_sections(result, args, ctx)
     ctx.register_web_research_evidence(result)
     return result
 
@@ -3409,6 +3470,7 @@ async def _exec_search_document_async(args: dict, ctx: DocContext) -> dict:
         list(component_results),
         limit=_bounded_search_limit(args.get("limit"), 14),
     )
+    _attach_suggested_sections(result, args, ctx)
     ctx.register_web_research_evidence(result)
     return result
 

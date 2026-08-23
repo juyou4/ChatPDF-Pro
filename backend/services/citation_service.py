@@ -20,6 +20,16 @@ START_ANSWER = "FINAL ANSWER"
 START_CITATION = "CITATION LIST"
 _RE_START_ANSWER = re.compile(r"FINAL\s*ANSWER", re.IGNORECASE)
 _RE_START_CITATION = re.compile(r"CITATION\s*LIST", re.IGNORECASE)
+# 只认独立成行（或行首加冒号）的协议标记。行内提到
+# 「按照要求的格式：FINAL ANSWER 然后 CITATION LIST」不能切开正文。
+_RE_START_ANSWER_SECTION = re.compile(
+    r"(?:^|\n)[ \t]*FINAL[ \t]*ANSWER(?:[ \t]*:[ \t]*(?=\S)|[ \t]*:?[ \t]*(?=\n|$))",
+    re.IGNORECASE,
+)
+_RE_START_CITATION_SECTION = re.compile(
+    r"(?:^|\n)[ \t]*CITATION[ \t]*LIST(?:[ \t]*:[ \t]*(?=\S)|[ \t]*:?[ \t]*(?=\n|$))",
+    re.IGNORECASE,
+)
 CITATION_PATTERN = re.compile(r"citation[【\[](\d+)[】\]]", re.IGNORECASE)
 START_PHRASE_PREFIX = "start_phrase:"
 END_PHRASE_PREFIX = "end_phrase:"
@@ -91,6 +101,7 @@ def build_structured_citation_prompt(
             "\n"
             "注意：\n"
             "- 必须先输出 FINAL ANSWER，再输出 CITATION LIST\n"
+            "- reasoning 结束后立即开始 FINAL ANSWER；禁止先生成、草拟或隐藏 CITATION LIST\n"
             "- 只能使用上述列出的编号，禁止创造新编号\n"
             "- START_PHRASE 和 END_PHRASE 必须从上下文中原文复制\n"
             "- 引用编号必须直接支撑它所在句子的具体事实，不能只因为同页、同章节或同主题就引用\n"
@@ -140,6 +151,7 @@ def build_structured_citation_prompt(
         "\n"
         "注意：\n"
         "- 必须先输出 FINAL ANSWER，再输出 CITATION LIST\n"
+        "- reasoning 结束后立即开始 FINAL ANSWER；禁止先生成、草拟或隐藏 CITATION LIST\n"
         "- 只能使用上述列出的编号，禁止创造新编号\n"
         "- START_PHRASE 和 END_PHRASE 必须从上下文中原文复制\n"
         "- 引用编号必须直接支撑它所在句子的具体事实，不能只因为同页、同章节或同主题就引用\n"
@@ -252,36 +264,41 @@ def _ci_contains(pattern: re.Pattern, text: str) -> bool:
     return pattern.search(text) is not None
 
 
-def extract_final_answer(full_output: str) -> str:
+def extract_final_answer(full_output: str, *, allow_unmarked: bool = True) -> str:
     """从 LLM 完整输出中提取 FINAL ANSWER 部分
 
     支持两种顺序：
     - 新格式：FINAL ANSWER → 回答 → CITATION LIST → 引文
     - 旧格式：CITATION LIST → 引文 → FINAL ANSWER → 回答
 
-    如果输出不含任何标记，返回原始全文（兼容非结构化输出）。
+    标记必须独立成行（或行首 `FINAL ANSWER:`）。行内提及不算。
+
+    如果输出不含任何标记，默认返回原始全文（兼容非结构化输出）。
+    流式结构化引文请传 `allow_unmarked=False`，避免把思考草稿当成正文。
 
     Args:
         full_output: LLM 的完整输出文本
+        allow_unmarked: 无行首标记时是否退回全文
 
     Returns:
         纯回答文本（不含 CITATION LIST）
     """
-    parts = _ci_split(_RE_START_ANSWER, full_output)
+    parts = _ci_split(_RE_START_ANSWER_SECTION, full_output)
     if parts is not None:
         answer = parts[1].lstrip()
         # 截断尾部 CITATION LIST（新格式：FINAL ANSWER 在前）
-        cit_parts = _ci_split(_RE_START_CITATION, answer)
+        cit_parts = _ci_split(_RE_START_CITATION_SECTION, answer)
         if cit_parts is not None:
             answer = cit_parts[0].rstrip()
         return answer
 
     # 无 FINAL ANSWER 标记，但可能有 CITATION LIST 在尾部
-    cit_parts = _ci_split(_RE_START_CITATION, full_output)
+    cit_parts = _ci_split(_RE_START_CITATION_SECTION, full_output)
     if cit_parts is not None:
         return cit_parts[0].rstrip()
 
-    # 无任何结构化标记，返回原文
+    if not allow_unmarked:
+        return ""
     return full_output
 
 

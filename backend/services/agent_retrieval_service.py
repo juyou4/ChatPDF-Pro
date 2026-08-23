@@ -577,7 +577,13 @@ async def run_agent_retrieval_for_context(
     sub_questions: list = list(hint_subs)
     decompose_source = f"llm_signals:{hint_source}" if hint_decided else "rule"
     if not hint_decided:
-        if should_decompose(decomposition_question):
+        from services.paper_section_router import rule_decompose_facets
+
+        facet_subs = rule_decompose_facets(decomposition_question, limit=4)
+        if len(facet_subs) >= 2:
+            sub_questions = facet_subs
+            decompose_source = "rule_paper_facets"
+        elif should_decompose(decomposition_question):
             try:
                 sub_questions = await asyncio.wait_for(
                     decompose_question(
@@ -589,7 +595,7 @@ async def run_agent_retrieval_for_context(
                     ),
                     timeout=2.5,
                 )
-                sub_questions = (sub_questions or [])[:3]
+                sub_questions = (sub_questions or [])[:4]
                 decompose_source = "rule_llm_call"
             except (asyncio.TimeoutError, Exception) as exc:
                 logger.warning(f"[AgentRetrieval] decompose 失败，跳过分解: {exc}")

@@ -119,6 +119,19 @@ def is_exact_evidence_bypass(
     return any(marker in haystack for marker in EXACT_BYPASS_MARKERS)
 
 
+def _passage_identity_token(value: Any) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    if not text or text.casefold() in {"none", "null"}:
+        return ""
+    return text
+
+
 def evidence_identity(
     text: str,
     *,
@@ -126,27 +139,29 @@ def evidence_identity(
     group_id: str = "",
     fallback_scope: str = "",
 ) -> str:
+    """Passage identity for scoring. Prefer chunk ids over layout/section ids.
+
+    Citation anchors often stamp the same block_id / context_id onto every
+    Methods hit on a page. Using those as exclusive identity makes collect +
+    score-tier logic treat a whole section as one intro snippet.
+    """
     meta = meta if isinstance(meta, dict) else {}
     for key in (
-        "evidence_id",
-        "context_id",
-        "block_id",
         "chunk_id",
         "child_chunk_id",
-        "group_id",
-        "table_id",
         "evidence_unit_id",
+        "evidence_id",
     ):
-        value = str(meta.get(key) or "").strip()
+        value = _passage_identity_token(meta.get(key))
         if value:
             return f"{key}:{value}"
-    gid = str(group_id or meta.get("group_id") or "").strip()
-    if gid:
-        return f"group:{gid}"
     normalized = re.sub(r"\s+", " ", str(text or "")).strip().casefold()
     if normalized:
         digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
         return f"text:{digest}"
+    gid = _passage_identity_token(group_id or meta.get("group_id"))
+    if gid:
+        return f"group:{gid}"
     return f"scope:{fallback_scope or 'unknown'}"
 
 

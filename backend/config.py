@@ -272,21 +272,21 @@ class AppSettings(BaseSettings):
     )
     # 允许进入 Agent 路径的 evidence_need 集合；ENV 可传逗号分隔字符串
     agent_trigger_evidence_needs: list[str] = Field(
-        default=["section_explanation", "comparison_multi_aspect", "reference_meta", "analysis_explanation"],
+        default=["section_explanation", "comparison_multi_aspect", "reference_meta", "analysis_explanation", "figure_caption"],
         validation_alias=AliasChoices(
             "agent_trigger_evidence_needs",
             "AGENT_TRIGGER_EVIDENCE_NEEDS",
         ),
         description="允许进入 Agent 路径的 evidence_need 集合"
     )
-    # 是否在每轮命中后自动回填父级语义组 digest
+    # 是否在每轮命中后自动回填父级语义组。方法/概览/章节深讲用 full，其余用 digest。
     enable_parent_backfill: bool = Field(
         default=True,
         validation_alias=AliasChoices(
             "enable_parent_backfill",
             "AGENT_ENABLE_PARENT_BACKFILL",
         ),
-        description="是否在每轮命中后自动回填父级语义组 digest"
+        description="是否在每轮命中后自动回填父级语义组（方法/概览/章节深讲为 full）"
     )
     # Planner_LLM 是否优先使用原生 function calling
     use_native_tools: bool = Field(

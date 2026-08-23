@@ -23,6 +23,11 @@ export function shouldShowScrollToLatest({
     && getDistanceToBottom(scrollTop, clientHeight, scrollHeight) > SCROLL_TO_LATEST_VISIBLE_THRESHOLD;
 }
 
+export function scrollMetricsEqual(prev, next) {
+  return prev?.scrollTop === next?.scrollTop
+    && prev?.containerHeight === next?.containerHeight;
+}
+
 // 旧会话中的 system/assistant 消息可能没有 id。虚拟列表不能直接用
 // undefined 作为 React key 或高度缓存键，否则多条历史消息会共享同一个
 // DOM 身份，加载会话后可能把正在流式的节点复用到错误消息上。
@@ -44,6 +49,45 @@ export function getMessageListKey(message, index) {
   return timestamp
     ? `legacy-${type}-${String(timestamp)}-${index}`
     : `legacy-${type}-${index}`;
+}
+
+export const STREAMING_LIVE_WINDOW = 12;
+
+/**
+ * 流式时钉住最后一条，但不要把中间历史全部挂上。
+ * 跟在底部时：窗口上限为 lastIdx-N。
+ * 在上面翻历史时：保留视口，中间用占位，另外单独挂上正在生成的那条。
+ */
+export function pinStreamingRange(
+  rawRange,
+  messages,
+  streamingMessageId,
+  liveWindow = STREAMING_LIVE_WINDOW,
+) {
+  const start = Number(rawRange?.start) || 0;
+  const end = Number(rawRange?.end) || 0;
+  const fallback = { start, end, pinLast: false };
+  if (!streamingMessageId || !Array.isArray(messages) || messages.length === 0) {
+    return fallback;
+  }
+  const lastIdx = messages.length - 1;
+  const streamMsg = messages[lastIdx];
+  if (!streamMsg || String(streamMsg.id) !== String(streamingMessageId)) {
+    return fallback;
+  }
+  const includesStream = start <= lastIdx && end > lastIdx;
+  if (includesStream) {
+    return {
+      start: Math.max(start, lastIdx - liveWindow),
+      end: messages.length,
+      pinLast: false,
+    };
+  }
+  return {
+    start,
+    end,
+    pinLast: true,
+  };
 }
 
 /**
@@ -183,22 +227,31 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
   });
   const [showScrollToLatest, setShowScrollToLatest] = useState(false);
 
+  const streamingMessageIdRef = useRef(streamingMessageId);
+  streamingMessageIdRef.current = streamingMessageId;
+
   const syncScrollState = useCallback((container = scrollContainerRef.current) => {
     if (!container) return;
 
     const { scrollTop, clientHeight, scrollHeight } = container;
     const distanceToBottom = getDistanceToBottom(scrollTop, clientHeight, scrollHeight);
     shouldAutoScrollRef.current = distanceToBottom < AUTO_SCROLL_BOTTOM_THRESHOLD;
-    setShowScrollToLatest(shouldShowScrollToLatest({
+    const nextShowScrollToLatest = shouldShowScrollToLatest({
       scrollTop,
       clientHeight,
       scrollHeight,
       hasMessages: messages.length > 0,
-    }));
-    setScrollState({
+    });
+    const nextScrollState = {
       scrollTop,
       containerHeight: clientHeight,
-    });
+    };
+    setShowScrollToLatest((current) => (
+      current === nextShowScrollToLatest ? current : nextShowScrollToLatest
+    ));
+    setScrollState((current) => (
+      scrollMetricsEqual(current, nextScrollState) ? current : nextScrollState
+    ));
   }, [messages.length]);
 
   // 计算可视范围
@@ -214,32 +267,39 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
     [scrollState.scrollTop, scrollState.containerHeight, messages, bufferSize, estimatedHeight]
   );
 
-  // 流式输出时确保 streaming message 始终在可见范围内，避免 ref 直写内容丢失
-  const visibleRange = useMemo(() => {
-    if (streamingMessageId && messages.length > 0) {
-      const lastIdx = messages.length - 1;
-      const streamMsg = messages[lastIdx];
-      if (streamMsg && String(streamMsg.id) === String(streamingMessageId)) {
-        return {
-          start: rawVisibleRange.start,
-          end: Math.max(rawVisibleRange.end, messages.length),
-        };
-      }
-    }
-    return rawVisibleRange;
-  }, [rawVisibleRange, streamingMessageId, messages]);
+  // 流式输出时钉住正在生成的消息，但截断中间历史，避免整列挂载。
+  const streamWindow = useMemo(
+    () => pinStreamingRange(
+      rawVisibleRange,
+      messages,
+      streamingMessageId,
+      Math.max(STREAMING_LIVE_WINDOW, bufferSize * 2),
+    ),
+    [rawVisibleRange, streamingMessageId, messages, bufferSize],
+  );
+  const visibleRange = streamWindow;
 
-  // 计算 padding 占位
   const { paddingTop, paddingBottom } = useMemo(
     () => calculatePadding(messages, visibleRange, heightCacheRef.current, estimatedHeight),
     [messages, visibleRange, estimatedHeight]
   );
+  const paddingGap = useMemo(() => {
+    if (!streamWindow.pinLast) return 0;
+    const lastIdx = Math.max(0, messages.length - 1);
+    let gap = 0;
+    for (let i = visibleRange.end; i < lastIdx; i++) {
+      const messageKey = getMessageListKey(messages[i], i);
+      gap += heightCacheRef.current.get(messageKey) ?? estimatedHeight;
+    }
+    return gap;
+  }, [estimatedHeight, messages, streamWindow.pinLast, visibleRange.end]);
 
-  // 提取可视消息切片
   const visibleMessages = useMemo(
     () => messages.slice(visibleRange.start, visibleRange.end),
     [messages, visibleRange.start, visibleRange.end]
   );
+  const pinnedStreamMessage = streamWindow.pinLast ? messages[messages.length - 1] : null;
+  const pinnedStreamIndex = streamWindow.pinLast ? messages.length - 1 : -1;
 
   // 初始化 ResizeObserver，监测消息元素高度变化
   useEffect(() => {
@@ -260,8 +320,8 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
           }
         }
 
-        // 高度变化时触发重新计算可视范围
-        if (hasChanges) {
+        // 跟在底部流式长高时只记账，不要每一行都重算占位，否则整列会跟着抖。
+        if (hasChanges && !(streamingMessageIdRef.current && shouldAutoScrollRef.current)) {
           syncScrollState();
         }
       });
@@ -397,6 +457,16 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
     };
   }, [streamingMessageId]);
 
+  const wasStreamingRef = useRef(Boolean(streamingMessageId));
+  useEffect(() => {
+    const wasStreaming = wasStreamingRef.current;
+    const isStreaming = Boolean(streamingMessageId);
+    wasStreamingRef.current = isStreaming;
+    if (!wasStreaming || isStreaming) return undefined;
+    const frame = window.requestAnimationFrame(() => syncScrollState());
+    return () => window.cancelAnimationFrame(frame);
+  }, [streamingMessageId, syncScrollState]);
+
   return (
     <div
       className="relative flex-1 min-h-0"
@@ -406,9 +476,9 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
         data-testid="virtual-message-list"
         onScroll={handleScroll}
         className={`${className} h-full`}
-        style={{ overflow: 'auto' }}
+        style={{ overflow: 'auto', scrollbarGutter: 'stable' }}
       >
-        <div style={{ paddingTop, paddingBottom }}>
+        <div style={{ paddingTop, paddingBottom: pinnedStreamMessage ? 0 : paddingBottom }}>
           {visibleMessages.map((msg, idx) => {
             const originalIndex = visibleRange.start + idx;
             const messageId = getMessageListKey(msg, originalIndex);
@@ -423,6 +493,21 @@ const VirtualMessageList = React.memo(function VirtualMessageList({
               </div>
             );
           })}
+          {pinnedStreamMessage && (
+            <>
+              {paddingGap > 0 ? (
+                <div aria-hidden="true" style={{ height: paddingGap }} />
+              ) : null}
+              <div
+                key={getMessageListKey(pinnedStreamMessage, pinnedStreamIndex)}
+                ref={(el) => setItemRef(getMessageListKey(pinnedStreamMessage, pinnedStreamIndex), el)}
+                data-message-id={getMessageListKey(pinnedStreamMessage, pinnedStreamIndex)}
+                className={itemClassName}
+              >
+                {renderMessage(pinnedStreamMessage, pinnedStreamIndex)}
+              </div>
+            </>
+          )}
         </div>
       </div>
 

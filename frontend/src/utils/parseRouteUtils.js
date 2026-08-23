@@ -78,6 +78,18 @@ export const shouldPollMinerUStatus = ({
   );
 };
 
+const RAG_PUBLISH_STAGES = new Set([
+  'awaiting_rag_index',
+  'preparing_rag_index',
+  'building_rag_index',
+  'rebuilding_rag_index',
+  'building_vector_index',
+  'validating_vector_index',
+  'preparing_semantic_index',
+  'building_semantic_index',
+  'validating_semantic_index',
+  'publishing_rag_index',
+]);
 const STAGE_LABELS = {
   requesting_upload: '正在准备上传',
   queued_mineru: '等待 MinerU 开始解析',
@@ -174,7 +186,7 @@ export const resolveDocumentParseState = ({ manifest, parseReady, deepParseStatu
     };
   }
 
-  if (stage === 'awaiting_rag_index') {
+  if (stage === 'awaiting_rag_index' || RAG_PUBLISH_STAGES.has(stage)) {
     return {
       requestedRoute,
       resolvedRoute,

@@ -3,6 +3,32 @@ export const PDF_READER_FLOW_MODES = Object.freeze({
   CONTINUOUS: 'continuous',
 });
 
+export const PDF_READER_FLOW_MODE_STORAGE_KEY = 'chatpdf_pdf_reader_flow_mode_v1';
+
+export function normalizePdfReaderFlowMode(value) {
+  return value === PDF_READER_FLOW_MODES.CONTINUOUS
+    ? PDF_READER_FLOW_MODES.CONTINUOUS
+    : PDF_READER_FLOW_MODES.PAGED;
+}
+
+export function readPdfReaderFlowMode(storage = globalThis.localStorage) {
+  try {
+    return normalizePdfReaderFlowMode(storage?.getItem?.(PDF_READER_FLOW_MODE_STORAGE_KEY));
+  } catch {
+    return PDF_READER_FLOW_MODES.PAGED;
+  }
+}
+
+export function writePdfReaderFlowMode(value, storage = globalThis.localStorage) {
+  const next = normalizePdfReaderFlowMode(value);
+  try {
+    storage?.setItem?.(PDF_READER_FLOW_MODE_STORAGE_KEY, next);
+  } catch {
+    // 隐私模式或配额满时仍返回规范化后的值，当前会话可以继续用。
+  }
+  return next;
+}
+
 export const PDF_READER_LAYOUTS = Object.freeze({
   SINGLE: 'single',
   DOUBLE: 'double',

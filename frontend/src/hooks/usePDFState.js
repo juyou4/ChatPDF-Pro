@@ -519,6 +519,7 @@ export function usePDFState({
       blockId: rawAnchor.block_id || c.block_id || c.evidence_block_id || '',
       bbox: rawAnchor.bbox || c.bbox || c.figure_bbox || null,
       rects: rawAnchor.rects || c.rects || [],
+      pageRects: rawAnchor.page_rects || c.page_rects || [],
       coordinateSpace: rawAnchor.coordinate_space || c.coordinate_space || '',
       pageSize: rawAnchor.page_size || c.page_size || null,
       parseGeneration: rawAnchor.parse_generation || c.parse_generation || '',
@@ -528,6 +529,7 @@ export function usePDFState({
       citationAnchor.blockId
       || citationAnchor.bbox
       || citationAnchor.rects?.length
+      || citationAnchor.pageRects?.length
     );
 
     setActiveHighlight(null);

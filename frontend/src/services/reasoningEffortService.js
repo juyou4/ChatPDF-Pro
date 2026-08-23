@@ -12,6 +12,7 @@ export const REASONING_EFFORT_OPTIONS = [
 
 const EFFORT_RANK = Object.fromEntries(REASONING_EFFORT_OPTIONS.map((item, index) => [item.value, index]))
 const REASONING_PREFERENCES_KEY = 'reasoningEffortByModel:v1'
+const REASONING_PREFERENCES_KEY_V2 = 'reasoningEffortByModel:v2'
 
 export const getReasoningEffortOption = (value) => (
   REASONING_EFFORT_OPTIONS.find((item) => item.value === value)
@@ -254,24 +255,50 @@ export const requiresPreservedReasoning = ({ modelId } = {}) => {
 export const getStoredReasoningEffort = (modelKey) => {
   if (!modelKey || typeof localStorage === 'undefined') return null
   try {
-    const values = JSON.parse(localStorage.getItem(REASONING_PREFERENCES_KEY) || '{}')
-    const value = String(values?.[modelKey] || '').trim().toLowerCase()
-    return EFFORT_RANK[value] !== undefined ? value : null
+    const v2 = JSON.parse(localStorage.getItem(REASONING_PREFERENCES_KEY_V2) || '{}') || {}
+    const v2Value = String(v2?.[modelKey] || '').trim().toLowerCase()
+    if (EFFORT_RANK[v2Value] !== undefined) return v2Value
+    const v1 = JSON.parse(localStorage.getItem(REASONING_PREFERENCES_KEY) || '{}') || {}
+    const v1Value = String(v1?.[modelKey] || '').trim().toLowerCase()
+    if (EFFORT_RANK[v1Value] === undefined) return null
+    // v1 曾在档案加载前把全局 off 写进 DeepSeek V4，那不是用户选择。
+    if (v1Value === 'off' && String(modelKey).toLowerCase().includes('deepseek-v4')) return null
+    return v1Value
   } catch {
     return null
   }
 }
 
+export const resolveModelReasoningEffort = ({
+  stored,
+  profile,
+  current = 'off',
+} = {}) => {
+  const options = Array.isArray(profile?.options) ? profile.options : []
+  const defaultValue = String(profile?.default || '').trim().toLowerCase()
+  if (stored) return stored
+  if (defaultValue && (options.length === 0 || options.includes(defaultValue))) return defaultValue
+  return current || 'off'
+}
+
 export const setStoredReasoningEffort = (modelKey, effort) => {
   if (!modelKey || EFFORT_RANK[effort] === undefined || typeof localStorage === 'undefined') return
   let values = {}
+  let valuesV2 = {}
   try {
     values = JSON.parse(localStorage.getItem(REASONING_PREFERENCES_KEY) || '{}') || {}
   } catch {
     values = {}
   }
+  try {
+    valuesV2 = JSON.parse(localStorage.getItem(REASONING_PREFERENCES_KEY_V2) || '{}') || {}
+  } catch {
+    valuesV2 = {}
+  }
   values[modelKey] = effort
+  valuesV2[modelKey] = effort
   localStorage.setItem(REASONING_PREFERENCES_KEY, JSON.stringify(values))
+  localStorage.setItem(REASONING_PREFERENCES_KEY_V2, JSON.stringify(valuesV2))
 }
 
 export async function fetchReasoningCapabilities({ providerId, modelId, model, provider, signal }) {
@@ -318,6 +345,9 @@ export async function fetchReasoningCapabilities({ providerId, modelId, model, p
 }
 
 export const getReasoningFallbackText = (resolution) => {
+  if (resolution?.enabled && resolution?.output_observed === false) {
+    return '当前接口本次没有返回可展示的思考文本'
+  }
   if (!resolution?.fallback || !resolution?.effective) return ''
   const requestedOption = getReasoningEffortOption(resolution.requested)
   const effectiveOption = getReasoningEffortOption(resolution.effective)

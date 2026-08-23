@@ -14,6 +14,7 @@ import {
   getStoredReasoningEffort,
   inferReasoningProfile,
   normalizeReasoningProfile,
+  resolveModelReasoningEffort,
   setStoredReasoningEffort,
 } from '../services/reasoningEffortService'
 
@@ -272,18 +273,20 @@ export default function ModelQuickSwitch({ onThinkingChange }) {
   const isThinkingActive = isAlwaysThinking || effectiveReasoningEffort !== 'off'
   const isEffortLocked = isAlwaysThinking && reasoningOptions.length <= 1
 
-  // 每个模型保存用户自己的请求档位。能力降级只影响 effective，不能
-  // 覆盖 requested，否则模型切换会永久丢失原来的档位偏好。
+  // 每个模型保存自己的请求档位。必须等能力档案就绪再写入，否则会把
+  // 全局 off 抢先存成 V4 的偏好，思考被 thinking.disabled 关掉。
   useEffect(() => {
-    if (!reasoningPreferenceKey) return
+    if (!reasoningPreferenceKey || !reasoningProfile || reasoningProfileLoading) return
     const stored = getStoredReasoningEffort(reasoningPreferenceKey)
-    if (stored) {
-      if (stored !== reasoningEffort) setReasoningEffort(stored)
-      return
-    }
-    setStoredReasoningEffort(reasoningPreferenceKey, reasoningEffort)
-  // 只在模型身份变化时恢复；主动选择由 handleSelectEffort 持久化。
-  }, [reasoningPreferenceKey])
+    const nextEffort = resolveModelReasoningEffort({
+      stored,
+      profile: reasoningProfile,
+      current: reasoningEffort,
+    })
+    if (nextEffort !== reasoningEffort) setReasoningEffort(nextEffort)
+    if (stored !== nextEffort) setStoredReasoningEffort(reasoningPreferenceKey, nextEffort)
+  // 只在模型身份 / 档案变化时恢复；主动选择由 handleSelectEffort 持久化。
+  }, [reasoningPreferenceKey, reasoningProfile, reasoningProfileLoading])
 
   // 模型切换或旧配置升级后只提示实际降级，不改写用户请求值。
   useEffect(() => {

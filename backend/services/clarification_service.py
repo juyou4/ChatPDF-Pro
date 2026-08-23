@@ -708,11 +708,21 @@ def build_decomposition_signals(
     """
     payload = clarity if isinstance(clarity, dict) else {}
     subs = payload.get("sub_questions")
+    source = str(payload.get("sub_questions_source") or "not_attempted")
+    decided = bool(payload.get("decompose_decided"))
+    if not (isinstance(subs, list) and len(subs) >= 2) and not is_numeric_table_question(source_question):
+        from services.paper_section_router import rule_decompose_facets
+
+        facet_subs = rule_decompose_facets(source_question, limit=4)
+        if len(facet_subs) >= 2:
+            subs = facet_subs
+            decided = True
+            source = "rule_paper_facets"
     return {
         "source_question": str(source_question or "").strip(),
         "sub_questions": list(subs) if isinstance(subs, list) else [],
-        "decided": bool(payload.get("decompose_decided")),
-        "source": str(payload.get("sub_questions_source") or "not_attempted"),
+        "decided": decided,
+        "source": source,
     }
 
 
@@ -729,7 +739,9 @@ def read_decomposition_signals(
         if not expected or expected != actual:
             return [], False, "question_mismatch"
         raw = signals.get("sub_questions")
-        subs = normalize_sub_questions(raw, source_question=actual)
+        source = str(signals.get("source") or "")
+        limit = 4 if source == "rule_paper_facets" else MAX_SUB_QUESTIONS
+        subs = normalize_sub_questions(raw, source_question=actual, limit=limit)
         if len(subs) < 2:
             subs = []
         return subs, bool(signals.get("decided")), str(signals.get("source") or "")

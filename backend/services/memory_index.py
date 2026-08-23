@@ -36,16 +36,40 @@ def _normalize_vectors(vectors: np.ndarray) -> np.ndarray:
 class MemoryIndex:
     """记忆向量索引管理"""
 
-    def __init__(self, index_dir: str, embedding_model_id: str = "local-minilm"):
+    def __init__(
+        self,
+        index_dir: str,
+        embedding_model_id: str = "local-minilm",
+        *,
+        embedding_provider: str = "",
+        embedding_api_host: str = "",
+        vector_search_enabled: Optional[bool] = None,
+    ):
         """
         初始化记忆向量索引
 
         Args:
             index_dir: 索引存储目录，如 "data/memory/memory_index/"
             embedding_model_id: embedding 模型 ID，默认使用本地 MiniLM
+            embedding_provider: 模型提供商身份，不包含凭证
+            embedding_api_host: 归一化后的 API 基础地址，不包含凭证
+            vector_search_enabled: 是否启用向量检索。None 时根据当前运行时
+                自动判断；Windows 下 FAISS 与本地 PyTorch 冲突时使用 BM25-only。
         """
         self.index_dir = index_dir
         self.embedding_model_id = embedding_model_id
+        self.embedding_provider = str(embedding_provider or "").strip().casefold()
+        self.embedding_api_host = str(embedding_api_host or "").strip().rstrip("/")
+        if vector_search_enabled is None:
+            vector_search_enabled = self._default_vector_search_enabled(
+                embedding_model_id
+            )
+        self.vector_search_enabled = bool(vector_search_enabled)
+        self.vector_disabled_reason = (
+            "windows_faiss_torch_openmp_conflict"
+            if not self.vector_search_enabled
+            else ""
+        )
         self.index: Optional[faiss.IndexFlatIP] = None
         # 元数据：与 FAISS 索引行一一对应
         self.entry_ids: list[str] = []
@@ -68,12 +92,35 @@ class MemoryIndex:
         self.last_reindex_reason: str = ""
         self.index_version: int = 1
         self.stored_embedding_model: str = embedding_model_id
+        self.stored_embedding_provider: str = self.embedding_provider
+        self.stored_embedding_api_host: str = self.embedding_api_host
         self.rebuild_required: bool = False
         self.rebuild_reason: str = ""
         self._sync_debounce_seconds: float = 5.0
         self._sync_timer: Optional[threading.Timer] = None
         self._save_lock = threading.RLock()
         self._pending_reason: str = ""
+        self.on_change: Optional[Callable[[str], None]] = None
+
+    @staticmethod
+    def _default_vector_search_enabled(embedding_model_id: str) -> bool:
+        """Keep remote/test models enabled; fence only unsafe local models."""
+        try:
+            from models.model_id_resolver import resolve_model_id
+            from models.model_detector import get_model_provider
+            from services.embedding_service import is_local_embedding_runtime_supported
+
+            registry_key, config = resolve_model_id(embedding_model_id)
+            provider = (
+                str((config or {}).get("provider") or "").casefold()
+                if registry_key is not None
+                else str(get_model_provider(embedding_model_id) or "").casefold()
+            )
+            if provider == "local":
+                return is_local_embedding_runtime_supported()
+        except Exception as exc:
+            logger.debug("无法判断记忆向量运行时，保留既有模式: %s", exc)
+        return True
 
     @staticmethod
     def _hash_content(text: str) -> str:
@@ -92,13 +139,41 @@ class MemoryIndex:
             self._synced_generation = snapshot_generation
             self.dirty = self._state_generation != self._synced_generation
 
+    def _notify_change(self, reason: str) -> None:
+        callback = self.on_change
+        if callback is None:
+            return
+        try:
+            callback(str(reason or "mutation"))
+        except Exception as exc:
+            logger.warning("记忆索引变更回调失败: %s", exc)
+
     def _get_embed_fn(self, api_key: str = None):
         """获取 embedding 函数"""
+        if not self.vector_search_enabled:
+            raise RuntimeError(
+                "记忆向量检索已因 Windows FAISS/PyTorch OpenMP 冲突停用"
+            )
         from services.embedding_service import get_embedding_function
         return get_embedding_function(
             self.embedding_model_id,
             api_key=api_key,
+            base_url=self.embedding_api_host or None,
             allow_model_fallback=False,
+        )
+
+    def embedding_identity(self) -> dict[str, str]:
+        """Return the credential-free vector-space identity for this snapshot."""
+        return {
+            "model": str(self.embedding_model_id or "").strip(),
+            "provider": str(self.embedding_provider or "").strip().casefold(),
+            "api_host": str(self.embedding_api_host or "").strip().rstrip("/"),
+        }
+
+    def _embedding_cache_namespace(self) -> str:
+        identity = self.embedding_identity()
+        return "|".join(
+            (identity["provider"], identity["model"], identity["api_host"])
         )
 
     def _get_cached_embedding(self, text: str) -> Optional[np.ndarray]:
@@ -212,6 +287,24 @@ class MemoryIndex:
                 return False
 
         try:
+            if not self.vector_search_enabled:
+                with self._state_lock:
+                    if should_commit is not None and not should_commit():
+                        return False
+                    if entry_id in self.entry_ids:
+                        idx = self.entry_ids.index(entry_id)
+                        self.texts[idx] = text
+                    else:
+                        self.entry_ids.append(entry_id)
+                        self.texts.append(text)
+                    self._content_hashes[entry_id] = new_hash
+                    self._rebuild_bm25()
+                    self._mark_state_changed_locked()
+                self.schedule_sync(reason="add")
+                self._notify_change("add")
+                logger.debug("记忆条目已写入 BM25-only 索引: %s", entry_id)
+                return True
+
             # 使用缓存机制进行 embedding
             embeddings = self._embed_texts([text], api_key, use_cache=True)
             dimension = embeddings.shape[1]
@@ -246,6 +339,7 @@ class MemoryIndex:
 
             # 异步 dirty-sync 持久化
             self.schedule_sync(reason="add")
+            self._notify_change("add")
             logger.info(f"记忆条目已添加到向量索引: {entry_id}")
             return True
         except Exception as e:
@@ -264,6 +358,10 @@ class MemoryIndex:
         with self._state_lock:
             if entry_id not in self.entry_ids:
                 logger.warning(f"记忆条目不在向量索引中: {entry_id}")
+                # The authoritative store may already have removed the row even
+                # when this baseline index was stale. Downstream snapshots still
+                # need the deletion fence for privacy correctness.
+                self._notify_change("remove_missing")
                 return
 
             idx = self.entry_ids.index(entry_id)
@@ -294,6 +392,7 @@ class MemoryIndex:
             self._mark_state_changed_locked()
 
         self.schedule_sync(reason="remove")
+        self._notify_change("remove")
         logger.info(f"记忆条目已从向量索引移除: {entry_id}")
 
     def search(self, query: str, top_k: int = 3, api_key: str = None) -> list[dict]:
@@ -307,6 +406,8 @@ class MemoryIndex:
         Returns:
             [{"entry_id": str, "similarity": float, "text": str}, ...]
         """
+        if not self.vector_search_enabled:
+            return []
         with self._state_lock:
             if self.index is None or self.index.ntotal == 0:
                 return []
@@ -315,14 +416,15 @@ class MemoryIndex:
             # 查询向量缓存：避免重复 embedding 计算
             from services.embedding_service import _query_vector_cache
             cache_key = f"memory:{query}"
-            cached = _query_vector_cache.get(self.embedding_model_id, cache_key)
+            cache_namespace = self._embedding_cache_namespace()
+            cached = _query_vector_cache.get(cache_namespace, cache_key)
             if cached is not None:
                 query_embedding = cached
             else:
                 query_embedding = self._embed_texts([query], api_key)
                 # 归一化查询向量
                 query_embedding = _normalize_vectors(query_embedding)
-                _query_vector_cache.put(self.embedding_model_id, cache_key, query_embedding)
+                _query_vector_cache.put(cache_namespace, cache_key, query_embedding)
             with self._state_lock:
                 if self.index is None or self.index.ntotal == 0:
                     return []
@@ -411,6 +513,79 @@ class MemoryIndex:
         self.rebuild_required = False
         self.rebuild_reason = ""
         self.stored_embedding_model = self.embedding_model_id
+        self.stored_embedding_provider = self.embedding_provider
+        self.stored_embedding_api_host = self.embedding_api_host
+
+    def matches_entries(self, entries: list) -> bool:
+        """Whether the snapshot exactly matches the current retrievable store."""
+        expected_ids = [str(entry.id) for entry in entries]
+        expected_hashes = {
+            str(entry.id): self._hash_content(str(entry.content or ""))
+            for entry in entries
+        }
+        with self._state_lock:
+            return bool(
+                self.entry_ids == expected_ids
+                and self._content_hashes == expected_hashes
+                and (
+                    not self.vector_search_enabled
+                    or not expected_ids
+                    or (
+                        self.index is not None
+                        and self.index.ntotal == len(expected_ids)
+                    )
+                )
+            )
+
+    def prune_stale_entries(self, entries: list, *, reason: str = "store_mutation") -> int:
+        """Remove deleted or content-changed rows without calculating embeddings.
+
+        New rows are intentionally not added here because a remote credential is
+        unavailable on most background memory writes. The next authenticated
+        retrieval rebuilds the complete snapshot; this method only guarantees
+        that stale or deleted text cannot remain queryable or durable meanwhile.
+        """
+        expected_hashes = {
+            str(entry.id): self._hash_content(str(entry.content or ""))
+            for entry in entries
+        }
+        with self._state_lock:
+            keep_positions = [
+                position
+                for position, entry_id in enumerate(self.entry_ids)
+                if expected_hashes.get(str(entry_id))
+                == self._content_hashes.get(str(entry_id))
+            ]
+            removed = len(self.entry_ids) - len(keep_positions)
+            if removed <= 0:
+                return 0
+
+            old_ids = list(self.entry_ids)
+            old_texts = list(self.texts)
+            self.entry_ids = [old_ids[position] for position in keep_positions]
+            self.texts = [old_texts[position] for position in keep_positions]
+            self._content_hashes = {
+                entry_id: self._content_hashes[entry_id]
+                for entry_id in self.entry_ids
+            }
+
+            if self.index is not None:
+                dimension = self.index.d
+                if keep_positions:
+                    all_vectors = faiss.rev_swig_ptr(
+                        self.index.get_xb(), self.index.ntotal * dimension
+                    ).reshape(self.index.ntotal, dimension).copy()
+                    kept_vectors = all_vectors[keep_positions]
+                    self.index = faiss.IndexFlatIP(dimension)
+                    self.index.add(_normalize_vectors(kept_vectors))
+                else:
+                    self.index = None
+
+            self._rebuild_bm25()
+            self._mark_state_changed_locked()
+
+        self.schedule_sync(reason=reason)
+        return removed
 
     def _build_reindex_state(self, entries: list, api_key: str = None) -> dict:
         """先在内存中构建新索引状态，成功后再整体切换。"""
@@ -423,26 +598,70 @@ class MemoryIndex:
                 "bm25": None,
             }
 
-        texts = [e.content for e in entries]
-        entry_ids = [e.id for e in entries]
-        embeddings = self._embed_texts(texts, api_key, use_cache=True)
-        dimension = embeddings.shape[1]
-        embeddings = _normalize_vectors(embeddings)
-
-        index = faiss.IndexFlatIP(dimension)
-        index.add(embeddings)
-
+        texts = [str(e.content or "") for e in entries]
+        entry_ids = [str(e.id) for e in entries]
+        content_hashes = {
+            entry_id: self._hash_content(text)
+            for entry_id, text in zip(entry_ids, texts)
+        }
         bm25 = BM25Index()
         bm25.build(texts)
+
+        index = None
+        if self.vector_search_enabled:
+            reusable_vectors: dict[str, np.ndarray] = {}
+            with self._state_lock:
+                if (
+                    self.index is not None
+                    and self.index.ntotal == len(self.entry_ids)
+                ):
+                    dimension = self.index.d
+                    existing_vectors = faiss.rev_swig_ptr(
+                        self.index.get_xb(), self.index.ntotal * dimension
+                    ).reshape(self.index.ntotal, dimension).copy()
+                    for position, existing_id in enumerate(self.entry_ids):
+                        if (
+                            content_hashes.get(str(existing_id))
+                            == self._content_hashes.get(str(existing_id))
+                        ):
+                            reusable_vectors[str(existing_id)] = existing_vectors[position]
+
+            missing_positions = [
+                position
+                for position, entry_id in enumerate(entry_ids)
+                if entry_id not in reusable_vectors
+            ]
+            missing_vectors: dict[int, np.ndarray] = {}
+            if missing_positions:
+                embedded = self._embed_texts(
+                    [texts[position] for position in missing_positions],
+                    api_key,
+                    use_cache=True,
+                )
+                missing_vectors = {
+                    position: vector
+                    for position, vector in zip(missing_positions, embedded)
+                }
+
+            embeddings = np.asarray(
+                [
+                    reusable_vectors.get(entry_id, missing_vectors.get(position))
+                    for position, entry_id in enumerate(entry_ids)
+                ],
+                dtype=np.float32,
+            )
+            if embeddings.ndim != 2 or embeddings.shape[0] != len(entry_ids):
+                raise ValueError("记忆向量增量重建结果不完整")
+            dimension = embeddings.shape[1]
+            embeddings = _normalize_vectors(embeddings)
+            index = faiss.IndexFlatIP(dimension)
+            index.add(embeddings)
 
         return {
             "index": index,
             "entry_ids": entry_ids,
             "texts": texts,
-            "content_hashes": {
-                entry_id: self._hash_content(text)
-                for entry_id, text in zip(entry_ids, texts)
-            },
+            "content_hashes": content_hashes,
             "bm25": bm25,
         }
 
@@ -471,6 +690,7 @@ class MemoryIndex:
         self.last_reindex_reason = reason
         self._clear_rebuild_required()
         self.schedule_sync(reason="rebuild")
+        self._notify_change(reason)
         return True
 
     def safe_reindex(self, entries: list, api_key: str = None, reason: str = "rebuild") -> bool:
@@ -574,6 +794,10 @@ class MemoryIndex:
             "entry_ids": self.entry_ids,
             "texts": self.texts,
             "embedding_model": self.embedding_model_id,
+            "embedding_provider": self.embedding_provider,
+            "embedding_api_host": self.embedding_api_host,
+            "embedding_identity_version": 1,
+            "vector_search_enabled": self.vector_search_enabled,
             "bm25": self._bm25,
             "bm25_tokenizer_version": bm25_tokenizer_version,
             "bm25_tokenizer_signature": bm25_tokenizer_signature,
@@ -651,6 +875,17 @@ class MemoryIndex:
                     "synced_generation": self._synced_generation,
                     "pending_sync": self._sync_timer is not None,
                     "stored_embedding_model": self.stored_embedding_model or self.embedding_model_id,
+                    "embedding_provider": self.stored_embedding_provider or self.embedding_provider,
+                    "embedding_api_host": self.stored_embedding_api_host or self.embedding_api_host,
+                    "vector_search_enabled": self.vector_search_enabled,
+                    "vector_index_size": (
+                        self.index.ntotal if self.index is not None else 0
+                    ),
+                    "vector_disabled_reason": self.vector_disabled_reason,
+                    "lexical_index_size": len(self.entry_ids),
+                    "retrieval_mode": (
+                        "hybrid" if self.vector_search_enabled else "bm25_only"
+                    ),
                     "rebuild_required": self.rebuild_required,
                     "rebuild_reason": self.rebuild_reason,
                 }
@@ -686,6 +921,10 @@ class MemoryIndex:
             self.texts = meta.get("texts", [])
             stored_model = meta.get("embedding_model", "")
             self.stored_embedding_model = stored_model or self.embedding_model_id
+            stored_provider = str(meta.get("embedding_provider") or "").strip().casefold()
+            stored_api_host = str(meta.get("embedding_api_host") or "").strip().rstrip("/")
+            self.stored_embedding_provider = stored_provider or self.embedding_provider
+            self.stored_embedding_api_host = stored_api_host or self.embedding_api_host
             self.last_reindex_reason = meta.get("last_reindex_reason", "")
 
             # 恢复持久化的 BM25 索引
@@ -728,20 +967,44 @@ class MemoryIndex:
                 }
 
             # 检查 embedding 模型是否一致
-            if stored_model and stored_model != self.embedding_model_id:
+            identity_mismatch = bool(
+                (stored_model and stored_model != self.embedding_model_id)
+                or (stored_provider and stored_provider != self.embedding_provider)
+                or (stored_api_host and stored_api_host != self.embedding_api_host)
+            )
+            if identity_mismatch:
                 logger.warning(
-                    f"索引 embedding 模型不一致: 存储={stored_model}, "
-                    f"当前={self.embedding_model_id}，需要重建索引"
+                    "索引 embedding 身份不一致: 存储=%s/%s/%s 当前=%s/%s/%s，需要重建索引",
+                    stored_provider,
+                    stored_model,
+                    stored_api_host,
+                    self.embedding_provider,
+                    self.embedding_model_id,
+                    self.embedding_api_host,
                 )
-                self._mark_rebuild_required("embedding_model_changed", stored_model=stored_model)
+                self._mark_rebuild_required(
+                    (
+                        "embedding_model_changed"
+                        if stored_model != self.embedding_model_id
+                        and not (
+                            stored_provider != self.embedding_provider
+                            or stored_api_host != self.embedding_api_host
+                        )
+                        else "embedding_identity_changed"
+                    ),
+                    stored_model=stored_model,
+                )
                 self.entry_ids = []
                 self.texts = []
                 self.index = None
                 self._set_primary_bm25(None)
                 return False
 
-            # 加载 FAISS 索引
-            if os.path.exists(index_path):
+            # BM25-only 模式保留 entry_ids/texts 与持久化词法索引，绝不因
+            # 当前机器不能安全加载 Torch 而清空历史。FAISS 只是可重建缓存。
+            if not self.vector_search_enabled:
+                self.index = None
+            elif os.path.exists(index_path):
                 self.index = faiss.read_index(index_path)
 
                 # 验证索引与元数据一致性
@@ -767,7 +1030,11 @@ class MemoryIndex:
                     return False
 
             # 自动迁移旧 L2 索引到 IP 索引
-            if self.index is not None and self.index.metric_type != faiss.METRIC_INNER_PRODUCT:
+            if (
+                self.vector_search_enabled
+                and self.index is not None
+                and self.index.metric_type != faiss.METRIC_INNER_PRODUCT
+            ):
                 logger.info("检测到旧 L2 索引，自动迁移为 IP 索引...")
                 n = self.index.ntotal
                 d = self.index.d
@@ -796,7 +1063,11 @@ class MemoryIndex:
                 self.dirty = False
             self._clear_rebuild_required()
 
-            logger.info(f"记忆向量索引已加载，共 {len(self.entry_ids)} 条")
+            logger.info(
+                "记忆%s索引已加载，共 %d 条",
+                "混合" if self.vector_search_enabled else " BM25-only ",
+                len(self.entry_ids),
+            )
             return True
         except Exception as e:
             logger.error(f"加载记忆向量索引失败: {e}")

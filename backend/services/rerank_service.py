@@ -2,6 +2,7 @@ import json
 import importlib.util
 import logging
 import os
+import sys
 import threading
 import time
 from typing import List, Optional
@@ -14,6 +15,18 @@ from models.api_key_selector import select_api_key
 from services import rerank_api_service
 
 logger = logging.getLogger(__name__)
+
+
+def is_local_rerank_runtime_supported() -> bool:
+    """当前进程是否可以安全运行 Torch CrossEncoder。
+
+    Windows 的 PyPI FAISS wheel 使用 LLVM OpenMP，而常见的 PyTorch/Conda
+    组合使用 Intel OpenMP。两者在同一进程执行并行算子时会以 OMP Error #15
+    直接终止进程，Python 无法捕获。远程 rerank 不受影响。
+    """
+    if sys.platform != "win32":
+        return True
+    return importlib.util.find_spec("faiss") is None
 
 
 def _get_cross_encoder_class():
@@ -217,6 +230,11 @@ class RerankService:
             item["similarity_percent"] = round(normalized, 2)
 
     def _rerank_local(self, query: str, candidates: List[dict], model_name: str) -> List[dict]:
+        if not is_local_rerank_runtime_supported():
+            raise LocalRerankModelUnavailable(
+                "Windows 当前运行时不能在 FAISS 进程内安全加载 Torch CrossEncoder；"
+                "已保留混合检索排序，可改用远程 rerank provider"
+            )
         logger.info(f"[RerankService] 本地重排序: model={model_name}, 候选数={len(candidates)}")
         model = self._get_model(model_name)
         pairs = [(query, self._candidate_text(item)) for item in candidates]

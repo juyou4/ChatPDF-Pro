@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   AlertCircle,
@@ -12,6 +12,12 @@ import {
   X,
 } from 'lucide-react';
 import MinerUScanLoader from './MinerUScanLoader';
+import { useMinerUElapsedClock } from '../hooks/useMinerUElapsedClock';
+import {
+  applyMinerUElapsedToProgress,
+  canonicalizeMinerUProgressStage,
+  formatMinerUElapsed,
+} from '../utils/mineruProgressUtils';
 
 const VISIBLE_TASK_STATES = new Set(['running', 'failed', 'recommended']);
 
@@ -30,41 +36,71 @@ const getTaskProgress = (progress) => {
 export const TASK_PILL_PANEL_MOTION = {
   initial: {
     opacity: 0,
-    x: 0,
-    y: -52,
-    scaleX: 0.2,
-    scaleY: 0.12,
-    borderRadius: 999,
+    y: -10,
   },
   animate: {
     opacity: 1,
-    x: 0,
     y: 0,
-    scaleX: 1,
-    scaleY: 1,
-    borderRadius: 20,
   },
   exit: {
     opacity: 0,
-    x: 0,
-    y: -52,
-    scaleX: 0.2,
-    scaleY: 0.12,
-    borderRadius: 999,
+    y: -10,
   },
   transition: {
-    type: 'spring',
-    stiffness: 500,
-    damping: 40,
-    mass: 0.72,
-    opacity: { duration: 0.14, ease: [0.22, 1, 0.36, 1] },
-    borderRadius: { duration: 0.2, ease: [0.22, 1, 0.36, 1] },
+    duration: 0.16,
+    ease: [0.22, 1, 0.36, 1],
   },
 };
 
 export const getVisibleBackgroundTasks = (items, hasDocument) => {
   if (!hasDocument || !Array.isArray(items)) return [];
   return items.filter((item) => VISIBLE_TASK_STATES.has(item?.state));
+};
+
+const canonicalizeTaskStatus = (status) => {
+  const text = String(status || '').trim();
+  if (/^(预估|远端)\s*\d+%$/.test(text)) return '';
+  return text;
+};
+
+const backgroundTaskSignature = (item) => {
+  if (!item || typeof item !== 'object') return '';
+  const progress = item.progress && typeof item.progress === 'object' ? item.progress : {};
+  const events = Array.isArray(item.events) ? item.events : [];
+  const lastEvent = events[events.length - 1] || {};
+  return [
+    item.id,
+    item.state,
+    canonicalizeTaskStatus(item.status),
+    item.desc,
+    item.title,
+    item.parseGeneration,
+    item.actionLabel,
+    canonicalizeMinerUProgressStage(progress.stage),
+    progress.estimated === false ? progress.percent : '',
+    events.length,
+    lastEvent.stage,
+    lastEvent.status,
+  ].map((value) => String(value ?? '')).join('|');
+};
+
+export const stabilizeBackgroundTaskItems = (previous, next) => {
+  if (previous === next) return previous ?? next ?? [];
+  if (!Array.isArray(next)) return [];
+  if (
+    Array.isArray(previous)
+    && previous.length === next.length
+    && previous.every((item, index) => {
+      const incoming = next[index];
+      const prevGen = String(item?.parseGeneration || '');
+      const nextGen = String(incoming?.parseGeneration || '');
+      const hydrated = nextGen ? incoming : { ...incoming, parseGeneration: prevGen };
+      return backgroundTaskSignature(item) === backgroundTaskSignature(hydrated);
+    })
+  ) {
+    return previous;
+  }
+  return next;
 };
 
 export const getBackgroundTaskSummary = (items) => {
@@ -93,10 +129,10 @@ const TASK_STYLES = {
   },
   failed: {
     Icon: AlertCircle,
-    lightIconClassName: 'text-rose-500',
-    darkIconClassName: 'text-rose-300',
-    lightStatusClassName: 'text-rose-600',
-    darkStatusClassName: 'text-rose-300',
+    lightIconClassName: 'text-[#B85F47]',
+    darkIconClassName: 'text-[#FFA07A]',
+    lightStatusClassName: 'text-[#B85F47]',
+    darkStatusClassName: 'text-[#FFA07A]',
   },
   recommended: {
     Icon: Sparkles,
@@ -143,7 +179,62 @@ const formatEventTime = (value) => {
   }
 };
 
-const BackgroundTaskPanel = ({
+const splitDiagnosticMessage = (value) => {
+  const text = String(value || '').trim();
+  const match = text.match(/^(.*?)[:：]\s*`?([A-Za-z][A-Za-z0-9_]+)`?\s*$/);
+  if (!match) return { message: text, code: '' };
+  return { message: match[1].trim(), code: match[2] };
+};
+
+const parseClockSeedMs = (value) => {
+  if (value === null || value === undefined || value === '') return 0;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 0 && value < 1e11 ? value * 1000 : value;
+  }
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const MinerUElapsedSuffix = ({ active, resetKey, seedMs }) => {
+  const elapsedSeconds = useMinerUElapsedClock(active, resetKey, seedMs);
+  const label = formatMinerUElapsed(elapsedSeconds);
+  if (!label) return null;
+  return <>{` · 已耗时 ${label}`}</>;
+};
+
+const MinerURunningProgress = ({ item, darkMode }) => {
+  const elapsedSeconds = useMinerUElapsedClock(
+    true,
+    [String(item?.id || ''), String(item?.parseGeneration || '')].join(':'),
+    parseClockSeedMs(item?.startedAt),
+  );
+  const taskProgress = getTaskProgress(
+    applyMinerUElapsedToProgress(item?.progress, elapsedSeconds),
+  );
+  if (!taskProgress) return null;
+  return (
+    <div className="mt-2 flex items-center gap-2">
+      <div
+        role="progressbar"
+        aria-label={`${item.title}：${taskProgress.ariaLabel}`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={taskProgress.percent}
+        className={`relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full ${darkMode ? 'bg-white/10' : 'bg-[#eee8e3]'}`}
+      >
+        <div
+          className="mineru-progress-fill absolute inset-y-0 left-0 rounded-full bg-[#D97A5D]"
+          style={{ transform: `scaleX(${taskProgress.percent / 100})` }}
+        />
+      </div>
+      <span className={`shrink-0 text-[10px] font-semibold tabular-nums ${darkMode ? 'text-[#FFA07A]' : 'text-[#B85F47]'}`}>
+        {taskProgress.label}
+      </span>
+    </div>
+  );
+};
+
+const BackgroundTaskPanel = memo(({
   items = [],
   autoEnabled,
   onAutoEnabledChange,
@@ -165,11 +256,10 @@ const BackgroundTaskPanel = ({
       animate={TASK_PILL_PANEL_MOTION.animate}
       exit={TASK_PILL_PANEL_MOTION.exit}
       transition={TASK_PILL_PANEL_MOTION.transition}
-      style={{ transformOrigin: 'top right' }}
-      className={`absolute right-0 top-[3.25rem] w-[330px] will-change-transform overflow-hidden rounded-[20px] border shadow-[0_24px_60px_rgba(15,23,42,0.16)] backdrop-blur-xl ${
+      className={`absolute right-0 top-[3.25rem] w-[330px] overflow-hidden rounded-[22px] border shadow-[0_20px_48px_rgba(76,60,43,0.14)] backdrop-blur-xl ${
         darkMode
           ? 'border-white/10 bg-[#1f2329]/95 text-gray-100'
-          : 'border-white/80 bg-white/95 text-gray-900'
+          : 'border-[#E7E1D9] bg-[#fffefd]/95 text-[#24272d]'
       }`}
       role="dialog"
       aria-label="后台任务"
@@ -177,8 +267,23 @@ const BackgroundTaskPanel = ({
       <div className={`flex items-start justify-between gap-3 border-b px-4 pb-3 pt-4 ${darkMode ? 'border-white/[0.08]' : 'border-[#eee8e3]'}`}>
         <div>
           <div className="text-[14px] font-bold">后台任务</div>
-          <div className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-            {summary.state === 'idle' ? '当前没有运行或待处理任务' : summary.label}
+          <div className="mt-1 flex items-center gap-1.5">
+            {summary.state !== 'idle' && (
+              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                summary.state === 'failed'
+                  ? (darkMode ? 'bg-[#D97A5D]/15 text-[#FFA07A]' : 'bg-[#F8EBE6] text-[#B85F47]')
+                  : summary.state === 'running'
+                    ? (darkMode ? 'bg-[#D97A5D]/15 text-[#FFA07A]' : 'bg-[#FFF4EF] text-[#B85F47]')
+                    : (darkMode ? 'bg-amber-400/15 text-amber-200' : 'bg-[#F6EFE4] text-[#9A7048]')
+              }`}>
+                {summary.label}
+              </span>
+            )}
+            {summary.state === 'idle' && (
+              <span className={`text-[11px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                当前没有运行或待处理任务
+              </span>
+            )}
           </div>
         </div>
         <div className="relative flex items-center gap-1">
@@ -269,8 +374,16 @@ const BackgroundTaskPanel = ({
           const shortfallCode = String(item.shortfall?.code || '').trim();
           const hasDetails = events.length > 0 || Boolean(shortfallCode);
           const expanded = expandedTaskIds.has(item.id);
+          const diagnostic = splitDiagnosticMessage(item.desc);
           return (
-            <div key={item.id} className="flex items-start gap-3 py-3.5">
+            <div
+              key={item.id}
+              className={`flex items-start gap-3 py-3.5 ${
+                item.state === 'failed'
+                  ? `my-2 rounded-[14px] border px-2.5 ${darkMode ? 'border-[#D97A5D]/20 bg-[#D97A5D]/10' : 'border-[#F0DDD6] bg-[#FBF4F1]'}`
+                  : ''
+              }`}
+            >
               {showMinerUScanLoader ? (
                 <MinerUScanLoader
                   size={20}
@@ -301,8 +414,29 @@ const BackgroundTaskPanel = ({
                     </button>
                   )}
                 </div>
-                <div className={`mt-1 text-[10px] leading-4 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>{item.desc}</div>
-                {taskProgress && (
+                <div className={`mt-1 text-[10px] leading-4 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                  {diagnostic.message}
+                  {item.id === 'deep_parse' && item.state === 'running' && (
+                    <MinerUElapsedSuffix
+                      active
+                      resetKey={[
+                        String(item.id || ''),
+                        String(item.parseGeneration || ''),
+                      ].join(':')}
+                      seedMs={parseClockSeedMs(item.startedAt)}
+                    />
+                  )}
+                  {diagnostic.code && (
+                    <code className={`mt-1.5 block w-fit rounded-[7px] px-1.5 py-0.5 font-mono text-[10px] font-semibold tracking-tight ${
+                      darkMode ? 'bg-white/5 text-[#FFC4B0]' : 'bg-white/80 text-[#8A5A48]'
+                    }`}>
+                      {diagnostic.code}
+                    </code>
+                  )}
+                </div>
+                {item.id === 'deep_parse' && item.state === 'running' ? (
+                  <MinerURunningProgress item={item} darkMode={darkMode} />
+                ) : taskProgress ? (
                   <div className="mt-2 flex items-center gap-2">
                     <div
                       role="progressbar"
@@ -312,18 +446,16 @@ const BackgroundTaskPanel = ({
                       aria-valuenow={taskProgress.percent}
                       className={`relative h-1.5 min-w-0 flex-1 overflow-hidden rounded-full ${darkMode ? 'bg-white/10' : 'bg-[#eee8e3]'}`}
                     >
-                      <motion.div
-                        initial={false}
-                        animate={{ scaleX: taskProgress.percent / 100 }}
-                        transition={{ duration: 0.35, ease: 'easeOut' }}
-                        className="absolute inset-y-0 left-0 w-full origin-left rounded-full bg-[#D97A5D]"
+                      <div
+                        className="mineru-progress-fill absolute inset-y-0 left-0 rounded-full bg-[#D97A5D]"
+                        style={{ transform: `scaleX(${taskProgress.percent / 100})` }}
                       />
                     </div>
                     <span className={`shrink-0 text-[10px] font-semibold tabular-nums ${darkMode ? 'text-[#FFA07A]' : 'text-[#B85F47]'}`}>
                       {taskProgress.label}
                     </span>
                   </div>
-                )}
+                ) : null}
                 {expanded && hasDetails && (
                   <div className={`mt-2.5 space-y-1.5 rounded-[10px] border px-2.5 py-2 text-[10px] ${darkMode ? 'border-white/[0.08] bg-white/[0.03] text-gray-400' : 'border-[#eee8e3] bg-[#fbfaf8] text-gray-500'}`}>
                     {shortfallCode && (
@@ -361,7 +493,13 @@ const BackgroundTaskPanel = ({
                   type="button"
                   onClick={() => item.onAction?.()}
                   disabled={item.disabled}
-                  className={`shrink-0 rounded-[8px] px-2.5 py-1.5 text-[10px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/35 disabled:cursor-not-allowed disabled:opacity-40 ${darkMode ? 'bg-white/[0.07] text-gray-200 hover:bg-white/10' : 'bg-[#fff4ef] text-[#B85F47] hover:bg-[#ffe8df]'}`}
+                  className={`shrink-0 rounded-full px-2.5 py-1.5 text-[10px] font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/35 disabled:cursor-not-allowed disabled:opacity-40 active:scale-[0.98] ${
+                    item.state === 'failed'
+                      ? 'bg-[#D97A5D] text-white shadow-[0_4px_10px_rgba(160,76,55,0.2)] hover:bg-[#c66b50]'
+                      : darkMode
+                        ? 'bg-white/[0.07] text-gray-200 hover:bg-white/10'
+                        : 'bg-[#fff4ef] text-[#B85F47] hover:bg-[#ffe8df]'
+                  }`}
                 >
                   {item.actionLabel}
                 </button>
@@ -372,6 +510,6 @@ const BackgroundTaskPanel = ({
       </div>
     </motion.div>
   );
-};
+});
 
 export default BackgroundTaskPanel;
