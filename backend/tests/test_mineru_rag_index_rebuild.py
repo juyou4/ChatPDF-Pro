@@ -220,6 +220,53 @@ def test_deep_parse_status_does_not_recommend_rag_rebuild_when_index_is_mineru(i
     assert status["recommend_rag_index_reason"] == ""
 
 
+def test_assess_recommends_rag_publish_when_ready_parse_has_stale_index(isolated_document_routes):
+    _data_dir, vectors_dir = isolated_document_routes
+    doc_id = "doc-stale-rag-publish"
+    manifest = document_routes.build_parse_manifest(
+        doc_id=doc_id,
+        route="mineru",
+        source_hash="src-new",
+        generation="gen-new",
+        status=document_routes.PARSE_STATUS_READY,
+        resolved_route="mineru",
+        stage="ready",
+        metadata={"full_route": True},
+    )
+    document_routes.documents_store[doc_id] = {
+        "filename": "paper.pdf",
+        "data": {
+            "full_text": "mineru text",
+            "total_pages": 1,
+            "pages": [{"page": 1, "content": "mineru"}],
+            "parse_manifest": manifest,
+        },
+    }
+    _write_vector_pair(
+        vectors_dir,
+        doc_id,
+        source="mineru",
+        chunks=["stale mineru chunk"],
+        index_meta={
+            "parse_generation": "gen-old",
+            "document_source_hash": "src-old",
+        },
+    )
+
+    rag_index = document_routes._get_rag_index_status(doc_id)
+    result = document_routes._assess_deep_parse_recommendation(
+        doc_id,
+        True,
+        None,
+        rag_index=rag_index,
+    )
+
+    assert rag_index["ready"] is False
+    assert rag_index["matches_active_parse"] is False
+    assert result["recommend_rag_index_rebuild"] is True
+    assert "尚未按当前解析结果发布" in result["recommend_rag_index_reason"]
+
+
 def test_rebuild_mineru_rag_index_replaces_after_temp_success_and_can_rollback(monkeypatch, isolated_document_routes):
     data_dir, vectors_dir = isolated_document_routes
     doc_id = "doc-rag"

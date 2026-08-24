@@ -3113,15 +3113,38 @@ def _assess_deep_parse_recommendation(
     if active_mineru:
         rag_index = rag_index if isinstance(rag_index, dict) else _get_rag_index_status(doc_id)
         rag_source = str(rag_index.get("index_source") or ("pdf_native" if rag_index.get("ready") else "")).strip()
-        recommend_rag_rebuild = bool(rag_index.get("ready") and rag_source != MINERU_RAG_INDEX_SOURCE)
+        rag_status = str(rag_index.get("status") or "").strip().lower()
+        rag_ready = bool(rag_index.get("ready"))
+        parse_ready = is_parse_prepared(parse_manifest)
+        if rag_status in {"queued", "running"}:
+            recommend_rag_rebuild = False
+            recommend_reason = ""
+        elif rag_ready and rag_source != MINERU_RAG_INDEX_SOURCE:
+            recommend_rag_rebuild = True
+            recommend_reason = (
+                "MinerU 深度解析已完成，但问答索引仍使用本地 PDF 解析；建议重建问答索引以启用结构化表格证据"
+            )
+        elif (
+            parse_ready
+            and not _is_legacy_parse_manifest(parse_manifest)
+            and (
+                not rag_ready
+                or rag_index.get("matches_active_parse") is False
+                or rag_status in {"stale", "missing", "failed"}
+            )
+        ):
+            recommend_rag_rebuild = True
+            recommend_reason = (
+                "MinerU 版面解析已完成，但问答索引尚未按当前解析结果发布；发布后才能继续提问"
+            )
+        else:
+            recommend_rag_rebuild = False
+            recommend_reason = ""
         return {
             "recommend_deep_parse": False,
             "recommend_reason": "",
             "recommend_rag_index_rebuild": recommend_rag_rebuild,
-            "recommend_rag_index_reason": (
-                "MinerU 深度解析已完成，但问答索引仍使用本地 PDF 解析；建议重建问答索引以启用结构化表格证据"
-                if recommend_rag_rebuild else ""
-            ),
+            "recommend_rag_index_reason": recommend_reason,
         }
 
     doc_data = doc.get("data") if isinstance(doc, dict) else None
@@ -9457,7 +9480,7 @@ async def get_document_section_outline(doc_id: str, force: bool = False):
         doc=doc,
         data_dir=DATA_DIR,
         pdf_path=_resolve_document_pdf_path(doc),
-        force_rebuild=force,
+        force_rebuild=False,
     )
     try:
         return await get_or_create_section_outline(
@@ -9517,7 +9540,7 @@ async def create_document_section_outline(
         doc=doc,
         data_dir=DATA_DIR,
         pdf_path=_resolve_document_pdf_path(doc),
-        force_rebuild=force,
+        force_rebuild=False,
     )
     task = _start_downstream_outline_task(
         purpose="section_outline",

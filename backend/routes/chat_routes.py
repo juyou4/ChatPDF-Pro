@@ -443,7 +443,7 @@ def _require_chat_document_parse_ready(doc_id: str, doc: dict) -> dict:
         if not _chat_vector_index_matches_parse(doc_id, manifest):
             raise HTTPException(
                 status_code=409,
-                detail="当前文档的问答索引正在按新的解析结果更新，请稍后重试",
+                detail="当前文档的问答索引尚未按这次解析结果发布，请在任务面板点击发布后再提问",
             )
         return manifest
     route = str(

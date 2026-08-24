@@ -499,6 +499,22 @@ const isMinerUFullRoute = (manifest) => {
   return route === 'mineru';
 };
 
+const RAG_INDEX_UNUSABLE_STATUSES = new Set(['stale', 'missing', 'failed']);
+
+const ragIndexNeedsPublish = (ragIndexStatus) => {
+  if (!ragIndexStatus || typeof ragIndexStatus !== 'object') return false;
+  if (ragIndexStatus.upgrade_required) return true;
+  if (ragIndexStatus.matches_active_parse === false) return true;
+  if (ragIndexStatus.ready === false) return true;
+  return RAG_INDEX_UNUSABLE_STATUSES.has(String(ragIndexStatus.status || '').toLowerCase());
+};
+
+const restoreDocScopedForce = (forceRef, docId, shouldRestore) => {
+  if (shouldRestore && docId) {
+    forceRef.current = docId;
+  }
+};
+
 const getParseIdentity = (manifest) => {
   const route = String(
     manifest?.resolved_route || manifest?.requested_route || manifest?.route || ''
@@ -536,7 +552,12 @@ const getOutlineResultNotice = (data, fallbackMessage) => {
   if (data?.source === 'ai_partial') {
     return '部分章节未完成 AI 总结，当前保留已生成内容；可手动重新生成补齐。';
   }
-  return data?.meta?.generation_error ? fallbackMessage : '';
+  const generationError = String(data?.meta?.generation_error || '');
+  if (!generationError) return '';
+  if (/SSL|TLS|bad record mac/i.test(generationError)) {
+    return '模型连接失败（TLS 中断），当前显示文档基础结构';
+  }
+  return fallbackMessage;
 };
 
 const isMinerUParseGateError = (error) => {
@@ -893,6 +914,7 @@ const ChatPDF = () => {
   const readingOutlineCacheRef = useRef(new Map());
   const sectionOutlineRequestRef = useRef(0);
   const sectionOutlineForceRef = useRef(false);
+  const sectionOutlineManualRetryRef = useRef(null);
   const sectionOutlineCacheRef = useRef(new Map());
   const streamConfigMigratedRef = useRef(false);
   const uploadStartsNewChatRef = useRef(true);
@@ -1803,8 +1825,10 @@ const ChatPDF = () => {
     routeCancelled: isMinerUFullRouteCancelled,
   });
   const canUseLegacyMinerUActions = !documentParseManifest || isLegacyParseManifest;
-  const canPublishPendingMinerURag = isNewMinerUPrimaryRoute
-    && documentParseManifest?.stage === 'awaiting_rag_index';
+  const canPublishPendingMinerURag = isNewMinerUPrimaryRoute && (
+    documentParseManifest?.stage === 'awaiting_rag_index'
+    || (!isMinerUFullRoutePending && ragIndexNeedsPublish(ragIndexStatus))
+  );
   const requiresMinerURagSource = Boolean(
     isNewMinerUPrimaryRoute
     || canPublishPendingMinerURag
@@ -2659,8 +2683,12 @@ const ChatPDF = () => {
     readingOutlineRequestRef.current = requestId;
     const { headers, canCallModel, providerId, modelId } = getChatRequestConfig();
     const visualCredentials = getVisualCredentials();
-    const shouldForce = canCallModel && readingOutlineForceRef.current;
-    readingOutlineForceRef.current = false;
+    const forceRequested = Boolean(docId) && readingOutlineForceRef.current === docId;
+    const shouldForce = canCallModel && forceRequested;
+    if (shouldForce) {
+      readingOutlineForceRef.current = null;
+    }
+    let forceSettled = false;
     const shouldAutoGenerate = canCallModel && aiAutoProcess && autoOutlineSummary;
     const cacheKey = buildOutlineCacheKey(docId, documentParseIdentity, blockIndex);
     const cachedOutline = readingOutlineCacheRef.current.get(cacheKey);
@@ -2677,6 +2705,7 @@ const ChatPDF = () => {
       setReadingOutlineLoading(false);
       return () => {
         cancelled = true;
+        restoreDocScopedForce(readingOutlineForceRef, requestContext.docId, forceRequested && !forceSettled);
       };
     }
 
@@ -2724,6 +2753,7 @@ const ChatPDF = () => {
     })()
       .then((data) => {
         if (isActiveRequest() && readingOutlineRequestRef.current === requestId) {
+          forceSettled = true;
           readingOutlineCacheRef.current.set(cacheKey, data);
           setReadingOutline(data);
           setReadingOutlineFallbackNotice(
@@ -2733,6 +2763,7 @@ const ChatPDF = () => {
       })
       .catch((error) => {
         if (isActiveRequest() && readingOutlineRequestRef.current === requestId) {
+          forceSettled = true;
           console.warn('[ImmersiveReading] AI 大纲加载失败', error);
           setReadingOutline(buildClientReadingFallback(blockIndex));
           setReadingOutlineError('');
@@ -2749,6 +2780,7 @@ const ChatPDF = () => {
 
     return () => {
       cancelled = true;
+      restoreDocScopedForce(readingOutlineForceRef, requestContext.docId, forceRequested && !forceSettled);
     };
   }, [
     docId,
@@ -2774,25 +2806,84 @@ const ChatPDF = () => {
       setReadingOutlineError(`请先为 ${providerName} 配置 API Key 后再重新生成`);
       return;
     }
-    readingOutlineForceRef.current = true;
+    readingOutlineForceRef.current = docId;
     readingOutlineCacheRef.current.clear();
     setReadingOutlineFallbackNotice('');
     setReadingOutlineReloadKey((value) => value + 1);
-  }, [getChatRequestConfig, isMinerUFullRoutePending, minerUParsePendingNotice]);
+  }, [docId, getChatRequestConfig, isMinerUFullRoutePending, minerUParsePendingNotice]);
 
-  const handleRegenerateSectionOutline = useCallback(() => {
+  const handleRegenerateSectionOutline = useCallback(async () => {
     if (isMinerUFullRoutePending) {
       setSectionOutlineError(minerUParsePendingNotice);
       return;
     }
-    const { canCallModel, providerName } = getChatRequestConfig();
+    const { headers, canCallModel, providerName } = getChatRequestConfig();
     if (!canCallModel) {
       setSectionOutlineError(`请先为 ${providerName} 配置 API Key 后再重新生成`);
       return;
     }
-    sectionOutlineForceRef.current = true;
-    setSectionOutlineReloadKey((value) => value + 1);
-  }, [getChatRequestConfig, isMinerUFullRoutePending, minerUParsePendingNotice]);
+    if (!docId) return;
+    const requestId = sectionOutlineRequestRef.current + 1;
+    sectionOutlineRequestRef.current = requestId;
+    sectionOutlineManualRetryRef.current = {
+      requestId,
+      docId,
+      parseIdentity: documentParseIdentity,
+    };
+    sectionOutlineForceRef.current = null;
+    sectionOutlineCacheRef.current.clear();
+    setSectionOutlineError('');
+    setSectionOutlineFallbackNotice('');
+    setSectionOutlineLoading(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/documents/${docId}/section-outline`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ force: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      if (sectionOutlineRequestRef.current !== requestId) return;
+      const cacheKey = buildOutlineCacheKey(docId, documentParseIdentity, blockIndex);
+      sectionOutlineCacheRef.current.set(cacheKey, data);
+      setSectionOutline(data);
+      setSectionOutlineFallbackNotice(
+        getOutlineResultNotice(data, 'AI 章节大纲生成失败，当前显示文档基础结构')
+      );
+      refreshDownstreamTaskStatuses().catch(() => {});
+    } catch (error) {
+      if (sectionOutlineRequestRef.current !== requestId) return;
+      console.warn('[ImmersiveReading] 章节大纲重试失败', error);
+      setSectionOutlineFallbackNotice(
+        /SSL|TLS|bad record mac/i.test(String(error?.message || ''))
+          ? '模型连接失败（TLS 中断），当前显示文档基础结构'
+          : 'AI 章节大纲生成失败，当前显示文档基础结构'
+      );
+    } finally {
+      if (sectionOutlineManualRetryRef.current?.requestId === requestId) {
+        sectionOutlineManualRetryRef.current = null;
+      }
+      if (sectionOutlineRequestRef.current === requestId) {
+        setSectionOutlineLoading(false);
+      }
+    }
+  }, [
+    blockIndex,
+    docId,
+    documentParseIdentity,
+    getChatRequestConfig,
+    isMinerUFullRoutePending,
+    minerUParsePendingNotice,
+    refreshDownstreamTaskStatuses,
+  ]);
+
+  const sectionOutlineAuthKey = (() => {
+    const config = getChatRequestConfig();
+    return `${config.providerId || ''}:${config.modelId || ''}:${Number(Boolean(config.canCallModel))}`;
+  })();
+  const sectionOutlineBlockKey = blockIndex?.block_index_hash
+    || blockIndex?.block_index_revision
+    || '';
 
   useEffect(() => {
     let cancelled = false;
@@ -2802,6 +2893,16 @@ const ChatPDF = () => {
       epoch: parseContextRef.current.epoch,
     };
     const isActiveRequest = () => !cancelled && isCurrentParseContext(requestContext);
+    const pendingManualRetry = sectionOutlineManualRetryRef.current;
+    if (
+      pendingManualRetry
+      && pendingManualRetry.docId === requestContext.docId
+      && pendingManualRetry.parseIdentity === requestContext.parseIdentity
+    ) {
+      return () => {
+        cancelled = true;
+      };
+    }
     if (!docId || !blockIndex) {
       setSectionOutline(null);
       setSectionOutlineError(isMinerUFullRoutePending ? minerUParsePendingNotice : '');
@@ -2813,8 +2914,12 @@ const ChatPDF = () => {
     const requestId = sectionOutlineRequestRef.current + 1;
     sectionOutlineRequestRef.current = requestId;
     const { headers, canCallModel, providerId, modelId } = getChatRequestConfig();
-    const shouldForce = canCallModel && sectionOutlineForceRef.current;
-    sectionOutlineForceRef.current = false;
+    const forceRequested = Boolean(docId) && sectionOutlineForceRef.current === docId;
+    const shouldForce = canCallModel && forceRequested;
+    if (shouldForce) {
+      sectionOutlineForceRef.current = null;
+    }
+    let forceSettled = false;
     const shouldAutoGenerate = canCallModel && aiAutoProcess && autoOutlineSummary;
     const cacheKey = buildOutlineCacheKey(docId, documentParseIdentity, blockIndex);
     const cachedOutline = sectionOutlineCacheRef.current.get(cacheKey);
@@ -2831,6 +2936,7 @@ const ChatPDF = () => {
       setSectionOutlineLoading(false);
       return () => {
         cancelled = true;
+        restoreDocScopedForce(sectionOutlineForceRef, requestContext.docId, forceRequested && !forceSettled);
       };
     }
 
@@ -2866,6 +2972,7 @@ const ChatPDF = () => {
     })()
       .then((data) => {
         if (isActiveRequest() && sectionOutlineRequestRef.current === requestId) {
+          forceSettled = true;
           sectionOutlineCacheRef.current.set(cacheKey, data);
           setSectionOutline(data);
           setSectionOutlineFallbackNotice(
@@ -2875,6 +2982,7 @@ const ChatPDF = () => {
       })
       .catch((error) => {
         if (isActiveRequest() && sectionOutlineRequestRef.current === requestId) {
+          forceSettled = true;
           console.warn('[ImmersiveReading] 章节大纲加载失败，回退启发式大纲', error);
           setSectionOutline(null);
           setSectionOutlineError('');
@@ -2891,12 +2999,14 @@ const ChatPDF = () => {
 
     return () => {
       cancelled = true;
+      restoreDocScopedForce(sectionOutlineForceRef, requestContext.docId, forceRequested && !forceSettled);
     };
   }, [
     docId,
     documentParseIdentity,
-    blockIndex,
-    getChatRequestConfig,
+    sectionOutlineAuthKey,
+    sectionOutlineBlockKey,
+    Boolean(blockIndex),
     isCurrentParseContext,
     sectionOutlineReloadKey,
     aiAutoProcess,
@@ -4823,7 +4933,7 @@ const ChatPDF = () => {
     }
     if (resolvedDocumentParseState.state === 'ready') {
       const droppedHeadings = Number(currentDeepParseStatus?.silently_dropped_heading_count || 0);
-      const outlineIncomplete = Boolean(currentDeepParseStatus?.structure_degraded);
+      const outlineIncomplete = Boolean(currentDeepParseStatus?.structure_degraded) && droppedHeadings > 0;
       return {
         status: 'complete',
         title: 'MinerU 解析完成',
@@ -5057,6 +5167,11 @@ const ChatPDF = () => {
           : readingOutlineFallbackNotice
             ? 'recommended'
             : taskState(summaryTask, 'idle');
+    const outlineHasUsableTree = Boolean(
+      sectionOutline
+      && ['ai', 'mineru', 'toc', 'bookmark'].includes(String(sectionOutline.source || ''))
+      && !sectionOutline?.meta?.generation_error
+    );
     const outlineState = suppressDependentTasks
       ? 'idle'
       : sectionOutlineLoading
@@ -5065,7 +5180,9 @@ const ChatPDF = () => {
             ? 'failed'
             : sectionOutlineFallbackNotice
               ? 'recommended'
-              : taskState(outlineTask, 'idle');
+              : outlineHasUsableTree
+                ? 'idle'
+                : taskState(outlineTask, 'idle');
     const overviewState = suppressDependentTasks
       ? 'idle'
         : overviewLoading
@@ -5167,7 +5284,9 @@ const ChatPDF = () => {
     const ragIndexDesc = ragIndexUpgradeRequired
       ? '当前仍是旧版问答索引；升级后会按阅读块顺序重建正文，并隔离表格行与参考文献污染'
       : canPublishPendingMinerURag
-      ? 'MinerU 版面结果已就绪，使用当前 Embedding 配置发布问答索引后会统一开放全部能力'
+      ? documentParseManifest?.stage === 'awaiting_rag_index'
+        ? 'MinerU 版面结果已就绪，使用当前 Embedding 配置发布问答索引后会统一开放全部能力'
+        : '问答索引尚未对齐这次解析结果；发布后才能继续提问'
       : !currentDeepParseStatus?.active_mineru
       ? '先完成 MinerU 深度解析后，才能把问答索引升级为同源结构化结果'
       : ragIndexIsMinerU
@@ -5381,6 +5500,7 @@ const ChatPDF = () => {
     ragIndexNotice,
     ragIndexStatus?.index_source,
     ragIndexStatus?.error,
+    ragIndexStatus?.matches_active_parse,
     ragIndexStatus?.ready,
     ragIndexStatus?.status,
     ragIndexStatus?.table_chunk_count,
@@ -5389,6 +5509,7 @@ const ChatPDF = () => {
     readingOutlineError,
     readingOutlineFallbackNotice,
     readingOutlineLoading,
+    sectionOutline,
     sectionOutlineError,
     sectionOutlineFallbackNotice,
     sectionOutlineLoading,

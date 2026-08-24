@@ -191,7 +191,11 @@ async def get_or_create_section_outline(
         mineru_meta = block_index.get("mineru_meta")
         if isinstance(mineru_meta, dict):
             mineru_outline.setdefault("meta", {})["structure_version"] = mineru_meta.get("structure_version")
-        logger.info("[SectionOutline] Using verified MinerU structure for %s", doc_id)
+            if mineru_meta.get("structure_degraded"):
+                mineru_outline.setdefault("meta", {})["structure_recovered"] = True
+        writer = cache_writer or (lambda value: save_section_outline(data_dir, doc_id, value))
+        writer(mineru_outline)
+        logger.info("[SectionOutline] Using MinerU navigation structure for %s", doc_id)
         return mineru_outline
     bookmark_outline = _build_bookmark_outline(
         doc_id=doc_id,
@@ -399,11 +403,19 @@ def _mineru_structure_is_navigation_ready(
     block_index: dict[str, Any],
     outline: dict[str, Any],
 ) -> bool:
-    """Prefer MinerU's published heading tree over a second LLM reconstruction."""
+    """Prefer MinerU's published heading tree over a second LLM reconstruction.
+
+    ``structure_degraded`` only means raw ``text_level`` provenance could not
+    be verified. The published or recovered tree can still be complete enough
+    to navigate; forcing an LLM rebuild just to relabel it is what produced
+    heuristic fallbacks after transient API/TLS failures.
+    """
     if str(block_index.get("source") or "").strip().lower() != "mineru_vlm":
         return False
     mineru_meta = block_index.get("mineru_meta")
-    if not isinstance(mineru_meta, dict) or mineru_meta.get("structure_degraded") is not False:
+    if not isinstance(mineru_meta, dict):
+        return False
+    if mineru_meta.get("outline_is_fallback_only") or mineru_meta.get("flat_structure_without_headings"):
         return False
     items = outline.get("flat_items") or _flatten_outline_items(outline.get("items") or [])
     return _outline_items_quality_ok(items)
