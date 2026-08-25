@@ -233,7 +233,7 @@ Results for the 17-question `numeric_table` subset:
 | A1 `pdf_native` | 0.8300 | 0.8140 | 0.8820 | 0.7600 |
 | Current `mineru` | **0.9733** | **0.9533** | **1.0000** | **0.7986** |
 
-The current MinerU index improves faithfulness, context precision, context recall, and answer correctness over A1. Answer Relevancy falls from 0.4268 to 0.3399; the metric is sensitive to short numeric answers, so the raw regression is reported rather than hidden. See the [MinerU RAG index upgrade record](docs/mineru-rag-index-upgrade-plan.md) for the complete experiment history.
+The current MinerU index improves faithfulness, context precision, context recall, and answer correctness over A1. Answer Relevancy falls from 0.4268 to 0.3399; the metric is sensitive to short numeric answers, so the raw regression is reported rather than hidden.
 
 ---
 
@@ -393,7 +393,7 @@ ChatPDF/
 │   ├── tests/             # Backend regression and property tests
 │   └── requirements*.txt
 ├── electron/              # Desktop process, preload bridge, packaging
-├── docs/                  # Design notes, evaluation records, README images
+├── docs/                  # README images
 ├── scripts/               # Launch, build, and diagnostic scripts
 ├── start.bat
 └── start.sh
