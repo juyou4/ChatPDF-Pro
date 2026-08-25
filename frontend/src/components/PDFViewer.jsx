@@ -41,6 +41,7 @@ import {
     normalizeDocumentHighlightRect,
     normalizeDocumentHighlightStyle,
 } from '../utils/documentHighlightUtils';
+import { findAssociatedCaption } from '../utils/figureCaptionUtils';
 import {
     PDF_READER_FLOW_MODES,
     PDF_READER_LAYOUTS,
@@ -1720,13 +1721,21 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const inlineTranslationBBox = normalizeBlockBBox(inlineTranslationBlock?.bbox);
     const displayedTranslationBlockId = hoverTranslationBlockId || (isTranslationDocked ? activeBlockId : null);
     const isTranslationPinned = isTranslationPositionPinned;
-    const hoverTranslationBlock = useMemo(() => {
+    const hoverTranslationTarget = useMemo(() => {
         if (!displayedTranslationBlockId) return null;
         const block = currentBlocks.find((item) => item.block_id === displayedTranslationBlockId) || null;
         if (!block || !['paragraph', 'caption', 'heading', 'figure', 'table', 'code'].includes(block.type || 'paragraph')) return null;
-        return block;
+        if (block.type === 'figure' || block.type === 'table') {
+            // 悬停在图表主体上时优先弹出对应图注原文：用户靠浏览器悬浮翻译插件翻英文，
+            // 弹层若直接给中文「图表解析」，插件就没法再翻。找不到配对图注再回退图块本身。
+            const caption = findAssociatedCaption(block, currentBlocks);
+            if (caption) return { block: caption, anchorBlock: block };
+        }
+        return { block, anchorBlock: block };
     }, [currentBlocks, displayedTranslationBlockId]);
-    const hoverTranslationBBox = normalizeBlockBBox(hoverTranslationBlock?.bbox);
+    const hoverTranslationBlock = hoverTranslationTarget?.block || null;
+    // 弹层定位仍锚在实际悬停的块（图主体）上，避免重映射到图注后弹层跳位。
+    const hoverTranslationBBox = normalizeBlockBBox(hoverTranslationTarget?.anchorBlock?.bbox);
     const hoverTranslationItem = hoverTranslationBlock?.block_id ? blockTranslations?.[hoverTranslationBlock.block_id] : null;
     const hoverTranslationSummaryContent = useMemo(
         () => normalizeHoverTranslationMath(hoverTranslationItem?.summary || ''),
@@ -1740,13 +1749,40 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const hoverTranslationTitle = hoverTranslationBlock?.type === 'heading'
         ? '标题翻译'
         : hoverTranslationBlock?.type === 'caption'
-            ? '图注翻译'
+            ? '图注'
             : hoverTranslationBlock?.type === 'figure' || hoverTranslationBlock?.type === 'table'
                 ? '图表解析'
                 : '段落翻译';
+    const hoverCaptionOriginalText = hoverTranslationBlock?.type === 'caption'
+        ? String(hoverTranslationBlock.text || '').trim()
+        : '';
 
     const renderTranslationPanelContent = (bodyMaxHeight = 224) => {
         if (!hoverTranslationBlock) return null;
+        // 图注主体始终展示原文（通常是英文 "Figure N: ..."），浏览器悬浮翻译插件
+        // 才有原文可翻；已缓存的中文译文降级为下方参考区，不再抢占默认内容。
+        if (hoverCaptionOriginalText) {
+            return (
+                <div className="space-y-3">
+                    <div
+                        className={`select-text overflow-y-auto pr-1 text-[13px] leading-relaxed ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}
+                        style={{ maxHeight: bodyMaxHeight }}
+                    >
+                        {hoverCaptionOriginalText}
+                    </div>
+                    {hoverTranslationBodyContent && (
+                        <div className={`rounded-lg border px-3 py-2 ${darkMode ? 'border-white/10 bg-white/[0.04]' : 'border-slate-200 bg-slate-50/80'}`}>
+                            <div className={`mb-1 text-[10px] font-semibold tracking-wide ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                                参考译文
+                            </div>
+                            <div className={`text-[12px] leading-relaxed ${darkMode ? 'text-gray-300' : 'text-slate-600'}`}>
+                                <StreamingMarkdown content={hoverTranslationBodyContent} isStreaming={false} suppressInitialDots />
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
         if (hoverTranslationItem) {
             return (
                 <div className="space-y-3">
