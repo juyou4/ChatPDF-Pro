@@ -29,6 +29,8 @@ import {
   getNumericTableVisualVerification,
   isVisualVerificationPending,
   isVisualVerificationTerminal,
+  resolveStreamRenderProfile,
+  resolveThinkingStreamProfile,
 } from '../useMessageState';
 
 const encoder = new TextEncoder();
@@ -454,19 +456,13 @@ describe('useMessageState streaming regressions', () => {
     }));
 
     expect(hoisted.useSmoothStreamMock).toHaveBeenCalledTimes(2);
+    // calls[0] 为正文流，跟随 streamSpeed 档位。
     expect(hoisted.useSmoothStreamMock.mock.calls[0][0]).toEqual(
-      expect.objectContaining({
-        minDelay: 48,
-        frameChars: 1,
-        flushChars: 2,
-      })
+      expect.objectContaining(resolveStreamRenderProfile('slow'))
     );
+    // calls[1] 为思考流，使用独立的固定节奏，不随 streamSpeed 变化。
     expect(hoisted.useSmoothStreamMock.mock.calls[1][0]).toEqual(
-      expect.objectContaining({
-        minDelay: 48,
-        frameChars: 1,
-        flushChars: 2,
-      })
+      expect.objectContaining(resolveThinkingStreamProfile())
     );
   });
 
