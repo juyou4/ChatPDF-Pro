@@ -57,6 +57,14 @@ _GITHUB_RESERVED_OWNERS = {
     "watching",
 }
 
+# Hugging Face 站点页同样会出现在论文里（文档、论文列表、任务页）。
+# 真正的模型/数据集走 /models|/datasets|/spaces 前缀，不会落到这张表。
+_HF_RESERVED_OWNERS = {
+    "blog", "docs", "discuss", "enterprise", "join", "learn", "login", "new",
+    "organizations", "papers", "pricing", "search", "settings", "support",
+    "tasks",
+}
+
 # 论文/README 里常见的占位地址。它们语法合法但指向不存在的仓库。
 # 这张表只收**明显**是占位符的词：真实项目确实会叫 org/user/name/test，
 # 过度过滤会把论文自己的仓库丢掉，代价比留下一个死链接大得多。
@@ -251,6 +259,8 @@ def _huggingface_candidate(match: re.Match) -> dict | None:
     owner = _clean_segment(match.group(2))
     name = _clean_segment(match.group(3))
     if not owner or not name or _is_placeholder(owner) or _is_placeholder(name):
+        return None
+    if not resource and owner.lower() in _HF_RESERVED_OWNERS:
         return None
     slug = f"{resource}/{owner}/{name}" if resource else f"{owner}/{name}"
     return {

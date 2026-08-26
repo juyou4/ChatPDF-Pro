@@ -189,6 +189,19 @@ def test_extract_paper_repositories_dedupes_and_drops_fake_addresses():
     assert "paper-repo:github:features/actions" not in repo_ids
 
 
+def test_extract_drops_huggingface_site_pages_but_keeps_model_cards():
+    repos = extract_paper_repositories(
+        "See https://huggingface.co/docs/transformers for the library docs.\n"
+        "Weights: https://huggingface.co/hf-org/proj-net\n"
+        "Dataset: https://huggingface.co/datasets/hf-org/proj-data\n"
+    )
+    repo_ids = {repo["repo_id"] for repo in repos}
+
+    assert "paper-repo:huggingface:docs/transformers" not in repo_ids
+    assert "paper-repo:huggingface:hf-org/proj-net" in repo_ids
+    assert "paper-repo:huggingface:datasets/hf-org/proj-data" in repo_ids
+
+
 def test_extract_keeps_short_generic_owner_names():
     """占位符过滤不能吃掉 org/user/name/test 这类真实但普通的仓库名。"""
     repos = extract_paper_repositories(
