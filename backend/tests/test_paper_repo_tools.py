@@ -189,6 +189,18 @@ def test_extract_paper_repositories_dedupes_and_drops_fake_addresses():
     assert "paper-repo:github:features/actions" not in repo_ids
 
 
+def test_extract_keeps_short_generic_owner_names():
+    """占位符过滤不能吃掉 org/user/name/test 这类真实但普通的仓库名。"""
+    repos = extract_paper_repositories(
+        "Our code is available at https://github.com/org/proj .\n"
+        "Baseline: https://github.com/user/test-kit\n"
+    )
+    repo_ids = {repo["repo_id"] for repo in repos}
+
+    assert "paper-repo:github:org/proj" in repo_ids
+    assert "paper-repo:github:user/test-kit" in repo_ids
+
+
 def test_paper_repo_available_requires_a_repo_in_the_document():
     assert _make_ctx("这篇论文没有给出任何公开仓库地址。").paper_repo_available() is False
     assert _make_ctx().paper_repo_available() is True

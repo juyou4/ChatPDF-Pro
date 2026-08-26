@@ -58,12 +58,13 @@ _GITHUB_RESERVED_OWNERS = {
 }
 
 # 论文/README 里常见的占位地址。它们语法合法但指向不存在的仓库。
+# 这张表只收**明显**是占位符的词：真实项目确实会叫 org/user/name/test，
+# 过度过滤会把论文自己的仓库丢掉，代价比留下一个死链接大得多。
 _PLACEHOLDER_TOKENS = {
-    "anon", "anonymous", "bar", "example", "examples", "foo", "name", "org",
-    "organization", "owner", "placeholder", "project-name", "repo", "reponame",
-    "repo-name", "tbd", "test", "todo", "user", "user-name", "user_name",
-    "username", "your-name", "your-repo", "your_name", "your_repo", "yourname",
-    "yourrepo", "xxx", "xxxx", "xxxxx",
+    "anon", "anonymous", "bar", "example", "examples", "foo", "placeholder",
+    "project-name", "reponame", "repo-name", "tbd", "todo", "user-name",
+    "user_name", "username", "your-name", "your-repo", "your_name", "your_repo",
+    "yourname", "yourrepo", "xxx", "xxxx", "xxxxx",
 }
 
 _TRAILING_PUNCTUATION = ".,;:!?)]}\"'）】》、，。；："
