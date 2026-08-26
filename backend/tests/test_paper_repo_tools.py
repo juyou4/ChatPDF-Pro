@@ -648,9 +648,9 @@ def test_read_paper_repo_cursor_paging_does_not_skip_content(monkeypatch):
         )
     )
     cursor = first["next_cursor"]
-    assert cursor and cursor <= 1200
-    # 第一页真的把 next_cursor 之前的内容放进了证据里。
-    assert source[cursor - 12:cursor].strip() in first["results"][0]
+    assert cursor and cursor <= retrieval_tools._PAPER_REPO_EVIDENCE_BODY_CHARS
+    # 作答通道 PAPER_REPO_EVIDENCE 必须含有第一页窗口末尾；formatted chunk 仍可能被裁到 1500。
+    assert source[cursor - 12:cursor].strip() in first["paper_repo_context"]
 
     second = asyncio.run(
         retrieval_tools.execute_async_tool(
@@ -659,7 +659,7 @@ def test_read_paper_repo_cursor_paging_does_not_skip_content(monkeypatch):
             ctx,
         )
     )
-    assert source[cursor:cursor + 12].strip() in second["results"][0]
+    assert source[cursor:cursor + 12].strip() in second["paper_repo_context"]
 
 
 def test_read_paper_repo_reports_adapter_failure(monkeypatch):

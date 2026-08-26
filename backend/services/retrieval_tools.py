@@ -112,9 +112,10 @@ _MAX_PAPER_REPO_SEARCHES = 3
 _PAPER_REPO_SEARCH_AUTO_READS = 2
 _MAX_PAPER_REPO_READ_CHARS = 12_000
 _PAPER_REPO_TREE_TIMEOUT_S = 15.0
-# _format_tool_chunk 把整条证据裁到 1500 字符。仓库文件必须按实际进入证据的
-# 长度推进 next_cursor，否则分页会跳过从未出现在上下文里的代码。
-_PAPER_REPO_EVIDENCE_BODY_CHARS = 1_200
+# PAPER_REPO_EVIDENCE 是作答通道，需要足够长的代码窗口才能对照讲解。
+# 检索池里的 formatted chunk 仍会被 _format_tool_chunk 裁到 1500，但不进文档 [n]。
+# next_cursor 按实际进入 PAPER_REPO_EVIDENCE 的长度推进。
+_PAPER_REPO_EVIDENCE_BODY_CHARS = 6_000
 
 # 学术元数据检索复用联网授权，但独立限次，防止 planner 借它绕过 web 预算。
 _MAX_ACADEMIC_SEARCH_CALLS = 2
