@@ -43,6 +43,10 @@ _fallback_keyword_extractor = KeywordExtractor()
 
 READING_OUTLINE_VERSION = 4
 READING_OUTLINE_PROMPT_VERSION = "reading-outline-v4.16"
+# 只让「部分降级」缓存在策略升级后自动补洞；完整成功的精读结果不受影响。
+READING_OUTLINE_REPAIR_POLICY_VERSION = "qualitative-prose-v1"
+READING_OUTLINE_TRANSPORT_RETRIES = 2
+READING_OUTLINE_TRANSPORT_RETRY_DELAY_SECONDS = 0.8
 READING_OUTLINE_CONTRACT = "thematic-quick-study-v3"
 READING_OUTLINE_DETAIL_LEVEL = "thematic-quick-study"
 READING_OUTLINE_CHECKPOINT_VERSION = 1
@@ -602,11 +606,16 @@ async def get_or_create_reading_outline(
             )
             if not blocking_quality_issues and verifier_matches:
                 healthy_cached = cached
+            stale_partial = _should_refresh_stale_partial_outline(
+                cached,
+                can_call_model=can_call_model,
+            )
             if (
                 not force
                 and not blocking_quality_issues
                 and verifier_matches
                 and (not can_call_model or model_matches)
+                and not stale_partial
             ):
                 logger.info(
                     "[AI-Audit] purpose=reading_outline doc=%s provider=%s model=%s status=%s",
@@ -617,6 +626,12 @@ async def get_or_create_reading_outline(
                 )
                 clear_reading_outline_checkpoint(data_dir, doc_id)
                 return cached
+            if stale_partial:
+                logger.info(
+                    "[ReadingOutline] Refresh stale partial outline doc=%s repair_policy=%s",
+                    doc_id,
+                    READING_OUTLINE_REPAIR_POLICY_VERSION,
+                )
             logger.info(
                 "[ReadingOutline] Ignore AI cache doc=%s model_match=%s verifier_match=%s blocking_quality=%s partial_quality=%s",
                 doc_id,
@@ -796,6 +811,31 @@ def _matches_failed_generation(
 
 def _is_ai_outline_source(value: Any) -> bool:
     return str(value or "").strip().lower() in {"ai", "ai_partial"}
+
+
+def _cached_outline_uses_current_repair_policy(cached: dict[str, Any] | None) -> bool:
+    if not isinstance(cached, dict):
+        return False
+    meta = cached.get("meta") if isinstance(cached.get("meta"), dict) else {}
+    return str(meta.get("repair_policy_version") or "") == READING_OUTLINE_REPAIR_POLICY_VERSION
+
+
+def _should_refresh_stale_partial_outline(
+    cached: dict[str, Any] | None,
+    *,
+    can_call_model: bool,
+) -> bool:
+    """Re-run only leftover holes after a repair-policy upgrade.
+
+    Completed outlines stay cached. Partial outlines written before the current
+    qualitative/TLS recovery policy are reused as a per-section cache, then the
+    missing chapters are filled again.
+    """
+    if not can_call_model or not isinstance(cached, dict):
+        return False
+    if str(cached.get("source") or "").strip().lower() != "ai_partial":
+        return False
+    return not _cached_outline_uses_current_repair_policy(cached)
 
 
 def _incomplete_section_issue(
@@ -1530,15 +1570,41 @@ def _is_substantive_section_summary(value: Any) -> bool:
     }
 
 
+def _claim_violation_has_numbers(violation: Any) -> bool:
+    if not isinstance(violation, dict):
+        return False
+    numbers = violation.get("numbers")
+    if isinstance(numbers, list) and numbers:
+        return True
+    reason = str(violation.get("reason") or "").lower()
+    return "number" in reason or "numeric" in reason
+
+
 def _section_result_is_usable(item: dict[str, Any] | None) -> bool:
     if not isinstance(item, dict) or not _is_substantive_section_summary(item.get("summary")):
         return False
     violations = item.get("table_claim_violations")
+    if isinstance(violations, list) and violations:
+        return False
     claim_violations = item.get("claim_binding_violations")
-    return not (
-        (isinstance(violations, list) and violations)
-        or (isinstance(claim_violations, list) and claim_violations)
-    )
+    if not isinstance(claim_violations, list) or not claim_violations:
+        return True
+    # 定性救援本来就会把数字清掉。引言/贡献这类章节常用「因而/导致」描述机制，
+    # 首轮证据门仍应拦住它们去补救；补救成功后不应再因无数字的因果措辞整章回退。
+    if str(item.get("repair_kind") or "") == "single_qualitative":
+        return not any(_claim_violation_has_numbers(violation) for violation in claim_violations)
+    return False
+
+
+def _qualitative_suspect_section_ids(
+    payloads: dict[str, dict[str, Any]],
+    results: dict[str, dict[str, Any]],
+) -> list[str]:
+    return [
+        section_id
+        for section_id, payload in payloads.items()
+        if payload.get("blocks") and not _section_result_is_usable(results.get(section_id))
+    ]
 
 
 def _structured_output_hit_length_limit(exc: Exception | BaseException | None) -> bool:
@@ -2317,11 +2383,7 @@ async def _generate_ai_outline(
                 f"正文 Claim 修复：{len(claim_feedback)} 章存在语义绑定问题，重试后修复 {claim_repaired} 章"
             )
 
-    qualitative_suspect_ids = [
-        section_id
-        for section_id in set(table_feedback) | set(claim_feedback)
-        if section_id in payloads and not _section_result_is_usable(results.get(section_id))
-    ]
+    qualitative_suspect_ids = _qualitative_suspect_section_ids(payloads, results)
     qualitative_repaired = 0
     for section_id in qualitative_suspect_ids:
         payload = payloads[section_id]
@@ -4033,6 +4095,44 @@ def _structured_request_custom_params(provider: str, model: str) -> dict[str, An
     return structured_json_request_params(provider, model)
 
 
+def _is_transient_reading_llm_error(error: Any) -> bool:
+    text = str(error or "").lower()
+    if not text:
+        return False
+    return bool(re.search(
+        r"(?:ssl|tls|bad_record_mac|certificate|unexpected_eof|"
+        r"connection(?:\s+(?:reset|aborted|interrupted))?|"
+        r"timed?\s*out|timeout|temporar(?:y|ily)|429|rate[\s_-]*limit|"
+        r"\b(?:502|503|504)\b|reset by peer|broken pipe|remoteprotocol|"
+        r"connect(?:ion)?error|readerror|eof occurred)",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+async def _call_ai_api_with_transient_retry(**kwargs: Any) -> dict[str, Any]:
+    """Retry only transport/TLS blips; leave 4xx JSON errors to the caller."""
+    attempts = READING_OUTLINE_TRANSPORT_RETRIES + 1
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        response = await call_ai_api(**kwargs)
+        if not (isinstance(response, dict) and response.get("error")):
+            return response if isinstance(response, dict) else {"error": str(response)}
+        last_error = RuntimeError(response.get("error"))
+        if attempt + 1 >= attempts or not _is_transient_reading_llm_error(last_error):
+            raise last_error
+        delay = READING_OUTLINE_TRANSPORT_RETRY_DELAY_SECONDS * (attempt + 1)
+        logger.warning(
+            "[ReadingOutline] Transient LLM error attempt=%s/%s delay=%.1fs error=%s",
+            attempt + 1,
+            attempts,
+            delay,
+            last_error,
+        )
+        await asyncio.sleep(delay)
+    raise last_error or RuntimeError("LLM 调用失败")
+
+
 async def _call_structured_reading_model(
     *,
     messages: list[dict[str, str]],
@@ -4044,7 +4144,7 @@ async def _call_structured_reading_model(
     diagnostic_label: str = "reading_outline",
 ) -> dict[str, Any]:
     custom_params = _structured_request_custom_params(provider, model)
-    response = await call_ai_api(
+    response = await _call_ai_api_with_transient_retry(
         messages=messages,
         api_key=api_key,
         model=model,
@@ -4055,8 +4155,6 @@ async def _call_structured_reading_model(
         custom_params=custom_params,
         purpose="reading_outline",
     )
-    if isinstance(response, dict) and response.get("error"):
-        raise RuntimeError(response.get("error"))
     content = _extract_content(response)
     initial_diagnostic: dict[str, Any] = {}
     try:
@@ -4077,7 +4175,7 @@ async def _call_structured_reading_model(
             model,
             json.dumps(initial_diagnostic, ensure_ascii=False, separators=(",", ":")),
         )
-    retry = await call_ai_api(
+    retry = await _call_ai_api_with_transient_retry(
         messages=[
             *messages,
             {"role": "assistant", "content": content},
@@ -4095,8 +4193,6 @@ async def _call_structured_reading_model(
         custom_params=custom_params,
         purpose="reading_outline",
     )
-    if isinstance(retry, dict) and retry.get("error"):
-        raise RuntimeError(retry.get("error"))
     retry_content = _extract_content(retry)
     try:
         require_publishable_completion(retry, operation=f"{diagnostic_label} structured repair")
@@ -4411,9 +4507,9 @@ async def _generate_single_qualitative_section(
         section_hash=str(section.get("section_hash") or ""),
         payload=section,
     )
-    if not candidate.get("summary") or candidate.get("table_claim_violations"):
-        return None
     candidate["repair_kind"] = "single_qualitative"
+    if not _section_result_is_usable(candidate):
+        return None
     return candidate
 
 
@@ -7015,6 +7111,7 @@ def _normalize_section_study_outline(
         "meta": {
             "contract": READING_OUTLINE_CONTRACT,
             "detail_level": READING_OUTLINE_DETAIL_LEVEL,
+            "repair_policy_version": READING_OUTLINE_REPAIR_POLICY_VERSION,
             "block_count": len(block_map),
             "page_count": len(block_index.get("pages") or []),
             "section_coverage": section_coverage,
