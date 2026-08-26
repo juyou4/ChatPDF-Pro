@@ -420,6 +420,7 @@ def build_compact_academic_contract_prompt(
     *,
     agent_mode: bool = False,
     allow_web_evidence: bool = False,
+    allow_repo_evidence: bool = False,
 ) -> str:
     """Compact contract for agent path (full handbook is skipped there)."""
     focus = (
@@ -427,13 +428,25 @@ def build_compact_academic_contract_prompt(
         if agent_mode
         else "请严格依据检索证据回答。"
     )
-    evidence_scope = "已提供的文档证据和联网证据" if allow_web_evidence else "已提供的文档证据"
+    scope_parts = ["文档证据"]
+    if allow_web_evidence:
+        scope_parts.append("联网证据")
+    if allow_repo_evidence:
+        scope_parts.append("论文仓库代码证据")
+    evidence_scope = "已提供的" + "和".join(scope_parts)
     citation_rule = (
         "- 文档事实使用 [n]，联网事实使用 [Wn]；不得把网页编号冒充文档编号。\n"
         if allow_web_evidence
         # 示例编号取 9x 段，超出引用候选上限（20），照抄示例不会产出看似合法的引用。
         else "- 每个含事实的句子末尾附 [n]；单句最多两个编号，如 [91][92]（占位示例，实际须用证据列表编号）。\n"
     )
+    if allow_repo_evidence:
+        citation_rule += (
+            "- 仓库代码事实标注「文件路径 + 符号名」，不套用文档 [n] 编号，也不新造仓库编号冒充文档编号。\n"
+            "- 涉及实现时必须对照讲解：论文的方法步骤/公式（[n]）对应到读到的 class/def、"
+            "输入输出与变量流动，并说明一致点和差异点。\n"
+            "- 禁止只回答「实现位于某文件」或「仓库地址是 …」；只报位置不讲正文视为未回答。\n"
+        )
     return (
         "【学术忠实性合同 · 精简版】\n"
         f"- {focus}允许使用的范围是{evidence_scope}。\n"
