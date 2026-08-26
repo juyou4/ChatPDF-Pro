@@ -232,7 +232,7 @@ MinerU 路线直接使用解析结果中的章节层级、编号和页码。点�
 | A1 `pdf_native` | 0.8300 | 0.8140 | 0.8820 | 0.7600 |
 | 当前 `mineru` | **0.9733** | **0.9533** | **1.0000** | **0.7986** |
 
-当前 MinerU 索引在忠实度、上下文精度、召回率和答案正确性上高于 A1；Answer Relevancy 从 0.4268 降至 0.3399。该指标对短数值答案较敏感，本表仍按原值报告。完整实验过程见 [MinerU RAG 索引升级记录](docs/mineru-rag-index-upgrade-plan.md)。
+当前 MinerU 索引在忠实度、上下文精度、召回率和答案正确性上高于 A1；Answer Relevancy 从 0.4268 降至 0.3399。该指标对短数值答案较敏感，本表仍按原值报告。
 
 ---
 
@@ -388,7 +388,7 @@ ChatPDF/
 │   ├── tests/             # 后端回归与属性测试
 │   └── requirements*.txt
 ├── electron/              # 桌面主进程、预加载和打包配置
-├── docs/                  # 设计记录、评测记录和 README 图片
+├── docs/                  # README 图片
 ├── scripts/               # 启动、构建与诊断脚本
 ├── start.bat
 └── start.sh
