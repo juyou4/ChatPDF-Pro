@@ -57,6 +57,7 @@ from services.external_research_service import (
 from services.paper_repo_service import (
     extract_paper_repositories_from_document,
     extract_source_symbols,
+    is_binary_repo_path,
     normalize_paper_repo_id,
     rank_repo_tree_paths,
     readme_referenced_paths,
@@ -105,6 +106,10 @@ _UNTRUSTED_REPO_EVIDENCE_NOTICE = (
 # 读满 4 个仓库文件后不再要求继续读，闸门自动解除。
 _MAX_PAPER_REPO_READS = 4
 _MAX_PAPER_REPO_SEARCHES = 3
+# Planner 很容易停在一份路径列表上，把「实现在 src/loss.py」当成答案。命中后
+# 直接把最靠前的源码文件读成正文证据，让第一轮就有可对照讲解的代码。读取仍
+# 从同一个 4 次预算里扣，超预算就安静退回路径列表。
+_PAPER_REPO_SEARCH_AUTO_READS = 2
 _MAX_PAPER_REPO_READ_CHARS = 12_000
 _PAPER_REPO_TREE_TIMEOUT_S = 15.0
 # _format_tool_chunk 把整条证据裁到 1500 字符。仓库文件必须按实际进入证据的
@@ -1890,6 +1895,37 @@ def _render_paper_repo_tree_evidence(
     return "\n".join(lines)
 
 
+async def _auto_read_ranked_repo_paths(
+    ctx: DocContext,
+    repo: dict,
+    *,
+    ranked: List[dict],
+    ref: str,
+) -> dict:
+    """Read the top ranked source paths so a tree hit already carries file bodies.
+
+    Only registered repositories and already-ranked paths reach this helper, and
+    every read still claims a slot from the shared per-request budget. Binary
+    assets (weights, images, archives) are never read.
+    """
+    rows: list[tuple[str, dict, str]] = []
+    read_paths: list[str] = []
+    symbols: list[dict] = []
+    for row in ranked[:_PAPER_REPO_SEARCH_AUTO_READS]:
+        path = sanitize_repo_path(row.get("path"))
+        if not path or is_binary_repo_path(path):
+            continue
+        read = await _read_paper_repo_evidence(ctx, repo, path=path, ref=ref)
+        if read.get("status") != "completed" or not read.get("rendered"):
+            # 预算耗尽或单文件读取失败都不该影响已经命中的路径列表。
+            break
+        rows.append((str(read["rendered"]), dict(read["meta"]), str(read.get("text") or "")))
+        read_paths.append(str(read["path"]))
+        if read.get("symbols"):
+            symbols.append({"path": read["path"], "symbols": list(read["symbols"])[:12]})
+    return {"rows": rows, "read_paths": read_paths, "symbols": symbols}
+
+
 async def _exec_search_paper_repo(args: dict, ctx: DocContext) -> dict:
     """Search the recursive tree of one registered public GitHub repository."""
     repo_id = str(args.get("repoId") or args.get("repo_id") or "").strip()
@@ -1949,17 +1985,34 @@ async def _exec_search_paper_repo(args: dict, ctx: DocContext) -> dict:
         chunk_type="repo_tree",
         extra_meta={"repo_id": repo.get("repo_id", "")},
     )
+    results = [rendered] if rendered else []
+    chunk_meta = [meta] if rendered else []
+    context_parts = [text]
+
+    auto_read = await _auto_read_ranked_repo_paths(ctx, repo, ranked=ranked, ref=ref)
+    for rendered_row, row_meta, row_text in auto_read["rows"]:
+        results.append(rendered_row)
+        chunk_meta.append(row_meta)
+        context_parts.append(row_text)
+
+    summary = f"在 {_paper_repo_label(repo)} 命中 {len(ranked)} 个路径"
+    if auto_read["read_paths"]:
+        summary += "，已自动读取 " + "、".join(auto_read["read_paths"])
+    else:
+        summary += "，可继续 read_paper_repo"
     return {
-        "results": [rendered] if rendered else [],
-        "chunk_meta": [meta] if rendered else [],
-        "candidate_meta": [meta] if rendered else [],
-        "result_count": 1 if rendered else 0,
-        "summary": f"在 {_paper_repo_label(repo)} 命中 {len(ranked)} 个路径，可继续 read_paper_repo",
+        "results": results,
+        "chunk_meta": chunk_meta,
+        "candidate_meta": list(chunk_meta),
+        "result_count": len(results),
+        "summary": summary,
         "repo_paths": [row["path"] for row in ranked],
         "repo_ref": ref,
         "match_strategy": strategy,
         "tree_entry_count": int(tree.get("entry_count") or len(entries)),
-        "paper_repo_context": text,
+        "repo_auto_read_paths": auto_read["read_paths"],
+        "repo_auto_read_symbols": auto_read["symbols"],
+        "paper_repo_context": "\n\n".join(part for part in context_parts if part),
     }
 
 

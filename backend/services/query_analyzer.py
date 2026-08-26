@@ -796,6 +796,17 @@ def _is_table_caption_scope(query_lower: str) -> bool:
     return not _CAPTION_MODELING_RE.search(query_lower)
 
 
+_EXPLICIT_TABLE_SCOPE_RE = re.compile(
+    r"(?:表格|表\s*\d+|第\s*\d+\s*表|表中|\btable(?:s)?(?:\s*\d+)?\b)",
+    re.IGNORECASE,
+)
+
+
+def _has_explicit_table_scope(query_lower: str) -> bool:
+    """问句是否显式点名了某张表，而不只是提到数值。"""
+    return bool(_EXPLICIT_TABLE_SCOPE_RE.search(query_lower)) or _is_table_caption_scope(query_lower)
+
+
 # ---------------------------------------------------------------------------
 # 代码实现问句
 #
@@ -808,6 +819,13 @@ def _is_table_caption_scope(query_lower: str) -> bool:
 #   * 分支 B：实现/定位类动作（怎么实现、在哪个文件、how to run ...）叠加一个
 #     代码范围词（代码、仓库、脚本、loss、config ...）。单独的"怎么实现"是方法
 #     机制题，由 section_explanation 负责，不进这里。
+#   * 分支 C：用户直接点名要对照讲解（对照源码、详细讲解实现、walk me through
+#     the implementation）。这类要求本身就是"读代码再讲"，不需要再叠范围词。
+#
+# 还有一类刻意留在外面：「这个方法怎么实现的」。它既可能是纯论文机制题，也可能
+# 是想看代码，问句本身分辨不出来。``is_method_implementation_query`` 只负责识别
+# 句型，是否升级成实现题由调用方结合"论文是否登记了可读仓库"决定
+# （见 retrieval_agent._wants_code_implementation）。
 #
 # 反面样例必须挡住：「参考文献里的 GitHub 链接是什么」「论文的 arXiv URL」——
 # 它们只是提到 github/链接，属于 reference_trap / reference_meta 的地盘。
@@ -833,9 +851,29 @@ _CODE_ACTION_RE = re.compile(
     r"(?:怎么实现|如何实现|怎样实现|怎么写|如何写|怎么定义|如何定义|怎么跑|如何跑|"
     r"怎么运行|如何运行|怎么复现|如何复现|在哪实现|哪里实现|写在哪|放在哪|定义在哪|"
     r"在哪个文件|哪个文件|哪份文件|哪份配置|哪个脚本|哪个函数|哪个类|哪一行|"
+    r"是否一致|是否相符|对得上|对不上|一致吗|相符吗|对应关系|如何对应|怎么对应|"
     r"how\s+(?:to|do\s+i|can\s+i)\s+(?:run|train|reproduce|implement|use)|"
     r"how\s+is\s+[^?.!]{0,40}?implemented|"
+    r"(?:match(?:es)?|consistent\s+with|correspond(?:s)?\s+to)\s+the\s+paper|"
     r"where\s+(?:is|are|can\s+i\s+find)|which\s+(?:file|script|config|module|function))",
+    re.IGNORECASE,
+)
+# 分支 C：明说要对照源码讲实现。这些说法自带"去读代码"的意图，单独出现即生效。
+_CODE_WALKTHROUGH_RE = re.compile(
+    r"(?:对照源码|对照代码|对照仓库|对照实现|结合源码|结合代码|逐行讲解|"
+    r"详细讲解实现|讲解实现|讲讲实现|实现细节讲解|讲解一下实现|讲解其实现|"
+    r"walk\s+(?:me\s+)?through\s+the\s+(?:implementation|code)|"
+    r"explain\s+the\s+(?:implementation|source\s+code)\s+in\s+detail|"
+    r"compare\s+the\s+code\s+(?:with|to|against)\s+the\s+paper)",
+    re.IGNORECASE,
+)
+# 「这个方法怎么实现的」句型。命中不等于实现题，还要论文真有可读仓库。
+_METHOD_IMPLEMENTATION_RE = re.compile(
+    r"(?:(?:方法|模型|模块|机制|算法|框架|网络|流程|策略|损失|目标函数|注意力)"
+    r"[^。！？?!]{0,12}?(?:怎么|如何|怎样)(?:实现|实作|落地|做到)"
+    r"|(?:怎么|如何|怎样)实现[^。！？?!]{0,12}?(?:方法|模型|模块|机制|算法|框架|网络)"
+    r"|how\s+(?:is|are|was|were)\s+[^?.!]{0,40}?\b(?:implemented|realised|realized)\b"
+    r"|how\s+(?:do(?:es)?|did)\s+[^?.!]{0,40}?\bimplement\b)",
     re.IGNORECASE,
 )
 _CODE_SCOPE_RE = re.compile(
@@ -852,9 +890,26 @@ def is_code_implementation_query(query: str) -> bool:
         return False
     if _CODE_IMPLEMENTATION_BLOCK_RE.search(query):
         return False
-    if _CODE_ARTIFACT_RE.search(query):
+    if _CODE_ARTIFACT_RE.search(query) or _CODE_WALKTHROUGH_RE.search(query):
         return True
     return bool(_CODE_ACTION_RE.search(query) and _CODE_SCOPE_RE.search(query))
+
+
+def is_method_implementation_query(query: str) -> bool:
+    """识别「这个方法怎么实现的」这类句型，本身不足以启用仓库工具。
+
+    调用方必须再确认论文里抽出了可读取的公开仓库；没有仓库的论文继续走纯论文
+    机制讲解。显式点名表格的数值题一律排除，不能把 numeric_table 抢走。
+    """
+    if not query:
+        return False
+    if _CODE_IMPLEMENTATION_BLOCK_RE.search(query):
+        return False
+    if not _METHOD_IMPLEMENTATION_RE.search(query):
+        return False
+    if _has_explicit_table_scope(query.lower()) and "numeric_table" in analyze_evidence_need(query):
+        return False
+    return True
 
 
 def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
@@ -866,14 +921,7 @@ def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
     evidence_need: list[EvidenceNeed] = []
     cost_query = _is_numeric_table_cost_query(query_lower)
 
-    explicit_table_scope = bool(
-        re.search(
-            r"(?:表格|表\s*\d+|第\s*\d+\s*表|表中|\btable(?:s)?(?:\s*\d+)?\b)",
-            query_lower,
-            re.IGNORECASE,
-        )
-        or _is_table_caption_scope(query_lower)
-    )
+    explicit_table_scope = _has_explicit_table_scope(query_lower)
     numeric_table_metric_scope_patterns = [
         'baseline', '基线', 'metric', '指标', '阈值', 'threshold',
         '比率', 'ratio', 'percentage', 'accuracy', 'acc', 'score',
