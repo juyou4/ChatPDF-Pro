@@ -653,6 +653,171 @@ async def read_github_public_source(
     )
 
 
+def _github_repo_parts(owner: str, repo: str) -> tuple[str, str] | None:
+    normalized_owner = str(owner or "").strip()
+    normalized_repo = str(repo or "").strip().removesuffix(".git")
+    if not _GITHUB_PATH_PART_RE.match(normalized_owner):
+        return None
+    if not _GITHUB_PATH_PART_RE.match(normalized_repo):
+        return None
+    return normalized_owner, normalized_repo
+
+
+def _github_tree_failure(code: str, message: str, **extra: Any) -> dict:
+    return {
+        "status": "failed",
+        "error_code": code,
+        "error": message,
+        "entries": [],
+        "entry_count": 0,
+        "truncated": False,
+        "ref": "",
+        **extra,
+    }
+
+
+async def read_github_default_branch(
+    owner: str,
+    repo: str,
+    *,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+) -> dict:
+    """Resolve the default branch of a public repository over the anonymous API."""
+
+    parts = _github_repo_parts(owner, repo)
+    if parts is None:
+        return {"status": "failed", "error_code": "unsupported_github_repo", "error": "GitHub 仓库标识无效", "branch": ""}
+    safe_owner, safe_repo = parts
+    response = await _fetch_public_bytes(
+        _github_api_url(f"/repos/{quote(safe_owner, safe='')}/{quote(safe_repo, safe='')}"),
+        headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout_s=timeout_s,
+        max_bytes=_MAX_ADAPTER_RESPONSE_BYTES,
+    )
+    if not response.get("ok"):
+        return {
+            "status": "failed",
+            "error_code": str(response.get("error_code") or "github_read_failed"),
+            "error": str(response.get("error") or "GitHub 仓库元数据读取失败"),
+            "branch": "",
+        }
+    try:
+        payload = json.loads(_decode_response_text(response.get("body") or b""))
+    except (TypeError, ValueError):
+        payload = None
+    branch = str((payload or {}).get("default_branch") or "").strip() if isinstance(payload, dict) else ""
+    if not branch:
+        return {
+            "status": "failed",
+            "error_code": "invalid_github_response",
+            "error": "GitHub 仓库元数据缺少默认分支",
+            "branch": "",
+        }
+    return {"status": "completed", "error_code": "", "error": "", "branch": branch}
+
+
+async def read_github_repo_tree(
+    owner: str,
+    repo: str,
+    *,
+    ref: str = "",
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    max_entries: int = 4000,
+) -> dict:
+    """Read one public repository's recursive git tree.
+
+    This is the directory-listing counterpart of ``read_github_public_source``:
+    read-only, anonymous, no token, no clone, and no write endpoint. The single
+    ``/contents`` listing that adapter performs only covers one directory level,
+    which is not enough to locate a training script or loss definition.
+    """
+
+    parts = _github_repo_parts(owner, repo)
+    if parts is None:
+        return _github_tree_failure("unsupported_github_repo", "GitHub 仓库标识无效", owner=str(owner or ""), repo=str(repo or ""))
+    safe_owner, safe_repo = parts
+    resolved_ref = str(ref or "").strip()
+    if resolved_ref and not re.fullmatch(r"[A-Za-z0-9._/-]{1,120}", resolved_ref):
+        return _github_tree_failure("unsupported_github_ref", "GitHub 分支或提交标识无效", owner=safe_owner, repo=safe_repo)
+    if not resolved_ref:
+        branch_result = await read_github_default_branch(safe_owner, safe_repo, timeout_s=timeout_s)
+        if branch_result.get("status") != "completed":
+            return _github_tree_failure(
+                str(branch_result.get("error_code") or "github_read_failed"),
+                str(branch_result.get("error") or "GitHub 默认分支解析失败"),
+                owner=safe_owner,
+                repo=safe_repo,
+            )
+        resolved_ref = str(branch_result.get("branch") or "")
+
+    response = await _fetch_public_bytes(
+        _github_api_url(
+            f"/repos/{quote(safe_owner, safe='')}/{quote(safe_repo, safe='')}/"
+            f"git/trees/{quote(resolved_ref, safe='/')}",
+            {"recursive": "1"},
+        ),
+        headers={
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        timeout_s=timeout_s,
+        max_bytes=_MAX_ADAPTER_RESPONSE_BYTES,
+    )
+    if not response.get("ok"):
+        return _github_tree_failure(
+            str(response.get("error_code") or "github_read_failed"),
+            str(response.get("error") or "GitHub 目录树读取失败"),
+            owner=safe_owner,
+            repo=safe_repo,
+            ref=resolved_ref,
+        )
+    try:
+        payload = json.loads(_decode_response_text(response.get("body") or b""))
+    except (TypeError, ValueError):
+        payload = None
+    if not isinstance(payload, dict) or not isinstance(payload.get("tree"), list):
+        return _github_tree_failure(
+            "invalid_github_response",
+            "GitHub 目录树响应格式无效",
+            owner=safe_owner,
+            repo=safe_repo,
+            ref=resolved_ref,
+        )
+    limit = max(1, min(20_000, int(max_entries or 4000)))
+    entries: list[dict[str, Any]] = []
+    for item in payload["tree"]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        entries.append({
+            "path": path[:400],
+            "type": str(item.get("type") or "blob").strip() or "blob",
+            "size": max(0, size),
+        })
+        if len(entries) >= limit:
+            break
+    return {
+        "status": "completed",
+        "error_code": "",
+        "error": "",
+        "owner": safe_owner,
+        "repo": safe_repo,
+        "ref": resolved_ref,
+        "entries": entries,
+        "entry_count": len(entries),
+        "truncated": bool(payload.get("truncated")) or len(entries) >= limit,
+    }
+
+
 def _parse_youtube_video_id(url: str) -> tuple[str, str] | None:
     try:
         safe_url = validate_public_url(url)
@@ -1172,7 +1337,9 @@ __all__ = [
     "external_adapter_for_url",
     "validate_public_url",
     "read_public_web_source",
+    "read_github_default_branch",
     "read_github_public_source",
+    "read_github_repo_tree",
     "read_youtube_public_source",
     "render_public_web_source",
     "read_external_research_source",
