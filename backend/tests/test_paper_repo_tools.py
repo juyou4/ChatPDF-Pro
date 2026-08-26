@@ -323,7 +323,11 @@ def test_search_paper_repo_finds_loss_path_and_caches_tree(monkeypatch):
         tree_calls.append((owner, repo))
         return _tree_result()
 
+    async def fake_source(url, **kwargs):
+        return _blob_result(LOSS_SOURCE)
+
     monkeypatch.setattr(retrieval_tools, "read_github_repo_tree", fake_tree)
+    monkeypatch.setattr(retrieval_tools, "read_github_public_source", fake_source)
     ctx = _make_ctx()
 
     result = asyncio.run(
@@ -352,11 +356,93 @@ def test_search_paper_repo_finds_loss_path_and_caches_tree(monkeypatch):
     assert tree_calls == [("Org-Lab", "Proj-Net")]
 
 
+def test_search_paper_repo_auto_reads_top_source_paths(monkeypatch):
+    """只返回路径列表会让 Planner 停在"实现在 src/loss.py"，必须带上正文。"""
+    read_urls: list[str] = []
+
+    async def fake_tree(owner, repo, **kwargs):
+        return _tree_result()
+
+    async def fake_source(url, **kwargs):
+        read_urls.append(url)
+        return _blob_result(LOSS_SOURCE)
+
+    monkeypatch.setattr(retrieval_tools, "read_github_repo_tree", fake_tree)
+    monkeypatch.setattr(retrieval_tools, "read_github_public_source", fake_source)
+    ctx = _make_ctx()
+
+    result = asyncio.run(
+        retrieval_tools.execute_async_tool(
+            "search_paper_repo",
+            {"repoId": GITHUB_REPO_ID, "query": "损失函数和模型结构怎么实现的", "limit": 5},
+            ctx,
+        )
+    )
+
+    assert result["repo_paths"][:2] == ["src/loss.py", "src/model.py"]
+    sources = [_chunk_source(chunk) for chunk in result["results"]]
+    assert sources[0] == "paper_repo_tree"
+    assert sources.count("paper_repo_file") == 2
+    assert result["repo_auto_read_paths"] == result["repo_paths"][:2]
+    # 自动读取从同一份读预算里扣，不是额外配额。
+    assert ctx.paper_repo_read_count() == 2
+    assert "FocalLoss" in result["paper_repo_context"]
+    assert all("/blob/main/" in url for url in read_urls)
+
+    symbol_paths = {row["path"] for row in result["repo_auto_read_symbols"]}
+    assert "src/loss.py" in symbol_paths
+
+
+def test_search_paper_repo_auto_read_skips_binary_and_respects_budget(monkeypatch):
+    """权重和图片永远不读；读预算耗尽时安静退回路径列表。"""
+    read_paths: list[str] = []
+
+    async def fake_tree(owner, repo, **kwargs):
+        return _tree_result()
+
+    async def fake_source(url, **kwargs):
+        read_paths.append(url)
+        return _blob_result(LOSS_SOURCE)
+
+    monkeypatch.setattr(retrieval_tools, "read_github_repo_tree", fake_tree)
+    monkeypatch.setattr(retrieval_tools, "read_github_public_source", fake_source)
+    ctx = _make_ctx()
+
+    # 每轮命中 2 个源码路径，两轮就把 4 次读预算用完。
+    for _ in range(3):
+        asyncio.run(
+            retrieval_tools.execute_async_tool(
+                "search_paper_repo",
+                {"repoId": GITHUB_REPO_ID, "query": "损失函数和模型结构怎么实现的"},
+                ctx,
+            )
+        )
+
+    assert ctx.paper_repo_read_count() == retrieval_tools._MAX_PAPER_REPO_READS
+    # 目录树里的权重和图片始终没有被读过。
+    assert read_paths
+    assert not any(url.endswith((".png", ".pt")) for url in read_paths)
+
+    exhausted = asyncio.run(
+        retrieval_tools.execute_async_tool(
+            "search_paper_repo",
+            {"repoId": GITHUB_REPO_ID, "query": "损失函数和模型结构怎么实现的"},
+            ctx,
+        )
+    )
+    # 第 4 次连目录检索预算都没了，但仍是干净的失败而不是异常。
+    assert exhausted["error_code"] == "paper_repo_search_limit_reached"
+
+
 def test_search_paper_repo_maps_chinese_terms_to_paths(monkeypatch):
     async def fake_tree(owner, repo, **kwargs):
         return _tree_result()
 
+    async def fake_source(url, **kwargs):
+        return _blob_result(LOSS_SOURCE)
+
     monkeypatch.setattr(retrieval_tools, "read_github_repo_tree", fake_tree)
+    monkeypatch.setattr(retrieval_tools, "read_github_public_source", fake_source)
 
     result = asyncio.run(
         retrieval_tools.execute_async_tool(
@@ -396,7 +482,11 @@ def test_search_paper_repo_budget_is_bounded(monkeypatch):
     async def fake_tree(owner, repo, **kwargs):
         return _tree_result()
 
+    async def fake_source(url, **kwargs):
+        return _blob_result(LOSS_SOURCE)
+
     monkeypatch.setattr(retrieval_tools, "read_github_repo_tree", fake_tree)
+    monkeypatch.setattr(retrieval_tools, "read_github_public_source", fake_source)
     ctx = _make_ctx()
 
     for _ in range(3):
@@ -690,6 +780,50 @@ def test_agent_injects_list_then_search_operations():
     )
     assert after_list[0]["tool"] == "search_paper_repo"
     assert after_list[0]["args"]["repoId"] == GITHUB_REPO_ID
+
+
+def test_method_implementation_question_enables_repo_tools_only_with_a_repo():
+    """「这个方法怎么实现的」有仓库就读代码，没仓库仍走纯论文机制讲解。"""
+    with_repo = _make_agent()
+    with_repo._doc_ctx = _make_ctx()
+
+    without_repo = _make_agent()
+    without_repo._doc_ctx = _make_ctx("这篇论文没有给出任何公开仓库地址。")
+
+    for question in ("这个方法怎么实现的", "How is this method implemented?"):
+        assert with_repo._wants_code_implementation(question) is True
+        assert without_repo._wants_code_implementation(question) is False
+
+
+def test_reference_link_question_never_enables_repo_tools():
+    agent = _make_agent()
+    agent._doc_ctx = _make_ctx()
+
+    assert agent._wants_code_implementation("参考文献里的 GitHub 链接是什么") is False
+    assert agent._wants_code_implementation("这篇论文的动机是什么") is False
+
+
+def test_paper_method_gap_flags_code_without_paper_evidence(monkeypatch):
+    """只有源码、没有论文方法段时无法做对照讲解，需要补论文侧检索。"""
+    ctx = _make_ctx()
+    chunk = _rendered_repo_file_chunk(monkeypatch, ctx)
+    agent = _make_agent()
+    agent._doc_ctx = ctx
+    question = "这篇论文的训练脚本在仓库哪"
+
+    assert agent._paper_method_evidence_gap(question, [chunk]) is True
+
+    method_section = retrieval_tools._format_tool_chunk(
+        "方法部分详述了 focal loss 的定义与推导。" * 40,
+        source="vector_search",
+        context_id="c1",
+        evidence_id="c1",
+        chunk_idx="c1",
+        chunk_type="text",
+    )
+    assert agent._paper_method_evidence_gap(question, [chunk, method_section]) is False
+    # 还没读到任何仓库文件时由硬闸负责，软提示不参与。
+    assert agent._paper_method_evidence_gap(question, []) is False
 
 
 def test_agent_initial_bundle_seeds_list_paper_repos():
