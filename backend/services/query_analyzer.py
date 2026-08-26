@@ -16,6 +16,7 @@ EvidenceNeed = Literal[
     'comparison_multi_aspect',
     'analysis_explanation',
     'figure_caption',
+    'code_implementation',
 ]
 
 
@@ -795,6 +796,67 @@ def _is_table_caption_scope(query_lower: str) -> bool:
     return not _CAPTION_MODELING_RE.search(query_lower)
 
 
+# ---------------------------------------------------------------------------
+# 代码实现问句
+#
+# 这一类的下游后果比其它 evidence_need 重：命中后 Agent 会启用论文仓库工具，
+# 并且在读到仓库文件之前不允许 final。所以判定刻意收得很窄，只认两条路径：
+#
+#   * 分支 A：问句里出现明确的仓库/脚本制品词（训练脚本、源码、代码仓库、
+#     training script、official implementation ...）。这些词单独出现就已经
+#     指向"去看代码"，不需要再要求动作词。
+#   * 分支 B：实现/定位类动作（怎么实现、在哪个文件、how to run ...）叠加一个
+#     代码范围词（代码、仓库、脚本、loss、config ...）。单独的"怎么实现"是方法
+#     机制题，由 section_explanation 负责，不进这里。
+#
+# 反面样例必须挡住：「参考文献里的 GitHub 链接是什么」「论文的 arXiv URL」——
+# 它们只是提到 github/链接，属于 reference_trap / reference_meta 的地盘。
+# ---------------------------------------------------------------------------
+
+_CODE_IMPLEMENTATION_BLOCK_RE = re.compile(
+    r"(?:参考文献|引用列表|文献列表|bibliography|references?\s+(?:section|list)|"
+    r"cited\s+(?:works?|papers?))",
+    re.IGNORECASE,
+)
+_CODE_ARTIFACT_RE = re.compile(
+    r"(?:训练脚本|推理脚本|评测脚本|测试脚本|运行脚本|启动脚本|训练代码|推理代码|"
+    r"源代码|源码|代码仓库|代码库|代码实现|代码文件|开源代码|开源仓库|开源地址|开源实现|"
+    r"仓库地址|仓库代码|仓库文件|仓库里|仓库中|复现代码|官方实现|官方代码|参考实现|"
+    r"配置文件|training\s+scripts?|inference\s+scripts?|eval(?:uation)?\s+scripts?|"
+    r"source\s+code|code\s?base|code\s+repositor(?:y|ies)|"
+    r"(?:github|gitlab|hugging\s?face)\s+repo(?:sitor(?:y|ies))?|"
+    r"official\s+(?:implementation|code|repo(?:sitory)?)|reference\s+implementation|"
+    r"repo\s+files?|config(?:uration)?\s+files?)",
+    re.IGNORECASE,
+)
+_CODE_ACTION_RE = re.compile(
+    r"(?:怎么实现|如何实现|怎样实现|怎么写|如何写|怎么定义|如何定义|怎么跑|如何跑|"
+    r"怎么运行|如何运行|怎么复现|如何复现|在哪实现|哪里实现|写在哪|放在哪|定义在哪|"
+    r"在哪个文件|哪个文件|哪份文件|哪份配置|哪个脚本|哪个函数|哪个类|哪一行|"
+    r"how\s+(?:to|do\s+i|can\s+i)\s+(?:run|train|reproduce|implement|use)|"
+    r"how\s+is\s+[^?.!]{0,40}?implemented|"
+    r"where\s+(?:is|are|can\s+i\s+find)|which\s+(?:file|script|config|module|function))",
+    re.IGNORECASE,
+)
+_CODE_SCOPE_RE = re.compile(
+    r"(?:代码|源码|仓库|脚本|损失函数|优化器|数据加载|前向传播|反向传播|"
+    r"\bcode\b|\brepo(?:sitory)?\b|\bscripts?\b|\bloss\b|\bconfig\b|\bcheckpoint\b|"
+    r"\bdataloader\b|\boptimizer\b|\bgithub\b|\bgitlab\b|hugging\s?face)",
+    re.IGNORECASE,
+)
+
+
+def is_code_implementation_query(query: str) -> bool:
+    """识别"去读公开仓库代码"类问句，用于启用论文仓库工具。"""
+    if not query:
+        return False
+    if _CODE_IMPLEMENTATION_BLOCK_RE.search(query):
+        return False
+    if _CODE_ARTIFACT_RE.search(query):
+        return True
+    return bool(_CODE_ACTION_RE.search(query) and _CODE_SCOPE_RE.search(query))
+
+
 def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
     """识别学术论文场景下的证据类型需求。"""
     if not query:
@@ -955,6 +1017,11 @@ def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
         and _contains_any(query_lower, multi_aspect_patterns)
     ):
         evidence_need.append('comparison_multi_aspect')
+
+    # 表格硬闸优先：显式点名表格的精确数值问题即使顺带提到"代码"，也不能被
+    # 实现题接管取证路径，否则 numeric_table 的 1.0 硬闸会被仓库文件闸挤掉。
+    if not table_first and is_code_implementation_query(query):
+        evidence_need.append('code_implementation')
 
     return _dedupe_preserve_order(evidence_need)  # type: ignore[return-value]
 
