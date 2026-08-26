@@ -170,7 +170,7 @@ try:
 except Exception:
     pass
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
-OVERVIEW_CACHE_VERSION = "v22"
+OVERVIEW_CACHE_VERSION = "v23"
 
 # 任务存储（生产环境可替换为 Redis）
 overview_tasks: Dict[str, OverviewTask] = {}

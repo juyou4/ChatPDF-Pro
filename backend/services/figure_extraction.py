@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 
 # Schema 版本，用于缓存失效判断。1.4 起缓存完整 Logical Figure 集，
 # 不再把 brief/standard/detailed 的 Top-N 结果作为文档级缓存。
-SCHEMA_VERSION = "1.5"
+# 1.6：按跨栏 Figure N 总标题合并 MinerU 拆开的 (a)(b)(c) 子图。
+SCHEMA_VERSION = "1.6"
+MINERU_FIGURE_GROUPING_VERSION = "span-caption-v1"
 MINERU_PANEL_LABEL_BOTTOM_PADDING = 18.0
 MAX_MINERU_PANEL_GROUP_SIZE = 8
 
@@ -102,7 +104,11 @@ def build_logical_figures_for_overview(
                 parse_identity=parse_manifest,
             )
             persisted_figures = logical_figures_from_mineru_visual_assets(persisted_assets)
-            if persisted_figures:
+            if (
+                persisted_figures
+                and str((persisted_assets or {}).get("grouping_version") or "")
+                == MINERU_FIGURE_GROUPING_VERSION
+            ):
                 figures_dict = [figure.model_dump() for figure in persisted_figures]
                 doc_data["logical_figures"] = figures_dict
                 doc_data["logical_figures_meta"] = {
@@ -116,6 +122,7 @@ def build_logical_figures_for_overview(
                     "document_source_hash": str(parse_manifest.get("source_hash") or ""),
                     "parser_route": resolved_route,
                     "visual_asset_revision": str(persisted_assets.get("revision") or ""),
+                    "grouping_version": MINERU_FIGURE_GROUPING_VERSION,
                 }
                 doc_data["logical_figures_status"] = {
                     "state": "done",
@@ -370,6 +377,7 @@ def build_logical_figures_for_overview(
         "parse_generation": str(parse_manifest.get("generation") or ""),
         "document_source_hash": str(parse_manifest.get("source_hash") or ""),
         "parser_route": resolved_route,
+        "grouping_version": MINERU_FIGURE_GROUPING_VERSION,
     }
     figures_status = {
         "state": "done",
@@ -538,9 +546,15 @@ def _figure_blocks_from_mineru_block_index(block_index: dict) -> List[FigureBloc
                 "kind": "table" if str(b.get("mineru_type") or "").startswith("table") else "figure",
                 "caption": str(b.get("text") or "").strip(),
                 "source": "mineru_caption",
+                "block_id": str(b.get("block_id") or ""),
+                "mineru_type": str(b.get("mineru_type") or ""),
             }
             for b in page_blocks
             if b.get("type") == "caption" and _normalize_bbox(b.get("bbox"))
+        ]
+        pdf_captions = [
+            caption for caption in caption_candidates
+            if not _is_generated_visual_caption(caption)
         ]
 
         page_figure_blocks: List[FigureBlock] = []
@@ -549,7 +563,7 @@ def _figure_blocks_from_mineru_block_index(block_index: dict) -> List[FigureBloc
             if not body_bbox:
                 continue
             kind = "table" if body.get("type") == "table" else "figure"
-            caption = _match_caption_to_body(body_bbox, kind, caption_candidates)
+            caption = _match_caption_to_body(body_bbox, kind, pdf_captions)
             caption_bbox = caption.get("bbox") if caption else None
             caption_text = (caption or {}).get("caption") or ""
             if not caption_text and kind == "figure":
@@ -584,7 +598,11 @@ def _figure_blocks_from_mineru_block_index(block_index: dict) -> List[FigureBloc
             else:
                 blocks.append(figure_block)
 
-        blocks.extend(_group_mineru_panel_figures(page_figure_blocks))
+        blocks.extend(
+            _group_mineru_panel_figures(
+                _group_mineru_figures_by_spanning_caption(page_figure_blocks, pdf_captions)
+            )
+        )
 
     return blocks
 
@@ -657,6 +675,148 @@ def _panel_bboxes_are_neighbors(first: list[float], second: list[float]) -> bool
     return False
 
 
+def _is_generated_visual_caption(caption: dict) -> bool:
+    """Ignore VLM overlay captions when pairing MinerU image bodies.
+
+    Those texts often repeat ``图1`` on a single panel and would otherwise beat
+    the real spanning PDF caption, leaving Figure 1 split in the overview.
+    """
+    token = " ".join(
+        str(caption.get(key) or "")
+        for key in ("block_id", "mineru_type", "source")
+    ).lower()
+    return "visual_vlm" in token
+
+
+def _horizontal_overlap_ratio(body: list[float], caption: list[float]) -> float:
+    overlap = max(0.0, min(body[2], caption[2]) - max(body[0], caption[0]))
+    return overlap / max(body[2] - body[0], 1.0)
+
+
+def _caption_row_member_indexes(
+    figures: List[FigureBlock],
+    caption_bbox: list[float],
+) -> list[int]:
+    """Bodies sitting in the row immediately above a spanning caption."""
+    candidates: list[tuple[int, float]] = []
+    for index, figure in enumerate(figures):
+        body = figure.body_bbox_page_pts
+        if not body:
+            continue
+        gap = caption_bbox[1] - body[3]
+        if gap < -24.0 or gap > 220.0:
+            continue
+        if _horizontal_overlap_ratio(body, caption_bbox) < 0.25:
+            continue
+        candidates.append((index, gap))
+    if not candidates:
+        return []
+    min_gap = min(gap for _, gap in candidates)
+    return [index for index, gap in candidates if gap <= min_gap + 40.0]
+
+
+def _merge_panel_figure_group(
+    members: List[FigureBlock],
+    *,
+    caption_text: str,
+    caption_bbox: Optional[list[float]] = None,
+    extra_meta: Optional[dict] = None,
+) -> FigureBlock:
+    members = sorted(
+        members,
+        key=lambda item: (
+            (item.body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[1],
+            (item.body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[0],
+        ),
+    )
+    anchor = members[0]
+    panel_bboxes = [
+        list(member.body_bbox_page_pts)
+        for member in members
+        if member.body_bbox_page_pts
+    ]
+    grouped_body_bbox = _merge_bboxes(panel_bboxes)
+    grouped_body_bbox[3] += MINERU_PANEL_LABEL_BOTTOM_PADDING
+    full_bboxes = [
+        member.full_bbox_page_pts or member.body_bbox_page_pts
+        for member in members
+        if member.full_bbox_page_pts or member.body_bbox_page_pts
+    ]
+    if caption_bbox:
+        full_bboxes.append(caption_bbox)
+    canonical = _canonical_figure_caption(caption_text) or " ".join(str(caption_text or "").split())
+    metadata = {
+        **anchor.source_metadata,
+        "panel_group": True,
+        "panel_label_bottom_padding": MINERU_PANEL_LABEL_BOTTOM_PADDING,
+        "merged_from": [member.figure_id for member in members],
+        "merge_count": len(members),
+        **(extra_meta or {}),
+    }
+    return FigureBlock(
+        figure_id=anchor.figure_id,
+        page_idx=anchor.page_idx,
+        figure_index=_caption_display_label(canonical),
+        caption_text=canonical,
+        raw_bboxes=panel_bboxes,
+        body_bbox_page_pts=grouped_body_bbox,
+        full_bbox_page_pts=_merge_bboxes([*full_bboxes, grouped_body_bbox]),
+        panel_bboxes_page_pts=panel_bboxes,
+        source=anchor.source,
+        confidence=max(member.confidence for member in members),
+        source_metadata=metadata,
+    )
+
+
+def _group_mineru_figures_by_spanning_caption(
+    figures: List[FigureBlock],
+    captions: list[dict],
+) -> List[FigureBlock]:
+    """Merge bodies that share one page-level ``Figure N`` / ``图N`` caption.
+
+    MinerU often splits a dashed multi-panel figure into adjacent image
+    blocks and attaches ``(a)`` / ``(b)`` labels to each crop.  The official
+    caption still spans the whole row; use that geometry as the grouping key.
+    """
+    if len(figures) < 2:
+        return figures
+
+    remaining = set(range(len(figures)))
+    spanning: list[tuple[float, dict, list[int]]] = []
+    for caption in captions or []:
+        text = str(caption.get("caption") or "").strip()
+        bbox = caption.get("bbox")
+        if not text or not bbox or not _canonical_figure_caption(text):
+            continue
+        members = _caption_row_member_indexes(figures, bbox)
+        if len(members) >= 2:
+            spanning.append((bbox[2] - bbox[0], caption, members))
+
+    spanning.sort(key=lambda item: -item[0])
+    grouped: List[FigureBlock] = []
+    for _, caption, members in spanning:
+        member_indexes = [index for index in members if index in remaining]
+        if len(member_indexes) < 2:
+            continue
+        grouped.append(
+            _merge_panel_figure_group(
+                [figures[index] for index in member_indexes],
+                caption_text=str(caption.get("caption") or ""),
+                caption_bbox=caption.get("bbox"),
+                extra_meta={"spanning_caption": True},
+            )
+        )
+        remaining.difference_update(member_indexes)
+
+    grouped.extend(figures[index] for index in sorted(remaining))
+    grouped.sort(key=lambda item: (
+        item.page_idx,
+        (item.body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[1],
+        (item.body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[0],
+    ))
+    return grouped
+
+
 def _group_mineru_panel_figures(figures: List[FigureBlock]) -> List[FigureBlock]:
     """把 MinerU 分拆的同页子图归组，完整 caption 所在块作为组锚点。"""
     if len(figures) < 2:
@@ -723,44 +883,14 @@ def _group_mineru_panel_figures(figures: List[FigureBlock]) -> List[FigureBlock]
 
         if len(member_indexes) < 2:
             continue
-        members = sorted(
-            (figures[index] for index in member_indexes),
-            key=lambda item: (
-                (item.body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[1],
-                (item.body_bbox_page_pts or [0.0, 0.0, 0.0, 0.0])[0],
-            ),
+        members = [figures[index] for index in member_indexes]
+        grouped.append(
+            _merge_panel_figure_group(
+                members,
+                caption_text=canonical_caption,
+                extra_meta={"neighbor_group": True},
+            )
         )
-        panel_bboxes = [
-            list(member.body_bbox_page_pts)
-            for member in members
-            if member.body_bbox_page_pts
-        ]
-        grouped_body_bbox = _merge_bboxes(panel_bboxes)
-        grouped_body_bbox[3] += MINERU_PANEL_LABEL_BOTTOM_PADDING
-        full_bboxes = [
-            member.full_bbox_page_pts or member.body_bbox_page_pts
-            for member in members
-            if member.full_bbox_page_pts or member.body_bbox_page_pts
-        ]
-        grouped.append(FigureBlock(
-            figure_id=anchor.figure_id,
-            page_idx=anchor.page_idx,
-            figure_index=_caption_display_label(canonical_caption),
-            caption_text=canonical_caption,
-            raw_bboxes=panel_bboxes,
-            body_bbox_page_pts=grouped_body_bbox,
-            full_bbox_page_pts=_merge_bboxes([*full_bboxes, grouped_body_bbox]),
-            panel_bboxes_page_pts=panel_bboxes,
-            source=anchor.source,
-            confidence=max(member.confidence for member in members),
-            source_metadata={
-                **anchor.source_metadata,
-                "panel_group": True,
-                "panel_label_bottom_padding": MINERU_PANEL_LABEL_BOTTOM_PADDING,
-                "merged_from": [member.figure_id for member in members],
-                "merge_count": len(members),
-            },
-        ))
         remaining.difference_update(member_indexes)
 
     grouped.extend(figures[index] for index in sorted(remaining))

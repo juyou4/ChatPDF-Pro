@@ -30,7 +30,10 @@ def build_mineru_visual_asset_envelope(block_index: dict[str, Any] | None) -> di
         return {}
 
     try:
-        from services.figure_extraction import build_mineru_logical_figures_from_block_index
+        from services.figure_extraction import (
+            MINERU_FIGURE_GROUPING_VERSION,
+            build_mineru_logical_figures_from_block_index,
+        )
 
         figures = build_mineru_logical_figures_from_block_index(block_index or {})
     except Exception:
@@ -50,6 +53,7 @@ def build_mineru_visual_asset_envelope(block_index: dict[str, Any] | None) -> di
     ))
     revision = _stable_hash({
         "schema_version": MINERU_VISUAL_ASSET_SCHEMA_VERSION,
+        "grouping_version": MINERU_FIGURE_GROUPING_VERSION,
         "parser_route": identity["route"],
         "parse_generation": identity["generation"],
         "document_source_hash": identity["source_hash"],
@@ -71,6 +75,7 @@ def build_mineru_visual_asset_envelope(block_index: dict[str, Any] | None) -> di
     })
     return {
         "schema_version": MINERU_VISUAL_ASSET_SCHEMA_VERSION,
+        "grouping_version": MINERU_FIGURE_GROUPING_VERSION,
         "parser_route": identity["route"],
         "parse_generation": identity["generation"],
         "document_source_hash": identity["source_hash"],
