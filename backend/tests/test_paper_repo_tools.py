@@ -510,6 +510,43 @@ def test_read_paper_repo_budget_stops_at_four_reads(monkeypatch):
     assert ctx.paper_repo_read_count() == 4
 
 
+def test_read_paper_repo_cursor_paging_does_not_skip_content(monkeypatch):
+    """证据渲染会裁剪正文，next_cursor 必须按真正进入证据的长度推进。"""
+    source = "\n".join(f"line_{index} = compute({index})" for index in range(400))
+
+    async def fake_source(url, max_chars=6000, start_char=0, **kwargs):
+        window = source[start_char:start_char + max_chars]
+        return _blob_result(
+            window,
+            truncated=start_char + len(window) < len(source),
+            content_start=start_char,
+        )
+
+    monkeypatch.setattr(retrieval_tools, "read_github_public_source", fake_source)
+    ctx = _make_ctx()
+
+    first = asyncio.run(
+        retrieval_tools.execute_async_tool(
+            "read_paper_repo",
+            {"repoId": GITHUB_REPO_ID, "path": "src/long.py", "maxChars": 6000},
+            ctx,
+        )
+    )
+    cursor = first["next_cursor"]
+    assert cursor and cursor <= 1200
+    # 第一页真的把 next_cursor 之前的内容放进了证据里。
+    assert source[cursor - 12:cursor].strip() in first["results"][0]
+
+    second = asyncio.run(
+        retrieval_tools.execute_async_tool(
+            "read_paper_repo",
+            {"repoId": GITHUB_REPO_ID, "path": "src/long.py", "cursor": cursor},
+            ctx,
+        )
+    )
+    assert source[cursor:cursor + 12].strip() in second["results"][0]
+
+
 def test_read_paper_repo_reports_adapter_failure(monkeypatch):
     async def failing_source(url, **kwargs):
         return {"status": "failed", "error_code": "http_status", "error": "404", "text": ""}

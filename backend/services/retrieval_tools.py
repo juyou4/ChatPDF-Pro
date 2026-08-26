@@ -107,6 +107,9 @@ _MAX_PAPER_REPO_READS = 4
 _MAX_PAPER_REPO_SEARCHES = 3
 _MAX_PAPER_REPO_READ_CHARS = 12_000
 _PAPER_REPO_TREE_TIMEOUT_S = 15.0
+# _format_tool_chunk 把整条证据裁到 1500 字符。仓库文件必须按实际进入证据的
+# 长度推进 next_cursor，否则分页会跳过从未出现在上下文里的代码。
+_PAPER_REPO_EVIDENCE_BODY_CHARS = 1_200
 
 # 学术元数据检索复用联网授权，但独立限次，防止 planner 借它绕过 web 预算。
 _MAX_ACADEMIC_SEARCH_CALLS = 2
@@ -1679,14 +1682,16 @@ async def _read_paper_repo_evidence(
         cursor=cursor,
         max_chars=max_chars,
     )
-    window = str(payload.get("text") or "")
-    if str(payload.get("status") or "").strip().lower() != "completed" or not window:
+    fetched = str(payload.get("text") or "")
+    if str(payload.get("status") or "").strip().lower() != "completed" or not fetched:
         return {
             "status": "failed",
             "error_code": str(payload.get("error_code") or "paper_repo_read_failed"),
             "error": str(payload.get("error") or "公开仓库文件读取失败"),
             "path": path,
         }
+    window = fetched[:_PAPER_REPO_EVIDENCE_BODY_CHARS]
+    truncated = bool(payload.get("truncated")) or len(window) < len(fetched)
     symbols = extract_source_symbols(path, window)
     evidence_id = _paper_repo_evidence_id(repo, f"{path or 'README'}:{cursor}")
     text = _render_paper_repo_file_evidence(
@@ -1706,7 +1711,6 @@ async def _read_paper_repo_evidence(
         chunk_type="repo_file",
         extra_meta={"repo_id": repo.get("repo_id", ""), "repo_path": path or "README"},
     )
-    truncated = bool(payload.get("truncated"))
     return {
         "status": "completed",
         "path": path or "README",
