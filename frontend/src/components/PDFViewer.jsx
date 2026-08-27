@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, forwardRef, useMemo } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback, forwardRef, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import {
     BookOpen,
@@ -60,6 +60,7 @@ import {
     hasSelectionText,
     normalizePdfSelection,
 } from '../utils/pdfSelectionUtils';
+import { resolveHoverTranslationLayout } from '../utils/hoverTranslationLayout';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -404,6 +405,13 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     }, []);
     const [translationDockWidth, setTranslationDockWidth] = useState(TRANSLATION_DOCK_DEFAULT_WIDTH);
     const [floatingTranslationStyle, setFloatingTranslationStyle] = useState(null);
+    // 面板真实高度靠实测：外壳（标题栏 + 内边距 + 要点卡片）不随正文上限变化，
+    // 所以拿它回推定位不会和 bodyMaxHeight 互相拉扯成死循环。
+    const [translationPanelMetrics, setTranslationPanelMetrics] = useState({
+        chromeHeight: 0,
+        contentHeight: 0,
+        measured: false,
+    });
     const [hoverCorner, setHoverCorner] = useState('');
     const hoveredBlockIdRef = useRef(null);
     const hoverTranslationBlockIdRef = useRef(null);
@@ -414,6 +422,8 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     const programmaticHighlightScrollTimerRef = useRef(null);
     const hoverSwitchPointRef = useRef({ x: 0, y: 0 });
     const hoverSwitchTargetRef = useRef(null);
+    const translationPanelRef = useRef(null);
+    const translationBodyRef = useRef(null);
     const translationPanelDragRef = useRef({ dragging: false, start: { x: 0, y: 0 }, origin: null });
     const translationPanelResizeRef = useRef({ resizing: false, start: { x: 0, y: 0 }, origin: null });
     const translationDockResizeRef = useRef({ resizing: false, startX: 0, originWidth: TRANSLATION_DOCK_DEFAULT_WIDTH });
@@ -1757,7 +1767,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         ? String(hoverTranslationBlock.text || '').trim()
         : '';
 
-    const renderTranslationPanelContent = (bodyMaxHeight = 224) => {
+    const renderTranslationPanelContent = (bodyMaxHeight = 224, bodyRef = null) => {
         if (!hoverTranslationBlock) return null;
         // 图注主体始终展示原文（通常是英文 "Figure N: ..."），浏览器悬浮翻译插件
         // 才有原文可翻；已缓存的中文译文降级为下方参考区，不再抢占默认内容。
@@ -1797,6 +1807,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                         </div>
                     )}
                     <div
+                        ref={bodyRef}
                         className={`overflow-y-auto pr-1 text-[14px] leading-relaxed ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}
                         style={{ maxHeight: bodyMaxHeight }}
                     >
@@ -1826,91 +1837,70 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
     };
     const computedHoverTranslationStyle = useMemo(() => {
         if (!hoverTranslationBBox || !currentBlockPage) return null;
-        const pageElement = pageRef.current;
-        const scrollElement = pdfScrollRef.current;
-        const pageWidth = Number(currentBlockPage.width_pts || 612) * debouncedScale;
-        const pageHeight = Number(currentBlockPage.height_pts || 792) * debouncedScale;
-        const [x0, y0, x1, y1] = hoverTranslationBBox;
-        const gap = 16;
-        const pagePadding = 18;
-        const minWidth = 260;
-        const desiredWidth = Math.min(380, Math.max(300, pageWidth * 0.4));
-        const estimatedHeight = 292;
-        const x0Scaled = x0 * debouncedScale;
-        const x1Scaled = x1 * debouncedScale;
-        const y0Scaled = y0 * debouncedScale;
-        const y1Scaled = y1 * debouncedScale;
-        const pageRect = pageElement?.getBoundingClientRect?.();
-        const scrollRect = scrollElement?.getBoundingClientRect?.();
-        const leftGutter = pageRect && scrollRect ? Math.max(0, pageRect.left - scrollRect.left - gap) : 0;
-        const rightGutter = pageRect && scrollRect ? Math.max(0, scrollRect.right - pageRect.right - gap) : 0;
-        const blockCenterX = (x0Scaled + x1Scaled) / 2;
-        const preferRight = blockCenterX < pageWidth / 2;
-        const visibleTop = pageRect && scrollRect
-            ? clampNumber(scrollRect.top - pageRect.top + pagePadding, pagePadding, Math.max(pagePadding, pageHeight - estimatedHeight - pagePadding))
-            : pagePadding;
-        const visibleBottom = pageRect && scrollRect
-            ? clampNumber(scrollRect.bottom - pageRect.top - pagePadding, visibleTop + 160, pageHeight - pagePadding)
-            : pageHeight - pagePadding;
-        const clampTop = (value, height = estimatedHeight) => clampNumber(
-            value,
-            visibleTop,
-            Math.max(visibleTop, visibleBottom - height)
-        );
-        const topNearBlock = clampTop(y0Scaled - 8);
-
-        let popupWidth = desiredWidth;
-        let left = null;
-
-        const canUseRightGutter = rightGutter >= minWidth;
-        const canUseLeftGutter = leftGutter >= minWidth;
-        if (preferRight && canUseRightGutter) {
-            popupWidth = Math.min(desiredWidth, rightGutter);
-            left = pageWidth + gap;
-        } else if (!preferRight && canUseLeftGutter) {
-            popupWidth = Math.min(desiredWidth, leftGutter);
-            left = -popupWidth - gap;
-        } else if (canUseRightGutter || canUseLeftGutter) {
-            const useRight = canUseRightGutter && (!canUseLeftGutter || rightGutter >= leftGutter);
-            popupWidth = Math.min(desiredWidth, useRight ? rightGutter : leftGutter);
-            left = useRight ? pageWidth + gap : -popupWidth - gap;
-        }
-
-        if (left !== null) {
-            const bodyMaxHeight = clampNumber(visibleBottom - topNearBlock - 92, 132, 360);
-            return { left, top: topNearBlock, width: popupWidth, bodyMaxHeight };
-        }
-
-        popupWidth = Math.min(desiredWidth, Math.max(minWidth, pageWidth - pagePadding * 2));
-        const dockRight = blockCenterX < pageWidth / 2;
-        left = dockRight ? pageWidth - popupWidth - pagePadding : pagePadding;
-
-        const overlapsHorizontally = left < x1Scaled && left + popupWidth > x0Scaled;
-        let fallbackTop = topNearBlock;
-        if (overlapsHorizontally) {
-            const belowTop = y1Scaled + gap;
-            const aboveTop = y0Scaled - estimatedHeight - gap;
-            const hasBelowSpace = belowTop + estimatedHeight <= visibleBottom;
-            const hasAboveSpace = aboveTop >= visibleTop;
-            if (hasBelowSpace) {
-                fallbackTop = belowTop;
-            } else if (hasAboveSpace) {
-                fallbackTop = aboveTop;
-            } else {
-                const distanceToTop = Math.abs(y0Scaled - visibleTop);
-                const distanceToBottom = Math.abs(visibleBottom - y1Scaled);
-                fallbackTop = distanceToTop > distanceToBottom ? visibleTop : Math.max(visibleTop, visibleBottom - estimatedHeight);
-            }
-        }
-
-        const safeTop = clampTop(fallbackTop);
-        const bodyMaxHeight = clampNumber(visibleBottom - safeTop - 92, 132, 360);
-        return { left, top: safeTop, width: popupWidth, bodyMaxHeight };
-    }, [currentBlockPage, debouncedScale, hoverTranslationBBox, hoverTranslationItem?.summary]);
+        return resolveHoverTranslationLayout({
+            bbox: hoverTranslationBBox,
+            scale: debouncedScale,
+            pageWidthPts: currentBlockPage.width_pts,
+            pageHeightPts: currentBlockPage.height_pts,
+            pageRect: pageRef.current?.getBoundingClientRect?.() || null,
+            scrollRect: pdfScrollRef.current?.getBoundingClientRect?.() || null,
+            chromeHeight: translationPanelMetrics.chromeHeight,
+            contentHeight: translationPanelMetrics.contentHeight,
+            measured: translationPanelMetrics.measured,
+        });
+    }, [
+        currentBlockPage,
+        debouncedScale,
+        hoverTranslationBBox,
+        translationPanelMetrics.chromeHeight,
+        translationPanelMetrics.contentHeight,
+        translationPanelMetrics.measured,
+    ]);
     const hoverTranslationStyle = isTranslationPinned
         ? (floatingTranslationStyle || computedHoverTranslationStyle)
         : computedHoverTranslationStyle;
     const hoverTranslationBodyMaxHeight = hoverTranslationStyle?.bodyMaxHeight || 224;
+
+    // 用 offsetHeight 而不是 getBoundingClientRect：页面旋转时后者会把宽高换掉。
+    // 外壳高度 = 面板高 - 正文可视高，与 bodyMaxHeight 无关，因此第二次测量必然
+    // 得到同样的值，状态收敛，不会来回抖。
+    useLayoutEffect(() => {
+        if (isTranslationDocked || !hoverTranslationBlock) {
+            setTranslationPanelMetrics((prev) => (prev.measured
+                ? { chromeHeight: 0, contentHeight: 0, measured: false }
+                : prev));
+            return undefined;
+        }
+        const measure = () => {
+            const panel = translationPanelRef.current;
+            if (!panel) return;
+            const body = translationBodyRef.current;
+            const nextChrome = Math.round(panel.offsetHeight - (body?.offsetHeight || 0));
+            const nextContent = Math.round(body?.scrollHeight || 0);
+            setTranslationPanelMetrics((prev) => (
+                prev.measured
+                    && Math.abs(prev.chromeHeight - nextChrome) < 2
+                    && Math.abs(prev.contentHeight - nextContent) < 2
+                    ? prev
+                    : { chromeHeight: nextChrome, contentHeight: nextContent, measured: true }
+            ));
+        };
+        measure();
+        const panel = translationPanelRef.current;
+        if (!panel || typeof ResizeObserver === 'undefined') return undefined;
+        // 正文里的 Markdown / KaTeX 是异步排版的，只测一次会拿到偏矮的高度。
+        const observer = new ResizeObserver(measure);
+        observer.observe(panel);
+        if (translationBodyRef.current) observer.observe(translationBodyRef.current);
+        return () => observer.disconnect();
+    }, [
+        hoverTranslationBlock,
+        hoverTranslationBodyContent,
+        hoverTranslationSummaryContent,
+        hoverTranslationLoading,
+        isTranslationDocked,
+        hoverTranslationStyle?.width,
+    ]);
 
     const togglePinnedTranslation = useCallback((event) => {
         event.preventDefault();
@@ -2427,6 +2417,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                             )}
                             {hoverTranslationBlock && hoverTranslationStyle && !isTranslationDocked && (
                                 <div
+                                    ref={translationPanelRef}
                                     data-translation-popup="true"
                                     className={`absolute z-[18] rounded-xl border shadow-xl backdrop-blur-md transition-opacity ${
                                         darkMode
@@ -2508,7 +2499,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                         </div>
                                     </div>
                                     <div className="px-4 py-3">
-                                        {renderTranslationPanelContent(hoverTranslationBodyMaxHeight)}
+                                        {renderTranslationPanelContent(hoverTranslationBodyMaxHeight, translationBodyRef)}
                                     </div>
                                     {isTranslationPinned && ['top-left', 'top-right', 'bottom-left', 'bottom-right'].map((corner) => {
                                         const isTop = corner.includes('top');
