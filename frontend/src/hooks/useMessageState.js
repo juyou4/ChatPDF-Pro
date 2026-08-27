@@ -1682,6 +1682,9 @@ export function useMessageState({
     thinkingStream.reset('');
 
     let firstEventTimeoutTriggered = false;
+    // 主答案完成后 UI 立即收尾；catch 需要感知该状态，避免 [DONE] 前的
+    // 收尾事件流异常把已完成展示的回答覆盖成错误提示。
+    let streamAnswerUiFinalized = false;
     try {
       if (shouldUseStreaming) {
         // ===== 流式输出模式 =====
@@ -1762,6 +1765,7 @@ export function useMessageState({
         let contentStartTime = null;
         let sseBuffer = '';
         let sseDone = false;
+        let streamMainAnswerCompleted = false;
         let streamTerminalFailed = false;
         let streamTerminalReceived = false;
         let streamServerTurnStatus = '';
@@ -1910,6 +1914,27 @@ export function useMessageState({
             if (!hadVisibleAnswer) finalizeThinkingStream();
             markAnswerStarted({ generating: false });
           }
+        };
+
+        // 主答案收尾后到达的追问、会话名、思维导图、自审等事件不再持有
+        // 生成态 UI：数据一到就直接合并进已完成的消息。
+        const applySidecarMessageUpdates = () => {
+          if (!isRequestCurrent()) return;
+          setMessages(prev => prev.map(m => (
+            m.id === tempMsgId
+              ? {
+                ...m,
+                followupQuestions: streamFollowupRef.current || m.followupQuestions || null,
+                convName: streamConvNameRef.current || m.convName || null,
+                mindmapMarkdown: streamMindmapRef.current || m.mindmapMarkdown || null,
+                answerCritic: streamAnswerCriticRef.current || m.answerCritic || null,
+                answerCertainty: streamAnswerCertaintyRef.current
+                  || streamAnswerCriticRef.current?.certainty
+                  || m.answerCertainty
+                  || null,
+              }
+              : m
+          )));
         };
 
         // SSE 分隔符查找
@@ -2107,14 +2132,17 @@ export function useMessageState({
             }
             if (p.type === 'followup_questions') {
               streamFollowupRef.current = p.questions || [];
+              if (streamAnswerUiFinalized) applySidecarMessageUpdates();
               return;
             }
             if (p.type === 'conv_name') {
               streamConvNameRef.current = p.name || null;
+              if (streamAnswerUiFinalized) applySidecarMessageUpdates();
               return;
             }
             if (p.type === 'mindmap') {
               streamMindmapRef.current = p.markdown || null;
+              if (streamAnswerUiFinalized) applySidecarMessageUpdates();
               return;
             }
             if (p.type === 'answer_critic') {
@@ -2131,10 +2159,12 @@ export function useMessageState({
               } else if (critic?.certainty) {
                 streamAnswerCertaintyRef.current = critic.certainty;
               }
+              if (streamAnswerUiFinalized) applySidecarMessageUpdates();
               return;
             }
             if (p.type === 'answer_certainty') {
               streamAnswerCertaintyRef.current = p.certainty || null;
+              if (streamAnswerUiFinalized) applySidecarMessageUpdates();
               return;
             }
             if (p.type === 'thinking_complete') {
@@ -2241,11 +2271,128 @@ export function useMessageState({
                 }
               }
               // ``done`` 表示主答案已完成；后端还会继续发送追问、会话名、
-              // 答案自审等收尾事件。传输层只由 [DONE] 或 reader EOF 结束。
+              // 答案自审等收尾事件。传输层只由 [DONE] 或 reader EOF 结束，
+              // 但生成态 UI 在这里就可以收尾，不必等收尾事件全部到齐。
+              streamMainAnswerCompleted = true;
             }
           } catch (e) {
             console.error(e, data);
           }
+        };
+
+        // 主答案完成时的 UI 收尾：冲刷剩余正文字符、等待动画尾巴，然后
+        // 一次性把消息切出流式状态并恢复发送按钮。既在终止事件到达时
+        // 立即调用（后端此后还会推送追问/会话名等收尾事件），也在流
+        // 彻底关闭后作为异常终止的兜底。
+        const finalizeStreamingAnswerUi = async () => {
+          if (streamAnswerUiFinalized || !isRequestCurrent()) return;
+          streamAnswerUiFinalized = true;
+          // 标记正文 streamDone 触发短暂的自适应冲刷。思考流在正文首个
+          // 可见 token 到达时独立完成；异常终止则在此兜底。
+          setContentStreamDone(true);
+          finalizeThinkingStream();
+          const streamedContent = [streamFinalContentRef.current, currentText]
+            .find((value) => typeof value === 'string' && value.trim())
+            || '❌ AI未返回正文，请重新生成';
+          const streamTurnStatus = (
+            streamTerminalFailed
+            || streamServerTurnStatus === 'failed'
+            || streamedContent.startsWith('❌')
+              ? 'failed'
+              : (
+                requestAbortState.cancelled || (!streamTerminalReceived && !sseDone)
+                  ? 'interrupted'
+                  : normalizeChatTurnStatus(
+                    streamServerTurnStatus,
+                    hasCompleteChatParseIdentity(requestParseIdentity) ? 'interrupted' : 'completed'
+                  )
+              )
+          );
+          const waitForNextPaint = () => new Promise((resolve) => {
+            const fallbackTimer = setTimeout(resolve, 64);
+            requestAnimationFrame(() => {
+              clearTimeout(fallbackTimer);
+              resolve();
+            });
+          });
+
+          // 在切换到最终 Markdown 渲染前，让正文与思考两个 ref 直写队列都排空。
+          // 两者并行推进，不阻塞正文首 token；只有队列连续无进展时才强制收尾，
+          // 避免后台标签页或异常 rAF 让消息永久停在流式状态。
+          {
+            const drainTargets = [
+              { stream: contentStream, finalText: streamedContent },
+              ...(currentThinking
+                ? [{ stream: thinkingStream, finalText: currentThinking }]
+                : []),
+            ];
+            const allStreamsFlushed = () => drainTargets.every(
+              ({ stream }) => stream.isFlushComplete?.() !== false
+            );
+            const getPendingStreamChars = () => drainTargets.reduce(
+              (total, { stream }) => total + Math.max(0, Number(stream.getPendingChars?.()) || 0),
+              0
+            );
+            let previousPendingChars = getPendingStreamChars();
+            let lastProgressAt = Date.now();
+            while (
+              isRequestCurrent() &&
+              !allStreamsFlushed()
+            ) {
+              await waitForNextPaint();
+              const pendingChars = getPendingStreamChars();
+              if (pendingChars < previousPendingChars) {
+                lastProgressAt = Date.now();
+              }
+              previousPendingChars = pendingChars;
+              if (Date.now() - lastProgressAt >= STREAM_FINAL_FLUSH_GRACE_MS) break;
+            }
+            drainTargets.forEach(({ stream, finalText }) => {
+              if (stream.isFlushComplete?.() === false) {
+                stream.flushNow?.(finalText);
+              }
+            });
+          }
+          if (!isRequestCurrent()) return;
+          // 直写模式下最后一批字符已经进入 DOM，但其模糊渐显仍在播放。
+          // 只等待正文自己的动画尾巴；思考动画绝不能延迟最终回答。
+          const revealShouldContinue = () => isRequestCurrent();
+          await contentStream.waitForRevealComplete?.(revealShouldContinue);
+          if (!isRequestCurrent()) return;
+          const finalThinkingMs = finalizeThinkingDurationMs({
+            thinkingStartTime,
+            thinkingLastUpdateTime,
+            contentStartTime,
+          });
+          const { content: finalContent, citations: finalCitations } = finalizeAssistantContentAndCitations(
+            streamedContent,
+            streamCitationsRef.current
+          );
+          const streamVisualVerification = (
+            visualVerificationEpochRef.current === requestVisualVerificationEpoch
+              ? streamVisualVerificationRef.current
+              : null
+          );
+          const streamIntentDecision = streamIntentDecisionRef.current;
+          if (streamCallInfoRef.current) {
+            setLastCallInfo({
+              ...streamCallInfoRef.current,
+              usage: streamUsageRef.current || streamCallInfoRef.current.usage || null,
+            });
+          }
+          setMessages(prev => prev.map(m =>
+             m.id === tempMsgId
+               ? { ...m, content: finalContent, thinking: currentThinking, thinkingLive: hasRealThinking, reasoningContent: hasRealThinking ? currentThinking : '', retrievalProgress: currentRetrievalProgress, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, finishReason: streamFinishReason, completionStatus: streamCompletionStatus, truncated: streamWasTruncated, citations: finalCitations, citationBindings: streamCitationBindingsRef.current || null, visualAttachments: streamVisualAttachmentsRef.current || [], maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchReads: streamWebSearchReadsRef.current || [], webSearchAudit: streamWebSearchAuditRef.current || null, webSearchQuery: streamWebSearchQueryRef.current || m.webSearchQuery || '', webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? cloneAgentTrace(streamAgentTraceRef.current) : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, reasoningResolution: streamReasoningResolutionRef.current || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
+              : m
+          ));
+          startVisualVerificationPolling(
+            tempMsgId,
+            streamVisualVerification,
+            requestVisualVerificationEpoch
+          );
+          activeStreamMsgIdRef.current = null;
+          setStreamingMessageId(null);
+          setIsLoading(false);
         };
 
         // 读取流数据
@@ -2270,11 +2417,31 @@ export function useMessageState({
             }
           }
           if (sseDone) reading = false;
+          // 主答案的终止事件已通过身份校验时立即收尾生成态 UI：发送按钮
+          // 和消息操作按钮不必等 [DONE] 前的追问/会话名/自审等收尾事件。
+          // 收尾期间读取暂停，后续事件先在网络缓冲中排队，不会丢失。
+          if (
+            reading
+            && streamMainAnswerCompleted
+            && !streamAnswerUiFinalized
+            && !requestAbortState.cancelled
+            && !streamResponseIdentityMismatch
+            && !streamEmbeddingIdentityConflict
+            && streamTerminalIdentityVerified
+          ) {
+            await finalizeStreamingAnswerUi();
+            if (!isRequestCurrent()) return;
+          }
         }
         if (!sseDone && sseBuffer.trim()) processSseEvent(sseBuffer.trim());
         clearFirstEventTimer();
 
         if (!isRequestCurrent()) return;
+        if (streamAnswerUiFinalized) {
+          // UI 已在终止事件时收尾；这里只需合并最后一批收尾事件数据。
+          applySidecarMessageUpdates();
+          return;
+        }
         if (streamResponseIdentityMismatch || !streamTerminalIdentityVerified) {
           setMessages((previous) => previous.map((message) => (
             message.id === tempMsgId
@@ -2310,112 +2477,7 @@ export function useMessageState({
           setStreamingMessageId(null);
           return;
         }
-
-        // 流结束，标记正文 streamDone 触发短暂的自适应冲刷。思考流在
-        // 正文首个可见 token 到达时独立完成；异常终止则在此兜底。
-        setContentStreamDone(true);
-        finalizeThinkingStream();
-        const streamedContent = [streamFinalContentRef.current, currentText]
-          .find((value) => typeof value === 'string' && value.trim())
-          || '❌ AI未返回正文，请重新生成';
-        const streamTurnStatus = (
-          streamTerminalFailed
-          || streamServerTurnStatus === 'failed'
-          || streamedContent.startsWith('❌')
-            ? 'failed'
-            : (
-              requestAbortState.cancelled || (!streamTerminalReceived && !sseDone)
-                ? 'interrupted'
-                : normalizeChatTurnStatus(
-                  streamServerTurnStatus,
-                  hasCompleteChatParseIdentity(requestParseIdentity) ? 'interrupted' : 'completed'
-                )
-            )
-        );
-        const waitForNextPaint = () => new Promise((resolve) => {
-          const fallbackTimer = setTimeout(resolve, 64);
-          requestAnimationFrame(() => {
-            clearTimeout(fallbackTimer);
-            resolve();
-          });
-        });
-
-        // 在切换到最终 Markdown 渲染前，让正文与思考两个 ref 直写队列都排空。
-        // 两者并行推进，不阻塞正文首 token；只有队列连续无进展时才强制收尾，
-        // 避免后台标签页或异常 rAF 让消息永久停在流式状态。
-        {
-          const drainTargets = [
-            { stream: contentStream, finalText: streamedContent },
-            ...(currentThinking
-              ? [{ stream: thinkingStream, finalText: currentThinking }]
-              : []),
-          ];
-          const allStreamsFlushed = () => drainTargets.every(
-            ({ stream }) => stream.isFlushComplete?.() !== false
-          );
-          const getPendingStreamChars = () => drainTargets.reduce(
-            (total, { stream }) => total + Math.max(0, Number(stream.getPendingChars?.()) || 0),
-            0
-          );
-          let previousPendingChars = getPendingStreamChars();
-          let lastProgressAt = Date.now();
-          while (
-            isRequestCurrent() &&
-            !allStreamsFlushed()
-          ) {
-            await waitForNextPaint();
-            const pendingChars = getPendingStreamChars();
-            if (pendingChars < previousPendingChars) {
-              lastProgressAt = Date.now();
-            }
-            previousPendingChars = pendingChars;
-            if (Date.now() - lastProgressAt >= STREAM_FINAL_FLUSH_GRACE_MS) break;
-          }
-          drainTargets.forEach(({ stream, finalText }) => {
-            if (stream.isFlushComplete?.() === false) {
-              stream.flushNow?.(finalText);
-            }
-          });
-        }
-        if (!isRequestCurrent()) return;
-        // 直写模式下最后一批字符已经进入 DOM，但其模糊渐显仍在播放。
-        // 只等待正文自己的动画尾巴；思考动画绝不能延迟最终回答。
-        const revealShouldContinue = () => isRequestCurrent();
-        await contentStream.waitForRevealComplete?.(revealShouldContinue);
-        if (!isRequestCurrent()) return;
-        const finalThinkingMs = finalizeThinkingDurationMs({
-          thinkingStartTime,
-          thinkingLastUpdateTime,
-          contentStartTime,
-        });
-        const { content: finalContent, citations: finalCitations } = finalizeAssistantContentAndCitations(
-          streamedContent,
-          streamCitationsRef.current
-        );
-        const streamVisualVerification = (
-          visualVerificationEpochRef.current === requestVisualVerificationEpoch
-            ? streamVisualVerificationRef.current
-            : null
-        );
-        const streamIntentDecision = streamIntentDecisionRef.current;
-        if (streamCallInfoRef.current) {
-          setLastCallInfo({
-            ...streamCallInfoRef.current,
-            usage: streamUsageRef.current || streamCallInfoRef.current.usage || null,
-          });
-        }
-        setMessages(prev => prev.map(m =>
-           m.id === tempMsgId
-             ? { ...m, content: finalContent, thinking: currentThinking, thinkingLive: hasRealThinking, reasoningContent: hasRealThinking ? currentThinking : '', retrievalProgress: currentRetrievalProgress, isStreaming: false, thinkingMs: finalThinkingMs, turnStatus: streamTurnStatus, finishReason: streamFinishReason, completionStatus: streamCompletionStatus, truncated: streamWasTruncated, citations: finalCitations, citationBindings: streamCitationBindingsRef.current || null, visualAttachments: streamVisualAttachmentsRef.current || [], maxRelevanceScore: streamMaxRelevanceRef.current, qaScore: streamQaScoreRef.current, followupQuestions: streamFollowupRef.current || null, convName: streamConvNameRef.current || null, mindmapMarkdown: streamMindmapRef.current || null, answerCritic: streamAnswerCriticRef.current || null, answerCertainty: streamAnswerCertaintyRef.current || streamAnswerCriticRef.current?.certainty || null, webSearchSources: streamWebSearchRef.current || null, webSearchReads: streamWebSearchReadsRef.current || [], webSearchAudit: streamWebSearchAuditRef.current || null, webSearchQuery: streamWebSearchQueryRef.current || m.webSearchQuery || '', webSearchStatus: null, memoryHits: streamMemoryHitsRef.current || null, memoryMeta: streamMemoryMetaRef.current || null, agentTrace: streamAgentTraceRef.current && streamAgentTraceRef.current.enabled ? cloneAgentTrace(streamAgentTraceRef.current) : null, usage: streamUsageRef.current || null, intentDecision: streamIntentDecision || null, reasoningResolution: streamReasoningResolutionRef.current || null, clarificationRequired: Boolean(streamIntentDecision?.is_ambiguous), ...(streamVisualVerification ? { visualVerification: streamVisualVerification } : {}) }
-            : m
-        ));
-        startVisualVerificationPolling(
-          tempMsgId,
-          streamVisualVerification,
-          requestVisualVerificationEpoch
-        );
-        activeStreamMsgIdRef.current = null;
-        setStreamingMessageId(null);
+        await finalizeStreamingAnswerUi();
       } else {
         // ===== 非流式输出模式 =====
         const response = await fetch(`${API_BASE_URL}/chat`, {
@@ -2507,6 +2569,11 @@ export function useMessageState({
       }
     } catch (error) {
       if (!isRequestCurrent()) return;
+      if (streamAnswerUiFinalized) {
+        // 主答案已完成并展示；[DONE] 前的收尾事件流异常只影响追问等
+        // 附加数据，不能把已完成的回答覆盖成错误提示。
+        return;
+      }
       if (error.name === 'EmbeddingIdentityConflictError' || isEmbeddingIdentityConflictDetail(error.message)) {
         setContentStreamDone(true);
         setThinkingStreamDone(true);

@@ -65,6 +65,38 @@ const buildStreamResponse = (eventTexts) => {
   };
 };
 
+// 手动推送式流：模拟后端在 done 之后仍长时间保持 SSE 打开、
+// 陆续推送收尾事件（追问/会话名/自审）再发 [DONE] 的真实时序。
+const buildManualStreamResponse = () => {
+  const queue = [];
+  const waiters = [];
+  const push = (text) => {
+    queue.push(text === null ? null : encoder.encode(text));
+    const waiter = waiters.shift();
+    if (waiter) waiter();
+  };
+  return {
+    push,
+    close: () => push(null),
+    response: {
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            while (queue.length === 0) {
+              await new Promise((resolve) => waiters.push(resolve));
+            }
+            const value = queue.shift();
+            if (value === null) return { done: true, value: undefined };
+            return { done: false, value };
+          },
+        }),
+      },
+      json: async () => ({}),
+    },
+  };
+};
+
 const createOptions = () => ({
   docId: 'doc-test',
   screenshots: [],
@@ -110,6 +142,7 @@ describe('useMessageState streaming regressions', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     vi.useRealTimers();
   });
 
@@ -447,6 +480,103 @@ describe('useMessageState streaming regressions', () => {
     const contentStream = hoisted.useSmoothStreamMock.mock.results[0]?.value;
     expect(contentStream.addChunk).toHaveBeenCalledWith('前半段');
     expect(contentStream.addChunk).toHaveBeenCalledWith('补齐尾部');
+  });
+
+  it('done 之后仍有收尾事件时，应立即结束生成态而不是等 [DONE]', async () => {
+    const stream = buildManualStreamResponse();
+    global.fetch.mockResolvedValue(stream.response);
+
+    const { result } = renderHook(() => useMessageState(createOptions()));
+    act(() => {
+      result.current.textareaRef.current = createInputEl('收尾事件不应阻塞发送按钮');
+    });
+
+    let sendPromise;
+    act(() => {
+      sendPromise = result.current.sendMessage();
+    });
+
+    await act(async () => {
+      stream.push(`data: ${JSON.stringify({ content: '回答正文', done: false })}\n\n`);
+      stream.push(`data: ${JSON.stringify({ done: true, final_content: '回答正文', retrieval_meta: { citations: [] } })}\n\n`);
+    });
+
+    // 主答案的终止事件已到达，但 [DONE] 尚未到达（后端还在生成追问等
+    // 收尾数据）：发送按钮与消息操作按钮此刻必须已经恢复。
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+      expect(result.current.streamingMessageId).toBe(null);
+    });
+    let assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+    expect(assistant.isStreaming).toBe(false);
+    expect(assistant.turnStatus).toBe('completed');
+    expect(assistant.content).toBe('回答正文');
+
+    // done 之后到达的收尾事件仍应合并进已完成的消息。
+    await act(async () => {
+      stream.push(`data: ${JSON.stringify({ type: 'followup_questions', questions: ['追问一', '追问二'] })}\n\n`);
+      stream.push(`data: ${JSON.stringify({ type: 'conv_name', name: '会话标题' })}\n\n`);
+      stream.push(`data: ${JSON.stringify({ type: 'answer_critic', critic: { has_hallucination: false, score: 8 } })}\n\n`);
+    });
+
+    await waitFor(() => {
+      const latest = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+      expect(latest.followupQuestions).toEqual(['追问一', '追问二']);
+      expect(latest.convName).toBe('会话标题');
+      expect(latest.answerCritic).toEqual(expect.objectContaining({ score: 8 }));
+    });
+
+    await act(async () => {
+      stream.push('data: [DONE]\n\n');
+      stream.close();
+      await sendPromise;
+    });
+
+    assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+    expect(assistant.isStreaming).toBe(false);
+    expect(assistant.content).toBe('回答正文');
+    expect(assistant.followupQuestions).toEqual(['追问一', '追问二']);
+  });
+
+  it('冲刷队列卡住时，收尾宽限兜底后必须退出生成态而不是悬挂', async () => {
+    vi.stubGlobal('requestAnimationFrame', (cb) => setTimeout(() => cb(Date.now()), 16));
+    const flushNow = vi.fn();
+    const waitForRevealComplete = vi.fn(async () => true);
+    hoisted.useSmoothStreamMock.mockImplementation(() => ({
+      addChunk: vi.fn(),
+      replace: vi.fn(),
+      reset: vi.fn(),
+      contentRef: { current: null },
+      getFinalText: () => '',
+      // 模拟后台标签页 / rAF 异常：队列始终有积压且无进展。
+      isFlushComplete: () => false,
+      getPendingChars: () => 5,
+      flushNow,
+      waitForRevealComplete,
+    }));
+
+    const events = [
+      `data: ${JSON.stringify({ content: '最终回答', done: false })}\n\n`,
+      `data: ${JSON.stringify({ done: true, final_content: '最终回答', retrieval_meta: { citations: [] } })}\n\n`,
+      'data: [DONE]\n\n',
+    ];
+    global.fetch.mockResolvedValue(buildStreamResponse(events));
+
+    const { result } = renderHook(() => useMessageState(createOptions()));
+    act(() => {
+      result.current.textareaRef.current = createInputEl('冲刷兜底');
+    });
+
+    await act(async () => {
+      await result.current.sendMessage();
+    });
+
+    expect(flushNow).toHaveBeenCalledWith('最终回答');
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.streamingMessageId).toBe(null);
+    const assistant = [...result.current.messages].reverse().find((m) => m.type === 'assistant');
+    expect(assistant.isStreaming).toBe(false);
+    expect(assistant.content).toBe('最终回答');
   });
 
   it('streamSpeed 应映射到 useSmoothStream 的真实渲染参数', () => {
