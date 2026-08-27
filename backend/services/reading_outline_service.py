@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 _fallback_keyword_extractor = KeywordExtractor()
 
 READING_OUTLINE_VERSION = 4
-READING_OUTLINE_PROMPT_VERSION = "reading-outline-v4.16"
+READING_OUTLINE_PROMPT_VERSION = "reading-outline-v4.17"
 # 只让「部分降级」缓存在策略升级后自动补洞；完整成功的精读结果不受影响。
 READING_OUTLINE_REPAIR_POLICY_VERSION = "qualitative-prose-v1"
 READING_OUTLINE_TRANSPORT_RETRIES = 2
@@ -3221,6 +3221,91 @@ def _normalized_match_text(value: Any) -> str:
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").casefold())
 
 
+# 排版决定表格浮到哪一页，正文里写出的「Table N」才是归属的第一手证据。
+# 枚举续段只接受纯数字或 A.1 形式，否则 "Tables 1 and Table 2" 会把 "T" 读成表号。
+_TABLE_LABEL_TOKEN = r"[0-9]{1,3}|[A-Za-z](?:\.[0-9]{1,2})?"
+_TABLE_ENUMERATION_SEPARATOR = r",|、|and|和|与|及|to|through|~|-|–|—"
+_TABLE_MENTION_PATTERN = re.compile(
+    rf"(?:\btables?\b|\btab\.|表)\s*({_TABLE_LABEL_TOKEN})"
+    rf"((?:\s*(?:{_TABLE_ENUMERATION_SEPARATOR})\s*(?:[0-9]{{1,3}}|[A-Z]\.[0-9]{{1,2}}))*)",
+    re.IGNORECASE,
+)
+_TABLE_ENUMERATION_PATTERN = re.compile(
+    rf"({_TABLE_ENUMERATION_SEPARATOR})\s*([0-9]{{1,3}}|[A-Z]\.[0-9]{{1,2}})",
+    re.IGNORECASE,
+)
+_TABLE_RANGE_SEPARATORS = frozenset({"to", "through", "~", "-", "–", "—"})
+MAX_TABLE_RANGE_SPAN = 12
+
+
+def _normalize_table_label(token: Any) -> str:
+    """把一处表号写法归一成可比对的键。
+
+    裸单字母必须是大写，否则 "Table of contents" 会被读成 "Table O"。
+    """
+    value = str(token or "").strip().strip(".,;:)")
+    if not value:
+        return ""
+    if value.isdigit():
+        return str(int(value))
+    match = re.fullmatch(r"([A-Za-z])(?:\.([0-9]{1,2}))?", value)
+    if not match or not match.group(1).isupper():
+        return ""
+    letter = match.group(1).lower()
+    return f"{letter}.{int(match.group(2))}" if match.group(2) else letter
+
+
+def _table_mention_labels(text: Any) -> set[str]:
+    """抽取一段正文里引用到的所有表号。"""
+    labels: set[str] = set()
+    for match in _TABLE_MENTION_PATTERN.finditer(str(text or "")):
+        previous = _normalize_table_label(match.group(1))
+        if previous:
+            labels.add(previous)
+        for enumerated in _TABLE_ENUMERATION_PATTERN.finditer(match.group(2) or ""):
+            separator = enumerated.group(1).strip().casefold()
+            current = _normalize_table_label(enumerated.group(2))
+            if not current:
+                continue
+            if (
+                separator in _TABLE_RANGE_SEPARATORS
+                and previous.isdigit()
+                and current.isdigit()
+                and 0 < int(current) - int(previous) <= MAX_TABLE_RANGE_SPAN
+            ):
+                labels.update(str(value) for value in range(int(previous) + 1, int(current)))
+            labels.add(current)
+            previous = current
+    return labels
+
+
+def _table_bundle_label(bundle: dict[str, Any]) -> str:
+    """从 caption 读出这张表自己的表号。"""
+    match = _TABLE_MENTION_PATTERN.match(str(bundle.get("caption") or "").strip())
+    return _normalize_table_label(match.group(1)) if match else ""
+
+
+def _table_reference_sections(
+    ordered_blocks: list[dict[str, Any]],
+    known_section_ids: set[str],
+) -> dict[str, list[str]]:
+    """按文档顺序记录每个表号被哪些章节的正文引用。"""
+    result: dict[str, list[str]] = {}
+    for block in ordered_blocks:
+        section_id = str(block.get("section_id") or "")
+        if section_id not in known_section_ids:
+            continue
+        if str(block.get("type") or "").lower() in {"table", "caption"}:
+            continue
+        if str(block.get("content_role") or "").lower() in {"reference", "artifact", "caption", "table"}:
+            continue
+        for label in _table_mention_labels(block.get("text")):
+            sections = result.setdefault(label, [])
+            if section_id not in sections:
+                sections.append(section_id)
+    return result
+
+
 def _bind_table_bundles_to_sections(
     *,
     nodes: list[dict[str, Any]],
@@ -3246,9 +3331,12 @@ def _bind_table_bundles_to_sections(
         )
     ]
     known_section_ids = {str(node.get("source_section_id") or "") for node in nodes}
-    result: dict[str, list[dict[str, Any]]] = {}
+    reference_sections = _table_reference_sections(ordered_blocks, known_section_ids)
+    # 每条记录是 (优先级, 文档顺序, bundle)：0 = 该章节正文引用了这张表，
+    # 1 = caption 落在该章节。章节表格预算有限时，引用方必须排在浮动锚点前面。
+    scored: dict[str, list[tuple[int, int, dict[str, Any]]]] = {}
 
-    for bundle in compact_bundles:
+    for bundle_order, bundle in enumerate(compact_bundles):
         bundle_pages = {int(page) for page in bundle.get("pages") or []}
         table_id_key = _normalized_match_text(bundle.get("table_id"))
         caption_key = _normalized_match_text(bundle.get("caption"))
@@ -3305,9 +3393,20 @@ def _bind_table_bundles_to_sections(
             if page_candidates:
                 page_candidates.sort()
                 section_id = page_candidates[0][3]
-        if section_id:
-            result.setdefault(section_id, []).append(bundle)
-    return result
+
+        label = _table_bundle_label(bundle)
+        citing_section_ids = reference_sections.get(label, []) if label else []
+        targets = [(citing_id, 0) for citing_id in citing_section_ids]
+        # 浮动锚点仍然保留：没人引用的表格靠它归属，被引用的表格靠它兜底排版就近关系。
+        if section_id and section_id not in citing_section_ids:
+            targets.append((section_id, 1))
+        for target_id, priority in targets:
+            scored.setdefault(target_id, []).append((priority, bundle_order, bundle))
+
+    return {
+        section_id: [bundle for _priority, _order, bundle in sorted(entries, key=lambda entry: entry[:2])]
+        for section_id, entries in scored.items()
+    }
 
 
 def _dynamic_section_block_limit(total_blocks: int) -> int:
@@ -3545,13 +3644,54 @@ def _section_hash(
     return hashlib.sha1(encoded.encode("utf-8")).hexdigest()[:16]
 
 
+def _is_table_separator_line(line: str) -> bool:
+    stripped = str(line or "").strip()
+    return bool(stripped) and bool(re.fullmatch(r"\|?[\s:|-]+\|?", stripped))
+
+
+def _abridge_table_markdown(text: str, max_chars: int) -> str:
+    """按整行裁剪一张 markdown 表格。
+
+    表头永远保留；数据行均匀取样，因此首行基线和末行（通常是本文方法）都在。
+    从字符位置硬切会让模型只看到半行数字，反而更容易编造归属。
+    """
+    lines = [line for line in str(text or "").splitlines() if line.strip()]
+    if len(lines) < 2:
+        return _limit(text, max_chars)
+    header = [lines[0]]
+    if _is_table_separator_line(lines[1]):
+        header.append(lines[1])
+    body = lines[len(header):]
+    header_text = "\n".join(header)
+    if not body or len(header_text) >= max_chars:
+        return _limit(text, max_chars)
+
+    kept = list(body)
+    while kept:
+        omitted = len(body) - len(kept)
+        note = f"\n| …本表另有 {omitted} 行未展示… |" if omitted else ""
+        rendered = f"{header_text}\n" + "\n".join(kept) + note
+        if len(rendered) <= max_chars:
+            return rendered
+        kept = _evenly_spaced(kept, len(kept) - 1)
+    return _limit(header_text, max_chars)
+
+
+def _prompt_block_text(block: dict[str, Any], max_chars: int = MAX_SECTION_BLOCK_TEXT) -> str:
+    """把一个源块投影成 prompt 文本。"""
+    text = str(block.get("text") or "").strip()
+    if len(text) <= max_chars or str(block.get("type") or "").lower() != "table":
+        return _limit(text, max_chars)
+    return _abridge_table_markdown(text, max_chars)
+
+
 def _prompt_block_from_source(block: dict[str, Any]) -> dict[str, Any]:
     """Project one source block into the exact shape sent to a section prompt."""
     return {
         "block_id": block.get("block_id"),
         "page": block.get("page"),
         "type": block.get("type") or "paragraph",
-        "text": _limit(block.get("text"), MAX_SECTION_BLOCK_TEXT),
+        "text": _prompt_block_text(block),
     }
 
 
@@ -3588,15 +3728,16 @@ def _section_coverage_ledger(
     selected_source_chars = sum(
         len(str(block.get("text") or "").strip()) for block in selected_blocks
     )
-    selected_prompt_chars = sum(
-        min(len(str(block.get("text") or "").strip()), MAX_SECTION_BLOCK_TEXT)
+    # 按真实投影结果记账：表格块走整行裁剪，可见字符数与 MAX_SECTION_BLOCK_TEXT 并不相等。
+    projected = [
+        (block, len(_prompt_block_text(block)), len(str(block.get("text") or "").strip()))
         for block in selected_blocks
-    )
+    ]
+    selected_prompt_chars = sum(prompt_chars for _block, prompt_chars, _source in projected)
     truncated_block_ids = [
         str(block.get("block_id") or "")
-        for block in selected_blocks
-        if len(str(block.get("text") or "").strip()) > MAX_SECTION_BLOCK_TEXT
-        and str(block.get("block_id") or "")
+        for block, prompt_chars, source_chars in projected
+        if str(block.get("block_id") or "") and prompt_chars < source_chars
     ]
     input_coverage_complete = (
         bool(all_ids)
@@ -3806,12 +3947,19 @@ def _build_segmented_section_payloads(
         text = str(block.get("text") or "").strip()
         if not source_id or not text:
             continue
+        is_table = str(block.get("type") or "").lower() == "table"
         start = 0
         part_index = 1
         while start < len(text):
             end = min(len(text), start + MAX_SECTION_BLOCK_TEXT)
             if end < len(text):
-                boundary = max(text.rfind(" ", start + MAX_SECTION_BLOCK_TEXT // 2, end), text.rfind("\n", start + MAX_SECTION_BLOCK_TEXT // 2, end))
+                window_start = start + MAX_SECTION_BLOCK_TEXT // 2
+                line_break = text.rfind("\n", window_start, end)
+                # 表格按行切：跨行的半截数字比少读一行更容易被绑错列。
+                boundary = (
+                    line_break if is_table and line_break > start
+                    else max(text.rfind(" ", window_start, end), line_break)
+                )
                 if boundary > start:
                     end = boundary
             fragment = text[start:end]
@@ -7572,7 +7720,7 @@ def _select_prompt_blocks(block_index: dict[str, Any]) -> list[dict[str, Any]]:
             "page": block.get("page"),
             "type": block.get("type") or "paragraph",
             "section_title": block.get("section_title") or "",
-            "text": _limit(text, MAX_BLOCK_TEXT),
+            "text": _prompt_block_text(block, MAX_BLOCK_TEXT),
         })
 
     for section in selected_sections:
@@ -7754,18 +7902,23 @@ def _pick_section_prompt_content(
     return picked[:MAX_SECTION_CONTENT_BLOCKS]
 
 
-def _evenly_spaced_blocks(blocks: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
-    if limit <= 0 or not blocks:
+def _evenly_spaced(items: list[Any], limit: int) -> list[Any]:
+    """均匀取样，limit >= 2 时首尾必定保留。"""
+    if limit <= 0 or not items:
         return []
-    if len(blocks) <= limit:
-        return list(blocks)
+    if len(items) <= limit:
+        return list(items)
     if limit == 1:
-        return [blocks[len(blocks) // 2]]
+        return [items[len(items) // 2]]
     indexes = {
-        round(index * (len(blocks) - 1) / (limit - 1))
+        round(index * (len(items) - 1) / (limit - 1))
         for index in range(limit)
     }
-    return [blocks[index] for index in sorted(indexes)]
+    return [items[index] for index in sorted(indexes)]
+
+
+def _evenly_spaced_blocks(blocks: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    return _evenly_spaced(blocks, limit)
 
 
 def _pick_title_block(blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
