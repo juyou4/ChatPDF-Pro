@@ -500,6 +500,9 @@ def _build_degraded_agent_result(
         "web_search_sources": list(partial_state.get("web_search_sources") or []),
         "web_search_context": "\n\n".join(partial_state.get("web_search_context_parts") or []),
         "web_search_reads": list(partial_state.get("web_search_reads") or []),
+        # 仓库证据和联网证据一样走独立通道。降级时若不带上它，已经读到的
+        # 仓库文件正文会连同 partial 状态一起丢掉，回答只能靠论文正文猜路径。
+        "paper_repo_context": "\n\n".join(partial_state.get("paper_repo_context_parts") or []),
         "status": "degraded",
         "error_kind": error_kind,
         "degraded_to": degraded_to,
@@ -821,6 +824,11 @@ async def run_agent_retrieval_for_context(
         web_context = str(agent_result.get("web_search_context") or "").strip()
         if web_context:
             retrieval_meta["web_search_context"] = web_context
+        # 仓库正文不进文档 [n] 主链（_build_final_context 会剔除它），因此必须
+        # 单独透出，否则读到的代码在作答前就被丢弃。
+        repo_context = str(agent_result.get("paper_repo_context") or "").strip()
+        if repo_context:
+            retrieval_meta["paper_repo_context"] = repo_context
         web_reads = agent_result.get("web_search_reads")
         if isinstance(web_reads, list):
             retrieval_meta["web_search_reads"] = [

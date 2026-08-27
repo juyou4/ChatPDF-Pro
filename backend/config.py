@@ -272,7 +272,14 @@ class AppSettings(BaseSettings):
     )
     # 允许进入 Agent 路径的 evidence_need 集合；ENV 可传逗号分隔字符串
     agent_trigger_evidence_needs: list[str] = Field(
-        default=["section_explanation", "comparison_multi_aspect", "reference_meta", "analysis_explanation", "figure_caption"],
+        default=[
+            "section_explanation",
+            "comparison_multi_aspect",
+            "reference_meta",
+            "analysis_explanation",
+            "figure_caption",
+            "code_implementation",
+        ],
         validation_alias=AliasChoices(
             "agent_trigger_evidence_needs",
             "AGENT_TRIGGER_EVIDENCE_NEEDS",
