@@ -842,6 +842,8 @@ def _incomplete_section_issue(
     label: str,
     incomplete: list[str],
     expected: set[str],
+    *,
+    widespread_is_blocking: bool = True,
 ) -> str:
     """Classify missing per-section summaries as retriable or blocking.
 
@@ -853,9 +855,16 @@ def _incomplete_section_issue(
     ``摘要不完整:`` prefix, so ``_partial_reading_outline_quality_issues``
     leaves them to the blocking branch: no cache, fall back to the structural
     outline.
+
+    附录例外（``widespread_is_blocking=False``）：附录多是图表、证明和补充实验，
+    单章失败率本来就远高于正文，一份 4/13 缺失的附录并不说明整轮生成失败。
+    把它判成 blocking 会连同已经生成好的正文一起丢掉，退回空骨架；因此附录永远
+    只发 ``附录章节摘要不完整:``，走可重试的 partial 分支保住正文。正文大面积
+    缺失仍然 blocking。
     """
     widespread = (
-        len(incomplete) >= SECTION_INCOMPLETE_BLOCKING_MIN_COUNT
+        widespread_is_blocking
+        and len(incomplete) >= SECTION_INCOMPLETE_BLOCKING_MIN_COUNT
         and len(incomplete) > len(expected) * SECTION_INCOMPLETE_BLOCKING_RATIO
     )
     if widespread:
@@ -7885,7 +7894,12 @@ def _section_study_quality_issues(
     if incomplete_body:
         issues.append(_incomplete_section_issue("正文", incomplete_body, expected_body))
     if incomplete_appendix:
-        issues.append(_incomplete_section_issue("附录", incomplete_appendix, expected_appendix))
+        issues.append(_incomplete_section_issue(
+            "附录",
+            incomplete_appendix,
+            expected_appendix,
+            widespread_is_blocking=False,
+        ))
 
     evidence_errors = 0
     for section_id, item in by_section.items():
