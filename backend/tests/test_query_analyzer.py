@@ -7,6 +7,7 @@ from services.query_analyzer import (
     get_retrieval_strategy,
     is_code_implementation_query,
     is_method_implementation_query,
+    is_overview_query,
     is_section_explanation_query,
 )
 
@@ -177,3 +178,42 @@ def test_method_implementation_shape_is_recognised_but_not_claimed(query):
 )
 def test_method_implementation_shape_excludes_reference_and_table_queries(query):
     assert is_method_implementation_query(query) is False
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "用三句话概括 DiffuLT 论文解决了什么问题、用了什么方法、取得了什么结果。",
+        "总结一下这篇论文的研究动机、核心方法和实验结果。",
+        "Summarize what problem this paper solves, what method it uses, and what results it achieves.",
+    ],
+)
+def test_three_part_summary_requests_stay_overview(query):
+    """三要素概括枚举的是摘要要覆盖的方面，不是要去某一节里查的目标。
+
+    单点 facet 判定曾经无条件否掉整篇概览，把它降级成 analytical：
+    取证预算按分析题翻倍，agent gate 的理由也从 matched_query_type
+    被挤成 matched_evidence_need。
+    """
+    assert is_overview_query(query) is True
+    assert analyze_query_type(query) == "overview"
+    assert "section_explanation" not in analyze_evidence_need(query)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        # 单点 facet：概览出口不得放宽到这里。
+        "这篇论文的主要贡献是什么？",
+        "这篇论文要解决什么问题？",
+        "论文用了哪些数据集？",
+        # 只覆盖论文的一段，仍然按 facet 取证。
+        "总结一下这篇论文的主要贡献和局限。",
+        # 章节范围的概括永远不是整篇概览。
+        "概括一下第 3 章的贡献、方法和结果。",
+    ],
+)
+def test_single_facet_and_section_scoped_requests_stay_analytical(query):
+    assert is_overview_query(query) is False
+    assert analyze_query_type(query) == "analytical"
+    assert "section_explanation" in analyze_evidence_need(query)

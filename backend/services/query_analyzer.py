@@ -471,13 +471,6 @@ def is_section_explanation_query(query: str) -> bool:
 def is_overview_query(query: str) -> bool:
     if not query:
         return False
-    if (
-        is_section_explanation_query(query)
-        or is_paper_facet_identity_query(query)
-        or is_figure_identity_query(query)
-        or is_structure_map_query(query)
-    ):
-        return False
     query_lower = query.lower()
     if re.search(
         r"(?:不要|不用|别|不必|无需|do\s+not|don't|not)\s*(?:总结|概括|概述|summary|summarize|overview)",
@@ -493,7 +486,23 @@ def is_overview_query(query: str) -> bool:
     ]
     # 裸子串匹配会让 'outline' 命中 'outlined'、'summary' 命中 'summaries'，
     # 更糟的是让短英文词落进长单词里。英文一律按 token 边界判定。
-    if _contains_terms(query_lower, overview_patterns):
+    explicit_overview = _contains_terms(query_lower, overview_patterns)
+    # 章节/图表/结构范围的问句永远不是整篇概览，这三道否决保持无条件。
+    if (
+        is_section_explanation_query(query)
+        or is_figure_identity_query(query)
+        or is_structure_map_query(query)
+    ):
+        return False
+    # facet 否决必须留一个出口：「用三句话概括论文解决了什么问题、用了什么方法、
+    # 取得了什么结果」枚举的是这份摘要要覆盖的方面，不是要去某一节里查的目标。
+    # 无条件否决会把这类标准三要素概览判成 analytical，取证预算按分析题翻倍。
+    if is_paper_facet_identity_query(query) and not (
+        explicit_overview
+        and _paper_facet_aspect_count(query) >= MIN_OVERVIEW_FACET_ASPECTS
+    ):
+        return False
+    if explicit_overview:
         return True
     whole_document_nouns = [
         '这篇论文', '本文', '整篇论文', '这篇文章', '整篇文章', '该文档', '整个文档',
@@ -695,6 +704,34 @@ def is_paper_facet_identity_query(query: str) -> bool:
     if _FACET_IDENTITY_BLOCK_RE.search(query):
         return False
     return bool(_FACET_IDENTITY_RE.search(query))
+
+
+# 论文要素的粗分组。这张表只用来数「一句话里点了几个方面」，判断一个带概括词的
+# 问句要的是整篇摘要还是某一个要素，因此按语义分组去重，不做细粒度句式识别。
+_PAPER_FACET_ASPECT_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"(?:要?解决(?:了)?[^。？?！!，,、]{0,8}?问题|研究(?:动机|问题)|问题是什么|"
+        r"what\s+problem|motivation)",
+        r"(?:(?:核心|研究|本文|所用|提出的|主要)方法|方法(?:是什么|有哪些)|"
+        r"(?:用|使用|采用|提出)了?[^。？?！!，,、]{0,8}?(?:方法|模型|框架|技术|思路)|"
+        r"what\s+(?:method|approach)\b)",
+        r"(?:(?:实验|主要|最终)结果|(?:取得|得到|达到)了?[^。？?！!，,、]{0,8}?(?:结果|效果|性能|表现)|"
+        r"结果如何|效果如何|what\s+results?\b)",
+        r"(?:贡献|创新点|contributions?)",
+        r"(?:局限|不足|缺陷|limitations?)",
+        r"(?:结论|发现|conclusions?|findings?)",
+        r"(?:数据集|实验设置|实验配置|datasets?|experimental\s+setup)",
+    )
+)
+# 问题 + 方法 + 结果是论文概括的标准三要素。要求三个方面而不是两个：
+# 「总结这篇论文的贡献和局限」只覆盖论文的一段，仍然该走 facet 取证。
+MIN_OVERVIEW_FACET_ASPECTS = 3
+
+
+def _paper_facet_aspect_count(query: str) -> int:
+    """一个问句点到了几个不同的论文要素。"""
+    return sum(1 for pattern in _PAPER_FACET_ASPECT_PATTERNS if pattern.search(query or ""))
 
 
 def is_mechanism_explanation_query(query: str) -> bool:
@@ -1010,8 +1047,12 @@ def analyze_evidence_need(query: str) -> list[EvidenceNeed]:
 
     # 追加顺序保持与改动前完全一致（section → analysis → numeric），
     # 只把 numeric 的**计算**提前；下游有按 evidence_need 顺序取首项的消费者。
+    # 整篇概览请求不是章节级取证需求。它枚举的要素是摘要要覆盖的方面，不是要去
+    # 某一节里查的目标；再申领一次 section_explanation 会把 agent gate 的理由从
+    # matched_query_type 挤成 matched_evidence_need，取证预算也按分析题翻倍。
     if (
         not table_first
+        and not is_overview_query(query)
         and (
             is_section_explanation_query(query)
             or is_mechanism_explanation_query(query)
