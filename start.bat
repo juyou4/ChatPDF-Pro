@@ -102,9 +102,14 @@ if errorlevel 1 (
 call :PRINT_SUCCESS "基础运行时已就绪"
 call :PRINT_INFO "本地解析组件将在选择本地路线时按需准备"
 
-:: 前端依赖
-if not exist "frontend\node_modules" (
-    call :PRINT_INFO "首次运行，正在安装前端依赖（约 1-2 分钟）"
+:: 前端依赖。只看 node_modules 目录不够：半残安装会留下包、丢掉 .bin，
+:: 随后 npm run dev 会变成 Windows 找不到 vite。
+if not exist "frontend\node_modules\.bin\vite.cmd" (
+    if exist "frontend\node_modules" (
+        call :PRINT_INFO "前端命令入口缺失，正在重装依赖"
+    ) else (
+        call :PRINT_INFO "首次运行，正在安装前端依赖（约 1-2 分钟）"
+    )
     pushd frontend
     call npm install --silent >nul 2>&1
     set "NPM_EXIT=!errorlevel!"
@@ -118,6 +123,7 @@ if not exist "frontend\node_modules\rehype-raw" (
     popd
     if not "!NPM_EXIT!"=="0" goto NPMFAIL
 )
+if not exist "frontend\node_modules\.bin\vite.cmd" goto NPMFAIL
 call :PRINT_SUCCESS "前端依赖已就绪"
 
 :: ==================== 启动服务 ====================

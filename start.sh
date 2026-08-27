@@ -228,8 +228,13 @@ fi
 show_success "基础运行时已就绪"
 show_info "本地解析组件将在选择本地路线时按需准备"
 
-if [ ! -d "frontend/node_modules" ]; then
-    show_info "首次运行，正在安装前端依赖（约 1-2 分钟）"
+# 只看 node_modules 目录不够：半残安装会留下包、丢掉 .bin，随后 npm run dev 找不到 vite。
+if [ ! -x "frontend/node_modules/.bin/vite" ]; then
+    if [ -d "frontend/node_modules" ]; then
+        show_info "前端命令入口缺失，正在重装依赖"
+    else
+        show_info "首次运行，正在安装前端依赖（约 1-2 分钟）"
+    fi
     if ! (cd frontend && npm install --silent >/dev/null 2>&1); then
         show_error "前端依赖安装失败，请检查 Node.js、npm 和网络"
         exit 1
@@ -240,6 +245,10 @@ if [ ! -d "frontend/node_modules/rehype-raw" ]; then
         show_error "rehype-raw 安装失败，请检查 npm 和网络"
         exit 1
     fi
+fi
+if [ ! -x "frontend/node_modules/.bin/vite" ]; then
+    show_error "前端依赖安装失败，请检查 Node.js、npm 和网络"
+    exit 1
 fi
 show_success "前端依赖已就绪"
 
