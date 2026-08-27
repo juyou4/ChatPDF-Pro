@@ -21,6 +21,7 @@ from services.reading_outline_service import (  # noqa: E402
     _is_transient_reading_llm_error,
     _partial_reading_outline_quality_issues,
     _qualitative_suspect_section_ids,
+    _rebindable_first_pass_claims,
     _section_result_is_usable,
     _section_result_looks_length_truncated,
     _section_study_quality_issues,
@@ -266,6 +267,20 @@ def test_qualitative_number_free_mechanism_sentence_is_usable() -> None:
     assert _section_result_is_usable(item)
 
 
+def test_repair_rewrite_number_free_mechanism_sentence_is_usable() -> None:
+    item = _mechanism_item(repair_kind="claim_rewrite")
+    assert item.get("claim_binding_violations")
+    assert _section_result_is_usable(item)
+
+
+def test_repair_rewrite_numeric_violation_still_unusable() -> None:
+    item = _mechanism_item(repair_kind="claim_rewrite")
+    item["claim_binding_violations"] = [
+        {"reason": "unbound_prose_claim", "claim_text": "提升 12.3", "numbers": ["12.3"]},
+    ]
+    assert not _section_result_is_usable(item)
+
+
 def test_qualitative_numeric_violation_still_unusable() -> None:
     item = _mechanism_item(repair_kind="single_qualitative")
     item["claim_binding_violations"] = [
@@ -307,6 +322,135 @@ def test_stale_partial_cache_is_refreshed_without_touching_complete() -> None:
     assert not _should_refresh_stale_partial_outline(complete, can_call_model=True)
     assert not _should_refresh_stale_partial_outline(current_partial, can_call_model=True)
     assert not _should_refresh_stale_partial_outline(partial, can_call_model=False)
+
+
+def _table_payload() -> dict:
+    return {
+        "source_section_id": "results",
+        "section_hash": "h_results",
+        "blocks": [
+            {
+                "block_id": "b_results",
+                "type": "paragraph",
+                "page": 5,
+                "text": "Table 2 reports that TinyBERT reaches 87.5 accuracy on the benchmark.",
+            }
+        ],
+        "allowed_block_ids": ["b_results"],
+        "flow_spine_block_ids": [],
+        "table_evidence": [
+            {
+                "bundle_id": "bundle_1",
+                "table_id": "table_2",
+                "caption": "Table 2. Accuracy",
+                "header": "Model | Accuracy",
+                "rows": [
+                    {
+                        "evidence_unit_id": "row_tinybert",
+                        "row_text": "TinyBERT | 87.5",
+                        "page": 5,
+                        "cells": [
+                            {"column": 0, "text": "TinyBERT"},
+                            {"column": 1, "text": "87.5"},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _table_bound_first_pass() -> dict:
+    return _canonical_brief_section_result(
+        {
+            "summary": "TinyBERT 在该基准上达到 87.5 的准确率。",
+            "evidence_block_ids": ["b_results"],
+            "metric_claims": [
+                {
+                    "claim_text": "TinyBERT 在该基准上达到 87.5 的准确率。",
+                    "claim_kind": "value",
+                    "subject": "TinyBERT",
+                    "subjects": ["TinyBERT"],
+                    "metric": "accuracy",
+                    "value_column": 1,
+                    "values": ["87.5"],
+                    "row_bindings": [
+                        {
+                            "subject": "TinyBERT",
+                            "value": "87.5",
+                            "table_evidence_unit_id": "row_tinybert",
+                        }
+                    ],
+                }
+            ],
+            "prose_claims": [],
+        },
+        section_id="results",
+        section_hash="h_results",
+        payload=_table_payload(),
+    )
+
+
+def _reduced_candidate(summary: str, payload: dict, first_pass: dict | None) -> dict:
+    metric_claims, prose_claims = _rebindable_first_pass_claims(
+        first_pass,
+        summary=summary,
+        payload=payload,
+    )
+    return _canonical_brief_section_result(
+        {
+            "summary": summary,
+            "evidence_block_ids": ["b_results"],
+            "metric_claims": metric_claims,
+            "prose_claims": prose_claims,
+        },
+        section_id="results",
+        section_hash="h_results",
+        payload=payload,
+    )
+
+
+def test_segmented_reduce_keeps_first_pass_bound_numbers() -> None:
+    payload = _table_payload()
+    first_pass = _table_bound_first_pass()
+    assert [claim["values"] for claim in first_pass["metric_claims"]] == [["87.5"]]
+
+    candidate = _reduced_candidate(
+        "TinyBERT 在该基准上达到 87.5 的准确率。",
+        payload,
+        first_pass,
+    )
+
+    assert "87.5" in candidate["summary"]
+    assert not candidate["table_claim_violations"]
+    assert _section_result_is_usable(candidate)
+
+
+def test_segmented_reduce_without_first_pass_claims_drops_the_number() -> None:
+    payload = _table_payload()
+
+    candidate = _reduced_candidate(
+        "TinyBERT 在该基准上达到 87.5 的准确率。",
+        payload,
+        None,
+    )
+
+    assert "87.5" not in candidate["summary"]
+
+
+def test_segmented_reduce_does_not_mint_unbound_numbers() -> None:
+    payload = _table_payload()
+
+    candidate = _reduced_candidate(
+        "TinyBERT 在该基准上达到 91.2 的准确率。",
+        payload,
+        _table_bound_first_pass(),
+    )
+
+    # 回填只复用首轮已绑定的 claim，归并阶段自己编出来的数字仍然没有依据。
+    assert candidate["metric_claims"] == []
+    assert candidate["claim_binding_violations"]
+    assert not _section_result_is_usable(candidate)
 
 
 def test_length_truncation_heuristic_only_flags_unterminated_summaries() -> None:

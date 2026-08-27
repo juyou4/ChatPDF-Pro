@@ -1582,6 +1582,11 @@ def _is_substantive_section_summary(value: Any) -> bool:
     }
 
 
+# 这两条修复路径的提示词都要求「去掉数字的定性改写」，产出的「因而/导致」句
+# 必然通不过首轮 prose-claim 门。只要不带数字就放行，带数字的违规仍然否决。
+CLAIM_TOLERANT_REPAIR_KINDS = frozenset({"single_qualitative", "claim_rewrite"})
+
+
 def _claim_violation_has_numbers(violation: Any) -> bool:
     if not isinstance(violation, dict):
         return False
@@ -1603,7 +1608,7 @@ def _section_result_is_usable(item: dict[str, Any] | None) -> bool:
         return True
     # 定性救援本来就会把数字清掉。引言/贡献这类章节常用「因而/导致」描述机制，
     # 首轮证据门仍应拦住它们去补救；补救成功后不应再因无数字的因果措辞整章回退。
-    if str(item.get("repair_kind") or "") == "single_qualitative":
+    if str(item.get("repair_kind") or "") in CLAIM_TOLERANT_REPAIR_KINDS:
         return not any(_claim_violation_has_numbers(violation) for violation in claim_violations)
     return False
 
@@ -1651,6 +1656,41 @@ def _structured_output_hit_length_limit(exc: Exception | BaseException | None) -
     ))
 
 
+def _rebindable_first_pass_claims(
+    first_pass: dict[str, Any] | None,
+    *,
+    summary: str,
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Re-validate first-pass claims against the full section payload.
+
+    Reduce never mints numbers: only claims that were already bound to a table
+    row or an exact source quote — and that still bind here — survive.  The
+    ordering mirrors ``_apply_table_claim_guard`` so a claim accepted here is
+    not rejected again inside the guard.
+    """
+    if not isinstance(first_pass, dict):
+        return [], []
+    table_evidence = payload.get("table_evidence") or []
+    metric_claims, _ = _normalize_metric_claims(first_pass.get("metric_claims"), table_evidence)
+    summary_numbers = _numeric_tokens(summary)
+    metric_claims = [
+        claim for claim in metric_claims
+        if set(claim.get("values") or []) & summary_numbers
+    ]
+    bound_summary, _ = _sanitize_table_bound_text(
+        summary,
+        metric_claims=metric_claims,
+        table_evidence=table_evidence,
+    )
+    prose_claims, _ = _normalize_prose_claims(
+        first_pass.get("prose_claims"),
+        summary=bound_summary,
+        payload=payload,
+    )
+    return metric_claims, prose_claims
+
+
 async def _generate_segmented_section_review(
     *,
     doc_id: str,
@@ -1661,6 +1701,7 @@ async def _generate_segmented_section_review(
     model: str,
     provider: str,
     endpoint: str,
+    first_pass_result: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Map every ordered source segment, then conservatively reduce it.
 
@@ -1904,15 +1945,23 @@ async def _generate_segmented_section_review(
     reduced_item = dict(reduced_item)
     reduced_item["evidence_block_ids"] = final_evidence_ids[:6]
     # Map-stage summaries are sufficient for a conservative section sentence,
-    # but never for exact numeric or causal claims.  Keep those claims only
-    # when a direct source block was supplied in the first pass.
-    reduced_item["metric_claims"] = []
-    reduced_item["prose_claims"] = []
+    # but never for exact numeric or causal claims.  Clearing the claims wholesale
+    # turned 表格/结果章节 into number-free blurbs, so instead reuse the first-pass
+    # claims that still bind against the full section payload; anything the reduce
+    # stage invents on its own stays unbound and is still stripped.
+    validation_payload = _full_section_validation_payload(payload, block_map)
+    reduced_metric_claims, reduced_prose_claims = _rebindable_first_pass_claims(
+        first_pass_result,
+        summary=str(reduced_item.get("summary") or ""),
+        payload=validation_payload,
+    )
+    reduced_item["metric_claims"] = reduced_metric_claims
+    reduced_item["prose_claims"] = reduced_prose_claims
     candidate = _canonical_brief_section_result(
         reduced_item,
         section_id=section_id,
         section_hash=str(payload.get("section_hash") or ""),
-        payload=_full_section_validation_payload(payload, block_map),
+        payload=validation_payload,
     )
     if not _section_result_is_usable(candidate):
         meta["reason"] = "segment_reduce_unusable"
@@ -2178,6 +2227,7 @@ async def _generate_ai_outline(
                 model=model,
                 provider=provider,
                 endpoint=endpoint,
+                first_pass_result=results.get(section_id),
             )
             segmented_review_meta[section_id] = segment_meta
             if segmented_candidate:
@@ -2389,6 +2439,9 @@ async def _generate_ai_outline(
                     section_hash=payload["section_hash"],
                     payload=payload,
                 )
+                # 修复批次要的是去数字的定性改写，判定档位与定性救援一致，
+                # 否则改写稿会被首轮 prose-claim 门整章否掉，只剩旧的坏结果。
+                candidate["repair_kind"] = "claim_rewrite"
                 if not _section_result_is_usable(candidate):
                     continue
                 expected_flow_labels = (
