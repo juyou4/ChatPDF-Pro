@@ -17,10 +17,12 @@ from services.reading_outline_service import (  # noqa: E402
     _canonical_brief_section_result,
     _flatten_skeleton_nodes,
     _incomplete_section_issue,
+    _generate_ai_outline,
     _is_transient_reading_llm_error,
     _partial_reading_outline_quality_issues,
     _qualitative_suspect_section_ids,
     _section_result_is_usable,
+    _section_result_looks_length_truncated,
     _section_study_quality_issues,
     _should_refresh_stale_partial_outline,
 )
@@ -305,6 +307,196 @@ def test_stale_partial_cache_is_refreshed_without_touching_complete() -> None:
     assert not _should_refresh_stale_partial_outline(complete, can_call_model=True)
     assert not _should_refresh_stale_partial_outline(current_partial, can_call_model=True)
     assert not _should_refresh_stale_partial_outline(partial, can_call_model=False)
+
+
+def test_length_truncation_heuristic_only_flags_unterminated_summaries() -> None:
+    assert _section_result_looks_length_truncated({"summary": "本节给出主实验结果，并且"})
+    assert not _section_result_looks_length_truncated({"summary": "本节给出主实验结果。"})
+    assert not _section_result_looks_length_truncated({"summary": ""})
+    assert not _section_result_looks_length_truncated(None)
+
+
+def _single_section_block_index() -> dict:
+    return {
+        "source": "pdf",
+        "outline": [
+            {
+                "section_id": "results",
+                "title": "4.3 Main Results",
+                "level": 1,
+                "page": 2,
+                "first_block": "h_results",
+                "source": "pdf_outline",
+            }
+        ],
+        "pages": [
+            {
+                "page": 1,
+                "blocks": [
+                    {
+                        "block_id": "title",
+                        "type": "heading",
+                        "section_id": "title",
+                        "text": "Retrieval Augmented Layout Understanding",
+                    }
+                ],
+            },
+            {
+                "page": 2,
+                "blocks": [
+                    {
+                        "block_id": "h_results",
+                        "type": "heading",
+                        "section_id": "results",
+                        "text": "4.3 Main Results",
+                    },
+                    {
+                        "block_id": "b_results",
+                        "type": "paragraph",
+                        "section_id": "results",
+                        "text": (
+                            "本节报告主实验结果：所提方法在检索与问答两个阶段都给出了"
+                            "更稳定的表现，并逐项分析了失败样本的来源、版式噪声的影响，"
+                            "以及消融设置下各模块对最终指标的贡献。"
+                        ),
+                    },
+                ],
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_parseable_but_unusable_single_retry_still_runs_length_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """单章重试拿到可解析但不可用的 JSON 时，长度截断恢复不能被跳过。"""
+    calls = {"batch": 0, "segmented": 0}
+
+    async def fake_generate_section_batch(**kwargs):
+        calls["batch"] += 1
+        if calls["batch"] == 1:
+            raise RuntimeError("structured output rejected: finish_reason='length'")
+        return {
+            "sections": [
+                {
+                    "source_section_id": "results",
+                    "summary": "该方法把错误率降到 12.3，因而显著优于所有基线。",
+                    "evidence_block_ids": ["b_results"],
+                    "metric_claims": [],
+                    "prose_claims": [],
+                }
+            ]
+        }
+
+    async def fake_segmented_review(*, payload, first_pass_result=None, **kwargs):
+        calls["segmented"] += 1
+        candidate = _canonical_brief_section_result(
+            {
+                "summary": "本节按段恢复后给出主实验的定性结论。",
+                "evidence_block_ids": ["b_results"],
+                "metric_claims": [],
+                "prose_claims": [],
+            },
+            section_id="results",
+            section_hash=str(payload.get("section_hash") or ""),
+            payload=payload,
+        )
+        return candidate, {"source_section_id": "results", "coverage_complete": True}
+
+    async def fake_overview(**kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_section_batch",
+        fake_generate_section_batch,
+    )
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_segmented_section_review",
+        fake_segmented_review,
+    )
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_learning_overview",
+        fake_overview,
+    )
+
+    raw = await _generate_ai_outline(
+        doc_id="doc",
+        doc={},
+        block_index=_single_section_block_index(),
+        api_key="k",
+        model="m",
+        provider="deepseek",
+        endpoint="",
+    )
+
+    assert calls["segmented"] == 1
+    recovered = next(
+        item for item in raw.get("items") or []
+        if str(item.get("source_section_id")) == "results"
+    )
+    assert recovered["summary"] == "本节按段恢复后给出主实验的定性结论。"
+    assert recovered["repair_kind"] == "segmented_length_recovery"
+
+
+@pytest.mark.asyncio
+async def test_usable_single_retry_skips_length_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"batch": 0, "segmented": 0}
+
+    async def fake_generate_section_batch(**kwargs):
+        calls["batch"] += 1
+        if calls["batch"] == 1:
+            raise RuntimeError("structured output rejected: finish_reason='length'")
+        return {
+            "sections": [
+                {
+                    "source_section_id": "results",
+                    "summary": "本节报告主实验在检索与问答两个阶段的稳定表现。",
+                    "evidence_block_ids": ["b_results"],
+                    "metric_claims": [],
+                    "prose_claims": [],
+                }
+            ]
+        }
+
+    async def fake_segmented_review(**kwargs):
+        calls["segmented"] += 1
+        return None, {"reason": "segment_not_needed"}
+
+    async def fake_overview(**kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_section_batch",
+        fake_generate_section_batch,
+    )
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_segmented_section_review",
+        fake_segmented_review,
+    )
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_learning_overview",
+        fake_overview,
+    )
+
+    raw = await _generate_ai_outline(
+        doc_id="doc",
+        doc={},
+        block_index=_single_section_block_index(),
+        api_key="k",
+        model="m",
+        provider="deepseek",
+        endpoint="",
+    )
+
+    assert calls["segmented"] == 0
+    recovered = next(
+        item for item in raw.get("items") or []
+        if str(item.get("source_section_id")) == "results"
+    )
+    assert recovered["summary"] == "本节报告主实验在检索与问答两个阶段的稳定表现。"
 
 
 @pytest.mark.asyncio

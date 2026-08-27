@@ -1619,6 +1619,21 @@ def _qualitative_suspect_section_ids(
     ]
 
 
+def _section_result_looks_length_truncated(item: dict[str, Any] | None) -> bool:
+    """疑似被 max_tokens 截断、但仍能解析的单章结果。
+
+    结构化输出在 4096 token 处被砍时，提供方偶尔仍能补全出合法 JSON：摘要停在
+    句子中间、没有终止标点。这类结果拿不到 ``finish_reason=length``，却和真正的
+    截断同源，应该继续走分段恢复而不是当成一次成功的单章重试。
+    """
+    if not isinstance(item, dict):
+        return False
+    summary = " ".join(str(item.get("summary") or "").split())
+    if not summary or not _is_substantive_section_summary(summary):
+        return False
+    return not re.search(r"[。！？；.!?;]$", summary)
+
+
 def _structured_output_hit_length_limit(exc: Exception | BaseException | None) -> bool:
     """Whether a structured-output failure was caused by completion truncation.
 
@@ -2019,6 +2034,7 @@ async def _generate_ai_outline(
             for section in missing:
                 section_id = str(section.get("source_section_id"))
                 single_error: Exception | None = None
+                single_candidate: dict[str, Any] | None = None
                 try:
                     single = await _generate_section_batch(
                         doc_id=doc_id,
@@ -2038,17 +2054,26 @@ async def _generate_ai_outline(
                         None,
                     )
                     if candidate:
-                        generated[section_id] = _canonical_brief_section_result(
+                        single_candidate = _canonical_brief_section_result(
                             candidate,
                             section_id=section_id,
                             section_hash=section["section_hash"],
                             payload=section,
                         )
-                        continue
+                        if _section_result_is_usable(single_candidate):
+                            generated[section_id] = single_candidate
+                            continue
                 except Exception as exc:
                     single_error = exc
 
-                if _structured_output_hit_length_limit(single_error) or _structured_output_hit_length_limit(batch_error):
+                # 单章重试可能返回「能解析但被截断」的 JSON：拿到候选不等于恢复成功。
+                # 只要这一轮命中过长度上限，或候选本身像被截断，就仍然走分段恢复，
+                # 否则整章只会留下一个不可用结果。
+                if (
+                    _structured_output_hit_length_limit(single_error)
+                    or _structured_output_hit_length_limit(batch_error)
+                    or _section_result_looks_length_truncated(single_candidate)
+                ):
                     try:
                         segmented_candidate, segment_meta = await _generate_segmented_section_review(
                             doc_id=doc_id,
@@ -2091,6 +2116,11 @@ async def _generate_ai_outline(
                         warnings.append(
                             f"章节 {section.get('title') or section_id} 长度截断分段恢复失败：{exc}"
                         )
+                if single_candidate is not None:
+                    # 分段恢复没接住：保留可解析但不可用的单章结果，后面的定性
+                    # 救援仍会以它为线索重跑，不要退化成完全没有结果。
+                    generated[section_id] = single_candidate
+                    continue
                 if single_error is not None:
                     warnings.append(f"章节 {section.get('title') or section_id} 单独重试失败：{single_error}")
                 warnings.append(f"章节 {section.get('title') or section_id} 未返回有效结果，已局部回退")
