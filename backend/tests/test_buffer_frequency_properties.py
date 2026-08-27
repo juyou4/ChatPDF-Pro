@@ -49,7 +49,9 @@ def _run_buffered_stream(input_chunks, buffer_size):
                 output.append(chunk)
             return output
 
-    return asyncio.get_event_loop().run_until_complete(_collect())
+    # 必须自带事件循环：get_event_loop() 在 Python 3.11 下不再兜底新建，
+    # 全量跑时前面的用例关掉默认循环后，这里会直接 RuntimeError。
+    return asyncio.run(_collect())
 
 
 # ============================================================

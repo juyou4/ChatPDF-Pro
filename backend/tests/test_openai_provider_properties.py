@@ -82,7 +82,7 @@ class TestP2OptionalParamsPassthrough:
     @settings(max_examples=100)
     def test_optional_params_passthrough(self, temperature, top_p, max_tokens):
         """属性：None 参数不出现在请求体中，非 None 参数正确出现"""
-        body = asyncio.get_event_loop().run_until_complete(
+        body = asyncio.run(
             capture_request_body(
                 temperature=temperature,
                 top_p=top_p,
@@ -160,9 +160,7 @@ class TestP3CustomParamsMerge:
     @settings(max_examples=100)
     def test_custom_params_all_present(self, custom_params):
         """属性：自定义参数的所有 key-value 都出现在请求体中"""
-        body = asyncio.get_event_loop().run_until_complete(
-            capture_request_body(custom_params=custom_params)
-        )
+        body = asyncio.run(capture_request_body(custom_params=custom_params))
 
         for key, value in custom_params.items():
             assert key in body, f"自定义参数 '{key}' 应出现在请求体中"
@@ -172,9 +170,7 @@ class TestP3CustomParamsMerge:
     @settings(max_examples=100)
     def test_custom_params_no_core_override(self, custom_params):
         """属性：自定义参数不覆盖核心字段（model、messages、stream）"""
-        body = asyncio.get_event_loop().run_until_complete(
-            capture_request_body(custom_params=custom_params)
-        )
+        body = asyncio.run(capture_request_body(custom_params=custom_params))
 
         # 核心字段应保持原始值
         assert body["model"] == "gpt-4", "model 字段不应被自定义参数覆盖"
@@ -197,9 +193,7 @@ class TestP3CustomParamsMerge:
         设计文档注释说"不覆盖已有核心字段由调用方保证"。
         此测试记录当前行为，确认核心字段确实会被覆盖。
         """
-        body = asyncio.get_event_loop().run_until_complete(
-            capture_request_body(custom_params=custom_params)
-        )
+        body = asyncio.run(capture_request_body(custom_params=custom_params))
 
         # 当 custom_params 包含核心字段时，body.update 会覆盖
         for key in custom_params:
