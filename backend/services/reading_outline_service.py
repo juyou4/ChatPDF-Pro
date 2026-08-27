@@ -20,11 +20,14 @@ from services.completion_outcome import (
 )
 from services.document_block_roles import (
     FRONT_MATTER_ROLES,
+    OUTLINE_EXCLUDED_ROLES,
+    ROLE_AFFILIATION,
     ROLE_KEYWORDS,
     annotate_block_role,
     block_is_keyword_excluded,
     block_is_outline_excluded,
     classify_block_role,
+    classify_front_matter_text,
 )
 from services.document_parse_state import read_parse_manifest
 from services.keyword_extractor import KeywordExtractor
@@ -2759,6 +2762,25 @@ def _inline_abstract_node(
     return None
 
 
+def _is_front_matter_outline_title(title: str) -> bool:
+    """精读骨架里剔除作者/单位/期刊元信息标题。
+
+    MinerU 会把「Academic Editor: …」「Received: …」以及没有逗号的作者行提成
+    标题。它们进入骨架后会撑大 expected_body、拉低黄条覆盖率，还能把缺失章节数
+    推过 blocking 阈值。这里只裁精读骨架，左侧 MinerU 导航保持原样。
+    """
+    decision = classify_front_matter_text(title)
+    if not decision:
+        return False
+    role = str(decision["role"])
+    if role not in OUTLINE_EXCLUDED_ROLES:
+        return False
+    # 「Lab Setup」这类真实标题会被单个机构词判成低置信 affiliation，必须保住。
+    if role == ROLE_AFFILIATION and float(decision["confidence"]) < 0.9:
+        return False
+    return True
+
+
 def _build_reading_section_skeleton(block_index: dict[str, Any]) -> list[dict[str, Any]]:
     candidates = _outline_candidates(block_index)
     if not candidates:
@@ -2787,6 +2809,8 @@ def _build_reading_section_skeleton(block_index: dict[str, Any]) -> list[dict[st
         if _is_acknowledgment_heading(title):
             continue
         if references_seen and _is_post_reference_template_artifact(title):
+            continue
+        if _is_front_matter_outline_title(title):
             continue
 
         anchor_text = str(

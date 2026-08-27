@@ -83,7 +83,61 @@ _AFFILIATION_RE = re.compile(
     r"作者单位|通讯作者|通信作者)",
     re.IGNORECASE,
 )
+_EDITORIAL_LABEL_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:academic|corresponding|handling|guest|managing|associate|section|senior|responsible)"
+    r"\s+editors?"
+    r"|editors?[\s-]in[\s-]chief"
+    r"|editors?"
+    r"|received(?:\s+date)?|accepted(?:\s+date)?|revised|submitted"
+    r"|published(?:\s+online)?|first\s+published|available\s+online"
+    r"|date\s+of\s+publication|date\s+of\s+current\s+version"
+    r"|收稿日期|录用日期|修回日期|出版日期|接收日期"
+    r")\s*[:：]",
+    re.IGNORECASE,
+)
+# IEEE 的收发日期行没有冒号：「Received April 3, 2019, accepted April 22, 2019,
+# date of publication May 1, 2019」。要求同时出现第二个日期动词和四位年份，
+# 避免误伤「Received signals are ...」这类正文句。
+_EDITORIAL_DATE_LINE_RE = re.compile(
+    r"^\s*received\b"
+    r"(?=[^.]{0,200}\b(?:accepted|revised|published|publication)\b)"
+    r"(?=[^.]{0,240}\b(?:19|20)\d{2}\b)",
+    re.IGNORECASE,
+)
 _AUTHOR_SEPARATOR_RE = re.compile(r"[,，、;；]")
+_NAME_TOKEN_RE = re.compile(r"^(?:[A-Z][a-zà-öø-ÿ'\-]{1,19}|[A-Z]\.)$")
+_NAME_PARTICLE_TOKENS = frozenset({
+    "van", "von", "de", "del", "della", "da", "das", "dos", "di", "du",
+    "la", "le", "bin", "ibn", "al", "el", "ter", "ten",
+})
+# MinerU 常把没有逗号的作者行合并成一行标题。仅靠「若干首字母大写的词」无法与
+# 「Attention Residuals」这类真实小节标题区分，所以再加一层常见章节词否决表。
+_SECTION_TITLE_TOKENS = frozenset({
+    "abstract", "introduction", "background", "related", "work", "works",
+    "literature", "review", "survey", "overview", "summary", "preliminaries",
+    "notation", "problem", "statement", "motivation", "contribution",
+    "contributions", "method", "methods", "methodology", "approach",
+    "approaches", "framework", "architecture", "model", "models", "algorithm",
+    "algorithms", "implementation", "setup", "setting", "settings",
+    "experiment", "experiments", "experimental", "evaluation", "evaluations",
+    "result", "results", "finding", "findings", "discussion", "discussions",
+    "analysis", "analyses", "ablation", "ablations", "conclusion",
+    "conclusions", "limitation", "limitations", "future", "appendix",
+    "appendices", "reference", "references", "dataset", "datasets", "data",
+    "benchmark", "benchmarks", "baseline", "baselines", "metric", "metrics",
+    "training", "learning", "inference", "attention", "residual", "residuals",
+    "network", "networks", "theory", "theorem", "proof", "proofs", "lemma",
+    "corollary", "design", "study", "studies", "case", "cases", "application",
+    "applications", "comparison", "comparisons", "main", "proposed",
+    "materials", "procedure", "protocol", "task", "tasks", "system", "systems",
+    "deep", "neural", "machine", "large", "language", "vision", "graph",
+    "generative", "adversarial", "transformer", "transformers",
+    "convolutional", "recurrent", "and", "or", "of", "the", "for", "with",
+    "in", "on", "at", "to", "from", "via", "using", "based", "toward",
+    "towards", "a", "an", "is", "are", "we", "our", "their", "this", "that",
+    "these", "those", "how", "why", "what", "when",
+})
 _AUTHOR_NAME_PART_RE = re.compile(
     r"^(?:[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'\-]+|[A-Z]\.)"
     r"(?:\s+(?:[A-Z][A-Za-zÀ-ÖØ-öø-ÿ'\-]+|[A-Z]\.)){1,3}"
@@ -155,6 +209,35 @@ def _looks_like_english_author_byline(value: str) -> bool:
     return len(parts) >= 2 and all(_AUTHOR_NAME_PART_RE.fullmatch(part) for part in parts)
 
 
+def _looks_like_comma_less_author_byline(value: str) -> bool:
+    """Recognize a merged, separator-free author line without eating real titles.
+
+    MinerU frequently drops the commas between authors, so a byline arrives as
+    one run of capitalized name tokens.  A two-word title such as "Attention
+    Residuals" has the same shape, so the check stays deliberately narrow: at
+    least two full names (four name tokens), every token name-shaped, no
+    section vocabulary, no digits, and not a sentence.
+    """
+    if len(value) > 120 or _BODY_SENTENCE_RE.search(value):
+        return False
+    if _AUTHOR_SEPARATOR_RE.search(value) or re.search(r"[\d\u4e00-\u9fff]", value):
+        return False
+    tokens = value.split()
+    if not 4 <= len(tokens) <= 12:
+        return False
+    full_names = 0
+    for token in tokens:
+        if token.lower() in _NAME_PARTICLE_TOKENS:
+            continue
+        if token.lower() in _SECTION_TITLE_TOKENS:
+            return False
+        if not _NAME_TOKEN_RE.fullmatch(token):
+            return False
+        if not token.endswith("."):
+            full_names += 1
+    return full_names >= 4
+
+
 def classify_front_matter_text(text: Any) -> dict[str, Any] | None:
     """Classify metadata-like text using multiple signals, not institution words alone."""
     value = _clean_text(text)
@@ -168,6 +251,12 @@ def classify_front_matter_text(text: Any) -> dict[str, Any] | None:
         return _decision(ROLE_KEYWORDS, 0.99, "keyword_line")
     if is_reference_heading(value) or _REFERENCE_ENTRY_RE.match(value):
         return _decision(ROLE_REFERENCE, 0.96, "reference")
+    # 编辑/收发稿元信息（MDPI 的 Academic Editor、Received/Accepted/Published，
+    # IEEE 的无冒号日期行）在 MinerU 里常被提成标题，进而混进精读章节骨架。
+    if len(value) <= 240 and (
+        _EDITORIAL_LABEL_RE.match(value) or _EDITORIAL_DATE_LINE_RE.match(value)
+    ):
+        return _decision(ROLE_PUBLICATION_HEADER, 0.95, "editorial_metadata")
     if _PUBLICATION_STRONG_RE.search(value) and len(value) <= 320:
         return _decision(ROLE_PUBLICATION_HEADER, 0.97, "strong_publication_cue")
     publication_hits = len(_PUBLICATION_CONTEXT_RE.findall(value))
@@ -213,6 +302,8 @@ def classify_front_matter_text(text: Any) -> dict[str, Any] | None:
     ):
         confidence = 0.9 + (0.03 if separators >= 2 else 0.0)
         return _decision(ROLE_AUTHOR, confidence, "author_byline")
+    if _looks_like_comma_less_author_byline(value):
+        return _decision(ROLE_AUTHOR, 0.88, "comma_less_author_byline")
     if len(value) <= 180 and _CJK_AUTHOR_LIST_RE.fullmatch(value):
         return _decision(ROLE_AUTHOR, 0.92, "cjk_author_byline")
     if (
@@ -254,13 +345,21 @@ def classify_block_role(block: dict[str, Any], *, section_title: str = "") -> di
 
     if block_type == "heading":
         heading_metadata = classify_front_matter_text(text)
-        if heading_metadata and heading_metadata["role"] in {
-            ROLE_CONTACT,
-            ROLE_PUBLICATION_HEADER,
-            ROLE_REFERENCE,
-            ROLE_KEYWORDS,
-        }:
-            return heading_metadata
+        if heading_metadata:
+            heading_role = str(heading_metadata["role"])
+            if heading_role in {
+                ROLE_CONTACT,
+                ROLE_PUBLICATION_HEADER,
+                ROLE_REFERENCE,
+                ROLE_KEYWORDS,
+            }:
+                return heading_metadata
+            # 作者/单位行被解析器提成标题后会变成假章节。仍然保守：只在扉页
+            # 附近或高置信时降级，正文深处的真实标题不受影响。
+            if heading_role in {ROLE_AUTHOR, ROLE_AFFILIATION} and (
+                page <= 2 or float(heading_metadata["confidence"]) >= 0.92
+            ):
+                return heading_metadata
         return _decision(ROLE_HEADING, 1.0, "heading_type")
 
     # Explicit visual/table types take precedence over metadata wording inside

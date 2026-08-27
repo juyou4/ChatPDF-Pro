@@ -212,6 +212,37 @@ def test_incomplete_issue_labels_respect_the_appendix_policy() -> None:
     assert _incomplete_section_issue("正文", incomplete[:2], expected) == "正文章节摘要不完整:2"
 
 
+def test_front_matter_titles_are_not_reading_chapters() -> None:
+    junk = (
+        "Academic Editor: Gerardo Flores",
+        "Zhen Wang Ling Chen",
+        "Received: 12 May 2023",
+    )
+    baseline = _flatten_skeleton_nodes(_build_reading_section_skeleton(_paper_block_index()))
+    polluted = _flatten_skeleton_nodes(
+        _build_reading_section_skeleton(_paper_block_index(front_matter_titles=junk))
+    )
+
+    titles = {str(node.get("title") or "") for node in polluted}
+    assert not titles & set(junk)
+    assert [node.get("source_section_id") for node in polluted] == [
+        node.get("source_section_id") for node in baseline
+    ]
+
+
+def test_real_chapter_titles_survive_front_matter_filtering() -> None:
+    block_index = _paper_block_index(
+        front_matter_titles=("4.3 Main Results", "Attention Residuals", "Lab Setup"),
+    )
+
+    titles = {
+        str(node.get("title") or "")
+        for node in _flatten_skeleton_nodes(_build_reading_section_skeleton(block_index))
+    }
+
+    assert {"4.3 Main Results", "Attention Residuals", "Lab Setup"} <= titles
+
+
 def test_ssl_bad_record_mac_is_transient() -> None:
     assert _is_transient_reading_llm_error(
         "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] tlsv1 alert bad record mac"
