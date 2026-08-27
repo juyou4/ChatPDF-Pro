@@ -16,8 +16,8 @@ from services.reading_outline_service import (  # noqa: E402
     _call_ai_api_with_transient_retry,
     _canonical_brief_section_result,
     _flatten_skeleton_nodes,
-    _incomplete_section_issue,
     _generate_ai_outline,
+    _incomplete_section_issue,
     _is_transient_reading_llm_error,
     _partial_reading_outline_quality_issues,
     _qualitative_suspect_section_ids,
@@ -312,7 +312,7 @@ def test_stale_partial_cache_is_refreshed_without_touching_complete() -> None:
     }
     complete = {
         "source": "ai",
-        "meta": {},
+        "meta": {"repair_policy_version": READING_OUTLINE_REPAIR_POLICY_VERSION},
     }
     current_partial = {
         "source": "ai_partial",
@@ -322,6 +322,55 @@ def test_stale_partial_cache_is_refreshed_without_touching_complete() -> None:
     assert not _should_refresh_stale_partial_outline(complete, can_call_model=True)
     assert not _should_refresh_stale_partial_outline(current_partial, can_call_model=True)
     assert not _should_refresh_stale_partial_outline(partial, can_call_model=False)
+
+
+def test_current_policy_partial_with_holes_gets_one_hole_fill() -> None:
+    cached = {
+        "source": "ai_partial",
+        "meta": {
+            "repair_policy_version": READING_OUTLINE_REPAIR_POLICY_VERSION,
+            "partial_quality_issues": ["正文章节摘要不完整:1"],
+        },
+    }
+
+    assert _should_refresh_stale_partial_outline(cached, can_call_model=True)
+    # 现场质量复检结果优先于缓存里记录的问题列表。
+    assert _should_refresh_stale_partial_outline(
+        cached,
+        can_call_model=True,
+        quality_issues=["附录章节摘要不完整:2"],
+    )
+    assert not _should_refresh_stale_partial_outline(
+        cached,
+        can_call_model=True,
+        quality_issues=[],
+    )
+
+
+def test_hole_filled_current_policy_partial_is_not_retried_again() -> None:
+    cached = {
+        "source": "ai_partial",
+        "meta": {
+            "repair_policy_version": READING_OUTLINE_REPAIR_POLICY_VERSION,
+            "partial_quality_issues": ["正文章节摘要不完整:1"],
+            "hole_fill_attempted": True,
+            "hole_fill_policy_version": READING_OUTLINE_REPAIR_POLICY_VERSION,
+        },
+    }
+
+    assert not _should_refresh_stale_partial_outline(cached, can_call_model=True)
+
+
+def test_complete_ai_cache_is_never_hole_filled() -> None:
+    cached = {
+        "source": "ai",
+        "meta": {
+            "repair_policy_version": READING_OUTLINE_REPAIR_POLICY_VERSION,
+            "partial_quality_issues": ["正文章节摘要不完整:1"],
+        },
+    }
+
+    assert not _should_refresh_stale_partial_outline(cached, can_call_model=True)
 
 
 def _table_payload() -> dict:

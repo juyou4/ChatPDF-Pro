@@ -578,6 +578,7 @@ async def get_or_create_reading_outline(
 
     cached = load_reading_outline(data_dir, doc_id)
     healthy_cached: dict[str, Any] | None = None
+    hole_fill_attempt = False
     cached_matches_current_identity = bool(
         cached
         and _matches_parse_identity(cached, parse_generation, document_source_hash)
@@ -612,7 +613,9 @@ async def get_or_create_reading_outline(
             stale_partial = _should_refresh_stale_partial_outline(
                 cached,
                 can_call_model=can_call_model,
+                quality_issues=quality_issues,
             )
+            hole_fill_attempt = stale_partial and _cached_outline_uses_current_repair_policy(cached)
             if (
                 not force
                 and not blocking_quality_issues
@@ -631,9 +634,10 @@ async def get_or_create_reading_outline(
                 return cached
             if stale_partial:
                 logger.info(
-                    "[ReadingOutline] Refresh stale partial outline doc=%s repair_policy=%s",
+                    "[ReadingOutline] Refresh stale partial outline doc=%s repair_policy=%s hole_fill=%s",
                     doc_id,
                     READING_OUTLINE_REPAIR_POLICY_VERSION,
+                    hole_fill_attempt,
                 )
             logger.info(
                 "[ReadingOutline] Ignore AI cache doc=%s model_match=%s verifier_match=%s blocking_quality=%s partial_quality=%s",
@@ -726,6 +730,10 @@ async def get_or_create_reading_outline(
         if blocking_quality_issues:
             raise ValueError("low-quality reading outline: " + "; ".join(blocking_quality_issues))
         outline_meta = outline.setdefault("meta", {})
+        if hole_fill_attempt:
+            # 补洞已经用掉了这一轮机会：即使仍然残留空洞，也不要每次打开面板都重跑。
+            outline_meta["hole_fill_attempted"] = True
+            outline_meta["hole_fill_policy_version"] = READING_OUTLINE_REPAIR_POLICY_VERSION
         if partial_quality_issues:
             # A single section may exhaust its retry budget while the rest of
             # the document is evidence-bound and useful. Preserve that work;
@@ -763,6 +771,21 @@ async def get_or_create_reading_outline(
                 doc_id,
                 exc,
             )
+            if hole_fill_attempt:
+                # 补洞失败也算用掉机会，否则每次打开面板都会再触发一次全量重跑。
+                healthy_meta = healthy_cached.setdefault("meta", {})
+                healthy_meta["hole_fill_attempted"] = True
+                healthy_meta["hole_fill_policy_version"] = READING_OUTLINE_REPAIR_POLICY_VERSION
+                try:
+                    (cache_writer or (
+                        lambda value: save_reading_outline(data_dir, doc_id, value)
+                    ))(healthy_cached)
+                except Exception as write_exc:
+                    logger.warning(
+                        "[ReadingOutline] Failed to stamp hole-fill attempt doc=%s: %s",
+                        doc_id,
+                        write_exc,
+                    )
             return healthy_cached
         fallback.setdefault("meta", {})["generation_error"] = str(exc)
         fallback.setdefault("meta", {})["generation_error_at"] = time.time()
@@ -823,22 +846,44 @@ def _cached_outline_uses_current_repair_policy(cached: dict[str, Any] | None) ->
     return str(meta.get("repair_policy_version") or "") == READING_OUTLINE_REPAIR_POLICY_VERSION
 
 
+def _outline_hole_fill_already_attempted(cached: dict[str, Any] | None) -> bool:
+    if not isinstance(cached, dict):
+        return False
+    meta = cached.get("meta") if isinstance(cached.get("meta"), dict) else {}
+    return (
+        str(meta.get("hole_fill_policy_version") or "") == READING_OUTLINE_REPAIR_POLICY_VERSION
+    )
+
+
 def _should_refresh_stale_partial_outline(
     cached: dict[str, Any] | None,
     *,
     can_call_model: bool,
+    quality_issues: list[str] | None = None,
 ) -> bool:
-    """Re-run only leftover holes after a repair-policy upgrade.
+    """Re-run only leftover holes; never touch a completed outline.
 
-    Completed outlines stay cached. Partial outlines written before the current
-    qualitative/TLS recovery policy are reused as a per-section cache, then the
-    missing chapters are filled again.
+    Partial outlines written before the current qualitative/TLS recovery policy
+    are reused as a per-section cache, then the missing chapters are filled
+    again. A partial written *under* the current policy used to be sticky: the
+    only way to fill a leftover hole was 手动 force，而 force 会丢掉所有已生成
+    章节重跑全文。它现在也拿到一次补洞机会，同样复用 ``retry_cache``；补洞后会在
+    meta 里盖 ``hole_fill_policy_version`` 章，避免每次打开面板都重试。
     """
     if not can_call_model or not isinstance(cached, dict):
         return False
     if str(cached.get("source") or "").strip().lower() != "ai_partial":
         return False
-    return not _cached_outline_uses_current_repair_policy(cached)
+    if not _cached_outline_uses_current_repair_policy(cached):
+        return True
+    if _outline_hole_fill_already_attempted(cached):
+        return False
+    meta = cached.get("meta") if isinstance(cached.get("meta"), dict) else {}
+    issues = quality_issues
+    if issues is None:
+        stored = meta.get("partial_quality_issues")
+        issues = [str(issue) for issue in stored] if isinstance(stored, list) else []
+    return bool(_partial_reading_outline_quality_issues(list(issues)))
 
 
 def _incomplete_section_issue(
