@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Any
 
 import pytest
 
@@ -10,11 +11,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from services.reading_outline_service import (  # noqa: E402
     READING_OUTLINE_REPAIR_POLICY_VERSION,
+    _blocking_reading_outline_quality_issues,
+    _build_reading_section_skeleton,
     _call_ai_api_with_transient_retry,
     _canonical_brief_section_result,
+    _flatten_skeleton_nodes,
+    _generate_ai_outline,
+    _incomplete_section_issue,
     _is_transient_reading_llm_error,
+    _partial_reading_outline_quality_issues,
     _qualitative_suspect_section_ids,
+    _rebindable_first_pass_claims,
     _section_result_is_usable,
+    _section_result_looks_length_truncated,
+    _section_study_quality_issues,
     _should_refresh_stale_partial_outline,
 )
 
@@ -52,6 +62,190 @@ def _mechanism_item(*, repair_kind: str = "") -> dict:
     return item
 
 
+_APPENDIX_LETTERS = "ABCDEFGHIJKLM"
+
+
+def _paper_block_index(*, front_matter_titles: tuple[str, ...] = ()) -> dict:
+    """13 章正文 + References + 13 个附录的合成解析索引。"""
+    blocks: list[dict[str, Any]] = []
+    outline: list[dict[str, Any]] = []
+
+    def add_section(section_id: str, title: str, *, page: int) -> None:
+        heading_id = f"h_{section_id}"
+        blocks.append({
+            "block_id": heading_id,
+            "type": "heading",
+            "text": title,
+            "section_id": section_id,
+            "page": page,
+        })
+        blocks.append({
+            "block_id": f"p_{section_id}",
+            "type": "paragraph",
+            "section_id": section_id,
+            "page": page,
+            "text": (
+                f"{title} 的正文段落：本节给出方法细节、实验设置与对应的证据说明，"
+                "内容足够长以便被当作可用的章节证据块。"
+            ),
+        })
+        outline.append({
+            "section_id": section_id,
+            "title": title,
+            "level": 1,
+            "page": page,
+            "first_block": heading_id,
+            "source": "pdf_outline",
+        })
+
+    blocks.append({
+        "block_id": "title",
+        "type": "heading",
+        "text": "Evidence Bound Reading Outlines For Scientific Papers",
+        "section_id": "title",
+        "page": 1,
+    })
+    for index, junk in enumerate(front_matter_titles):
+        add_section(f"front_{index}", junk, page=1)
+    for index in range(13):
+        add_section(f"body_{index}", f"{index + 1}. Body Chapter {index + 1}", page=index + 2)
+    add_section("references", "References", page=16)
+    for index, letter in enumerate(_APPENDIX_LETTERS):
+        add_section(
+            f"appendix_{index}",
+            f"Appendix {letter}. Supplementary Material {letter}",
+            page=17 + index,
+        )
+    pages: dict[int, list[dict[str, Any]]] = {}
+    for block in blocks:
+        pages.setdefault(int(block["page"]), []).append(block)
+    return {
+        "source": "pdf",
+        "outline": outline,
+        "pages": [
+            {"page": page, "blocks": page_blocks}
+            for page, page_blocks in sorted(pages.items())
+        ],
+    }
+
+
+def _outline_with_holes(
+    block_index: dict,
+    *,
+    incomplete: set[str],
+) -> dict:
+    nodes = _flatten_skeleton_nodes(_build_reading_section_skeleton(block_index))
+    flat_items = []
+    for node in nodes:
+        section_id = str(node.get("source_section_id") or "")
+        if not section_id:
+            continue
+        hole = section_id in incomplete
+        flat_items.append({
+            "source_section_id": section_id,
+            "title": node.get("title"),
+            "summary": "" if hole else f"{node.get('title')} 的证据绑定小结。",
+            "section_status": "fallback" if hole else "ai",
+            "evidence_block_ids": [f"p_{section_id}"],
+            "evidence_scope": "section",
+            "page_start": node.get("page"),
+            "page_end": node.get("page"),
+        })
+    return {"flat_items": flat_items}
+
+
+def _summary_issues(issues: list[str]) -> list[str]:
+    return [issue for issue in issues if "章节摘要" in issue]
+
+
+def test_body_widespread_missing_summaries_stay_blocking() -> None:
+    block_index = _paper_block_index()
+    outline = _outline_with_holes(
+        block_index,
+        incomplete={f"body_{index}" for index in range(4)},
+    )
+
+    issues = _summary_issues(_section_study_quality_issues(outline, block_index))
+
+    assert issues == ["正文章节摘要大面积缺失:4/13"]
+    assert _blocking_reading_outline_quality_issues(issues) == issues
+    assert _partial_reading_outline_quality_issues(issues) == []
+
+
+def test_appendix_widespread_missing_summaries_are_retriable_partial() -> None:
+    block_index = _paper_block_index()
+    outline = _outline_with_holes(
+        block_index,
+        incomplete={f"appendix_{index}" for index in range(4)},
+    )
+
+    issues = _summary_issues(_section_study_quality_issues(outline, block_index))
+
+    # 正文完好、附录稀疏：整篇结果必须保住，只发可重试的 partial。
+    assert issues == ["附录章节摘要不完整:4"]
+    assert _blocking_reading_outline_quality_issues(issues) == []
+    assert _partial_reading_outline_quality_issues(issues) == issues
+
+
+def test_healthy_body_with_sparse_appendix_never_raises_blocking() -> None:
+    block_index = _paper_block_index()
+    outline = _outline_with_holes(
+        block_index,
+        incomplete={f"appendix_{index}" for index in (0, 3, 7, 11)},
+    )
+
+    issues = _section_study_quality_issues(outline, block_index)
+
+    assert not _blocking_reading_outline_quality_issues(_summary_issues(issues))
+
+
+def test_incomplete_issue_labels_respect_the_appendix_policy() -> None:
+    expected = {f"section_{index}" for index in range(13)}
+    incomplete = sorted(expected)[:4]
+
+    assert (
+        _incomplete_section_issue("正文", incomplete, expected)
+        == "正文章节摘要大面积缺失:4/13"
+    )
+    assert (
+        _incomplete_section_issue("附录", incomplete, expected, widespread_is_blocking=False)
+        == "附录章节摘要不完整:4"
+    )
+    # 少量缺失在正文侧仍然是 partial。
+    assert _incomplete_section_issue("正文", incomplete[:2], expected) == "正文章节摘要不完整:2"
+
+
+def test_front_matter_titles_are_not_reading_chapters() -> None:
+    junk = (
+        "Academic Editor: Gerardo Flores",
+        "Zhen Wang Ling Chen",
+        "Received: 12 May 2023",
+    )
+    baseline = _flatten_skeleton_nodes(_build_reading_section_skeleton(_paper_block_index()))
+    polluted = _flatten_skeleton_nodes(
+        _build_reading_section_skeleton(_paper_block_index(front_matter_titles=junk))
+    )
+
+    titles = {str(node.get("title") or "") for node in polluted}
+    assert not titles & set(junk)
+    assert [node.get("source_section_id") for node in polluted] == [
+        node.get("source_section_id") for node in baseline
+    ]
+
+
+def test_real_chapter_titles_survive_front_matter_filtering() -> None:
+    block_index = _paper_block_index(
+        front_matter_titles=("4.3 Main Results", "Attention Residuals", "Lab Setup"),
+    )
+
+    titles = {
+        str(node.get("title") or "")
+        for node in _flatten_skeleton_nodes(_build_reading_section_skeleton(block_index))
+    }
+
+    assert {"4.3 Main Results", "Attention Residuals", "Lab Setup"} <= titles
+
+
 def test_ssl_bad_record_mac_is_transient() -> None:
     assert _is_transient_reading_llm_error(
         "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] tlsv1 alert bad record mac"
@@ -71,6 +265,20 @@ def test_qualitative_number_free_mechanism_sentence_is_usable() -> None:
     item = _mechanism_item(repair_kind="single_qualitative")
     assert item.get("claim_binding_violations")
     assert _section_result_is_usable(item)
+
+
+def test_repair_rewrite_number_free_mechanism_sentence_is_usable() -> None:
+    item = _mechanism_item(repair_kind="claim_rewrite")
+    assert item.get("claim_binding_violations")
+    assert _section_result_is_usable(item)
+
+
+def test_repair_rewrite_numeric_violation_still_unusable() -> None:
+    item = _mechanism_item(repair_kind="claim_rewrite")
+    item["claim_binding_violations"] = [
+        {"reason": "unbound_prose_claim", "claim_text": "提升 12.3", "numbers": ["12.3"]},
+    ]
+    assert not _section_result_is_usable(item)
 
 
 def test_qualitative_numeric_violation_still_unusable() -> None:
@@ -104,7 +312,7 @@ def test_stale_partial_cache_is_refreshed_without_touching_complete() -> None:
     }
     complete = {
         "source": "ai",
-        "meta": {},
+        "meta": {"repair_policy_version": READING_OUTLINE_REPAIR_POLICY_VERSION},
     }
     current_partial = {
         "source": "ai_partial",
@@ -114,6 +322,374 @@ def test_stale_partial_cache_is_refreshed_without_touching_complete() -> None:
     assert not _should_refresh_stale_partial_outline(complete, can_call_model=True)
     assert not _should_refresh_stale_partial_outline(current_partial, can_call_model=True)
     assert not _should_refresh_stale_partial_outline(partial, can_call_model=False)
+
+
+def test_current_policy_partial_with_holes_gets_one_hole_fill() -> None:
+    cached = {
+        "source": "ai_partial",
+        "meta": {
+            "repair_policy_version": READING_OUTLINE_REPAIR_POLICY_VERSION,
+            "partial_quality_issues": ["正文章节摘要不完整:1"],
+        },
+    }
+
+    assert _should_refresh_stale_partial_outline(cached, can_call_model=True)
+    # 现场质量复检结果优先于缓存里记录的问题列表。
+    assert _should_refresh_stale_partial_outline(
+        cached,
+        can_call_model=True,
+        quality_issues=["附录章节摘要不完整:2"],
+    )
+    assert not _should_refresh_stale_partial_outline(
+        cached,
+        can_call_model=True,
+        quality_issues=[],
+    )
+
+
+def test_hole_filled_current_policy_partial_is_not_retried_again() -> None:
+    cached = {
+        "source": "ai_partial",
+        "meta": {
+            "repair_policy_version": READING_OUTLINE_REPAIR_POLICY_VERSION,
+            "partial_quality_issues": ["正文章节摘要不完整:1"],
+            "hole_fill_attempted": True,
+            "hole_fill_policy_version": READING_OUTLINE_REPAIR_POLICY_VERSION,
+        },
+    }
+
+    assert not _should_refresh_stale_partial_outline(cached, can_call_model=True)
+
+
+def test_complete_ai_cache_is_never_hole_filled() -> None:
+    cached = {
+        "source": "ai",
+        "meta": {
+            "repair_policy_version": READING_OUTLINE_REPAIR_POLICY_VERSION,
+            "partial_quality_issues": ["正文章节摘要不完整:1"],
+        },
+    }
+
+    assert not _should_refresh_stale_partial_outline(cached, can_call_model=True)
+
+
+def _table_payload() -> dict:
+    return {
+        "source_section_id": "results",
+        "section_hash": "h_results",
+        "blocks": [
+            {
+                "block_id": "b_results",
+                "type": "paragraph",
+                "page": 5,
+                "text": "Table 2 reports that TinyBERT reaches 87.5 accuracy on the benchmark.",
+            }
+        ],
+        "allowed_block_ids": ["b_results"],
+        "flow_spine_block_ids": [],
+        "table_evidence": [
+            {
+                "bundle_id": "bundle_1",
+                "table_id": "table_2",
+                "caption": "Table 2. Accuracy",
+                "header": "Model | Accuracy",
+                "rows": [
+                    {
+                        "evidence_unit_id": "row_tinybert",
+                        "row_text": "TinyBERT | 87.5",
+                        "page": 5,
+                        "cells": [
+                            {"column": 0, "text": "TinyBERT"},
+                            {"column": 1, "text": "87.5"},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _table_bound_first_pass() -> dict:
+    return _canonical_brief_section_result(
+        {
+            "summary": "TinyBERT 在该基准上达到 87.5 的准确率。",
+            "evidence_block_ids": ["b_results"],
+            "metric_claims": [
+                {
+                    "claim_text": "TinyBERT 在该基准上达到 87.5 的准确率。",
+                    "claim_kind": "value",
+                    "subject": "TinyBERT",
+                    "subjects": ["TinyBERT"],
+                    "metric": "accuracy",
+                    "value_column": 1,
+                    "values": ["87.5"],
+                    "row_bindings": [
+                        {
+                            "subject": "TinyBERT",
+                            "value": "87.5",
+                            "table_evidence_unit_id": "row_tinybert",
+                        }
+                    ],
+                }
+            ],
+            "prose_claims": [],
+        },
+        section_id="results",
+        section_hash="h_results",
+        payload=_table_payload(),
+    )
+
+
+def _reduced_candidate(summary: str, payload: dict, first_pass: dict | None) -> dict:
+    metric_claims, prose_claims = _rebindable_first_pass_claims(
+        first_pass,
+        summary=summary,
+        payload=payload,
+    )
+    return _canonical_brief_section_result(
+        {
+            "summary": summary,
+            "evidence_block_ids": ["b_results"],
+            "metric_claims": metric_claims,
+            "prose_claims": prose_claims,
+        },
+        section_id="results",
+        section_hash="h_results",
+        payload=payload,
+    )
+
+
+def test_segmented_reduce_keeps_first_pass_bound_numbers() -> None:
+    payload = _table_payload()
+    first_pass = _table_bound_first_pass()
+    assert [claim["values"] for claim in first_pass["metric_claims"]] == [["87.5"]]
+
+    candidate = _reduced_candidate(
+        "TinyBERT 在该基准上达到 87.5 的准确率。",
+        payload,
+        first_pass,
+    )
+
+    assert "87.5" in candidate["summary"]
+    assert not candidate["table_claim_violations"]
+    assert _section_result_is_usable(candidate)
+
+
+def test_segmented_reduce_without_first_pass_claims_drops_the_number() -> None:
+    payload = _table_payload()
+
+    candidate = _reduced_candidate(
+        "TinyBERT 在该基准上达到 87.5 的准确率。",
+        payload,
+        None,
+    )
+
+    assert "87.5" not in candidate["summary"]
+
+
+def test_segmented_reduce_does_not_mint_unbound_numbers() -> None:
+    payload = _table_payload()
+
+    candidate = _reduced_candidate(
+        "TinyBERT 在该基准上达到 91.2 的准确率。",
+        payload,
+        _table_bound_first_pass(),
+    )
+
+    # 回填只复用首轮已绑定的 claim，归并阶段自己编出来的数字仍然没有依据。
+    assert candidate["metric_claims"] == []
+    assert candidate["claim_binding_violations"]
+    assert not _section_result_is_usable(candidate)
+
+
+def test_length_truncation_heuristic_only_flags_unterminated_summaries() -> None:
+    assert _section_result_looks_length_truncated({"summary": "本节给出主实验结果，并且"})
+    assert not _section_result_looks_length_truncated({"summary": "本节给出主实验结果。"})
+    assert not _section_result_looks_length_truncated({"summary": ""})
+    assert not _section_result_looks_length_truncated(None)
+
+
+def _single_section_block_index() -> dict:
+    return {
+        "source": "pdf",
+        "outline": [
+            {
+                "section_id": "results",
+                "title": "4.3 Main Results",
+                "level": 1,
+                "page": 2,
+                "first_block": "h_results",
+                "source": "pdf_outline",
+            }
+        ],
+        "pages": [
+            {
+                "page": 1,
+                "blocks": [
+                    {
+                        "block_id": "title",
+                        "type": "heading",
+                        "section_id": "title",
+                        "text": "Retrieval Augmented Layout Understanding",
+                    }
+                ],
+            },
+            {
+                "page": 2,
+                "blocks": [
+                    {
+                        "block_id": "h_results",
+                        "type": "heading",
+                        "section_id": "results",
+                        "text": "4.3 Main Results",
+                    },
+                    {
+                        "block_id": "b_results",
+                        "type": "paragraph",
+                        "section_id": "results",
+                        "text": (
+                            "本节报告主实验结果：所提方法在检索与问答两个阶段都给出了"
+                            "更稳定的表现，并逐项分析了失败样本的来源、版式噪声的影响，"
+                            "以及消融设置下各模块对最终指标的贡献。"
+                        ),
+                    },
+                ],
+            },
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_parseable_but_unusable_single_retry_still_runs_length_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """单章重试拿到可解析但不可用的 JSON 时，长度截断恢复不能被跳过。"""
+    calls = {"batch": 0, "segmented": 0}
+
+    async def fake_generate_section_batch(**kwargs):
+        calls["batch"] += 1
+        if calls["batch"] == 1:
+            raise RuntimeError("structured output rejected: finish_reason='length'")
+        return {
+            "sections": [
+                {
+                    "source_section_id": "results",
+                    "summary": "该方法把错误率降到 12.3，因而显著优于所有基线。",
+                    "evidence_block_ids": ["b_results"],
+                    "metric_claims": [],
+                    "prose_claims": [],
+                }
+            ]
+        }
+
+    async def fake_segmented_review(*, payload, first_pass_result=None, **kwargs):
+        calls["segmented"] += 1
+        candidate = _canonical_brief_section_result(
+            {
+                "summary": "本节按段恢复后给出主实验的定性结论。",
+                "evidence_block_ids": ["b_results"],
+                "metric_claims": [],
+                "prose_claims": [],
+            },
+            section_id="results",
+            section_hash=str(payload.get("section_hash") or ""),
+            payload=payload,
+        )
+        return candidate, {"source_section_id": "results", "coverage_complete": True}
+
+    async def fake_overview(**kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_section_batch",
+        fake_generate_section_batch,
+    )
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_segmented_section_review",
+        fake_segmented_review,
+    )
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_learning_overview",
+        fake_overview,
+    )
+
+    raw = await _generate_ai_outline(
+        doc_id="doc",
+        doc={},
+        block_index=_single_section_block_index(),
+        api_key="k",
+        model="m",
+        provider="deepseek",
+        endpoint="",
+    )
+
+    assert calls["segmented"] == 1
+    recovered = next(
+        item for item in raw.get("items") or []
+        if str(item.get("source_section_id")) == "results"
+    )
+    assert recovered["summary"] == "本节按段恢复后给出主实验的定性结论。"
+    assert recovered["repair_kind"] == "segmented_length_recovery"
+
+
+@pytest.mark.asyncio
+async def test_usable_single_retry_skips_length_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"batch": 0, "segmented": 0}
+
+    async def fake_generate_section_batch(**kwargs):
+        calls["batch"] += 1
+        if calls["batch"] == 1:
+            raise RuntimeError("structured output rejected: finish_reason='length'")
+        return {
+            "sections": [
+                {
+                    "source_section_id": "results",
+                    "summary": "本节报告主实验在检索与问答两个阶段的稳定表现。",
+                    "evidence_block_ids": ["b_results"],
+                    "metric_claims": [],
+                    "prose_claims": [],
+                }
+            ]
+        }
+
+    async def fake_segmented_review(**kwargs):
+        calls["segmented"] += 1
+        return None, {"reason": "segment_not_needed"}
+
+    async def fake_overview(**kwargs):
+        return {}
+
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_section_batch",
+        fake_generate_section_batch,
+    )
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_segmented_section_review",
+        fake_segmented_review,
+    )
+    monkeypatch.setattr(
+        "services.reading_outline_service._generate_learning_overview",
+        fake_overview,
+    )
+
+    raw = await _generate_ai_outline(
+        doc_id="doc",
+        doc={},
+        block_index=_single_section_block_index(),
+        api_key="k",
+        model="m",
+        provider="deepseek",
+        endpoint="",
+    )
+
+    assert calls["segmented"] == 0
+    recovered = next(
+        item for item in raw.get("items") or []
+        if str(item.get("source_section_id")) == "results"
+    )
+    assert recovered["summary"] == "本节报告主实验在检索与问答两个阶段的稳定表现。"
 
 
 @pytest.mark.asyncio

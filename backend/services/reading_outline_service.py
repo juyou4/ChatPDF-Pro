@@ -20,11 +20,14 @@ from services.completion_outcome import (
 )
 from services.document_block_roles import (
     FRONT_MATTER_ROLES,
+    OUTLINE_EXCLUDED_ROLES,
+    ROLE_AFFILIATION,
     ROLE_KEYWORDS,
     annotate_block_role,
     block_is_keyword_excluded,
     block_is_outline_excluded,
     classify_block_role,
+    classify_front_matter_text,
 )
 from services.document_parse_state import read_parse_manifest
 from services.keyword_extractor import KeywordExtractor
@@ -575,6 +578,7 @@ async def get_or_create_reading_outline(
 
     cached = load_reading_outline(data_dir, doc_id)
     healthy_cached: dict[str, Any] | None = None
+    hole_fill_attempt = False
     cached_matches_current_identity = bool(
         cached
         and _matches_parse_identity(cached, parse_generation, document_source_hash)
@@ -609,7 +613,9 @@ async def get_or_create_reading_outline(
             stale_partial = _should_refresh_stale_partial_outline(
                 cached,
                 can_call_model=can_call_model,
+                quality_issues=quality_issues,
             )
+            hole_fill_attempt = stale_partial and _cached_outline_uses_current_repair_policy(cached)
             if (
                 not force
                 and not blocking_quality_issues
@@ -628,9 +634,10 @@ async def get_or_create_reading_outline(
                 return cached
             if stale_partial:
                 logger.info(
-                    "[ReadingOutline] Refresh stale partial outline doc=%s repair_policy=%s",
+                    "[ReadingOutline] Refresh stale partial outline doc=%s repair_policy=%s hole_fill=%s",
                     doc_id,
                     READING_OUTLINE_REPAIR_POLICY_VERSION,
+                    hole_fill_attempt,
                 )
             logger.info(
                 "[ReadingOutline] Ignore AI cache doc=%s model_match=%s verifier_match=%s blocking_quality=%s partial_quality=%s",
@@ -723,6 +730,10 @@ async def get_or_create_reading_outline(
         if blocking_quality_issues:
             raise ValueError("low-quality reading outline: " + "; ".join(blocking_quality_issues))
         outline_meta = outline.setdefault("meta", {})
+        if hole_fill_attempt:
+            # 补洞已经用掉了这一轮机会：即使仍然残留空洞，也不要每次打开面板都重跑。
+            outline_meta["hole_fill_attempted"] = True
+            outline_meta["hole_fill_policy_version"] = READING_OUTLINE_REPAIR_POLICY_VERSION
         if partial_quality_issues:
             # A single section may exhaust its retry budget while the rest of
             # the document is evidence-bound and useful. Preserve that work;
@@ -760,6 +771,21 @@ async def get_or_create_reading_outline(
                 doc_id,
                 exc,
             )
+            if hole_fill_attempt:
+                # 补洞失败也算用掉机会，否则每次打开面板都会再触发一次全量重跑。
+                healthy_meta = healthy_cached.setdefault("meta", {})
+                healthy_meta["hole_fill_attempted"] = True
+                healthy_meta["hole_fill_policy_version"] = READING_OUTLINE_REPAIR_POLICY_VERSION
+                try:
+                    (cache_writer or (
+                        lambda value: save_reading_outline(data_dir, doc_id, value)
+                    ))(healthy_cached)
+                except Exception as write_exc:
+                    logger.warning(
+                        "[ReadingOutline] Failed to stamp hole-fill attempt doc=%s: %s",
+                        doc_id,
+                        write_exc,
+                    )
             return healthy_cached
         fallback.setdefault("meta", {})["generation_error"] = str(exc)
         fallback.setdefault("meta", {})["generation_error_at"] = time.time()
@@ -820,28 +846,52 @@ def _cached_outline_uses_current_repair_policy(cached: dict[str, Any] | None) ->
     return str(meta.get("repair_policy_version") or "") == READING_OUTLINE_REPAIR_POLICY_VERSION
 
 
+def _outline_hole_fill_already_attempted(cached: dict[str, Any] | None) -> bool:
+    if not isinstance(cached, dict):
+        return False
+    meta = cached.get("meta") if isinstance(cached.get("meta"), dict) else {}
+    return (
+        str(meta.get("hole_fill_policy_version") or "") == READING_OUTLINE_REPAIR_POLICY_VERSION
+    )
+
+
 def _should_refresh_stale_partial_outline(
     cached: dict[str, Any] | None,
     *,
     can_call_model: bool,
+    quality_issues: list[str] | None = None,
 ) -> bool:
-    """Re-run only leftover holes after a repair-policy upgrade.
+    """Re-run only leftover holes; never touch a completed outline.
 
-    Completed outlines stay cached. Partial outlines written before the current
-    qualitative/TLS recovery policy are reused as a per-section cache, then the
-    missing chapters are filled again.
+    Partial outlines written before the current qualitative/TLS recovery policy
+    are reused as a per-section cache, then the missing chapters are filled
+    again. A partial written *under* the current policy used to be sticky: the
+    only way to fill a leftover hole was 手动 force，而 force 会丢掉所有已生成
+    章节重跑全文。它现在也拿到一次补洞机会，同样复用 ``retry_cache``；补洞后会在
+    meta 里盖 ``hole_fill_policy_version`` 章，避免每次打开面板都重试。
     """
     if not can_call_model or not isinstance(cached, dict):
         return False
     if str(cached.get("source") or "").strip().lower() != "ai_partial":
         return False
-    return not _cached_outline_uses_current_repair_policy(cached)
+    if not _cached_outline_uses_current_repair_policy(cached):
+        return True
+    if _outline_hole_fill_already_attempted(cached):
+        return False
+    meta = cached.get("meta") if isinstance(cached.get("meta"), dict) else {}
+    issues = quality_issues
+    if issues is None:
+        stored = meta.get("partial_quality_issues")
+        issues = [str(issue) for issue in stored] if isinstance(stored, list) else []
+    return bool(_partial_reading_outline_quality_issues(list(issues)))
 
 
 def _incomplete_section_issue(
     label: str,
     incomplete: list[str],
     expected: set[str],
+    *,
+    widespread_is_blocking: bool = True,
 ) -> str:
     """Classify missing per-section summaries as retriable or blocking.
 
@@ -853,9 +903,16 @@ def _incomplete_section_issue(
     ``摘要不完整:`` prefix, so ``_partial_reading_outline_quality_issues``
     leaves them to the blocking branch: no cache, fall back to the structural
     outline.
+
+    附录例外（``widespread_is_blocking=False``）：附录多是图表、证明和补充实验，
+    单章失败率本来就远高于正文，一份 4/13 缺失的附录并不说明整轮生成失败。
+    把它判成 blocking 会连同已经生成好的正文一起丢掉，退回空骨架；因此附录永远
+    只发 ``附录章节摘要不完整:``，走可重试的 partial 分支保住正文。正文大面积
+    缺失仍然 blocking。
     """
     widespread = (
-        len(incomplete) >= SECTION_INCOMPLETE_BLOCKING_MIN_COUNT
+        widespread_is_blocking
+        and len(incomplete) >= SECTION_INCOMPLETE_BLOCKING_MIN_COUNT
         and len(incomplete) > len(expected) * SECTION_INCOMPLETE_BLOCKING_RATIO
     )
     if widespread:
@@ -1570,6 +1627,11 @@ def _is_substantive_section_summary(value: Any) -> bool:
     }
 
 
+# 这两条修复路径的提示词都要求「去掉数字的定性改写」，产出的「因而/导致」句
+# 必然通不过首轮 prose-claim 门。只要不带数字就放行，带数字的违规仍然否决。
+CLAIM_TOLERANT_REPAIR_KINDS = frozenset({"single_qualitative", "claim_rewrite"})
+
+
 def _claim_violation_has_numbers(violation: Any) -> bool:
     if not isinstance(violation, dict):
         return False
@@ -1591,7 +1653,7 @@ def _section_result_is_usable(item: dict[str, Any] | None) -> bool:
         return True
     # 定性救援本来就会把数字清掉。引言/贡献这类章节常用「因而/导致」描述机制，
     # 首轮证据门仍应拦住它们去补救；补救成功后不应再因无数字的因果措辞整章回退。
-    if str(item.get("repair_kind") or "") == "single_qualitative":
+    if str(item.get("repair_kind") or "") in CLAIM_TOLERANT_REPAIR_KINDS:
         return not any(_claim_violation_has_numbers(violation) for violation in claim_violations)
     return False
 
@@ -1605,6 +1667,21 @@ def _qualitative_suspect_section_ids(
         for section_id, payload in payloads.items()
         if payload.get("blocks") and not _section_result_is_usable(results.get(section_id))
     ]
+
+
+def _section_result_looks_length_truncated(item: dict[str, Any] | None) -> bool:
+    """疑似被 max_tokens 截断、但仍能解析的单章结果。
+
+    结构化输出在 4096 token 处被砍时，提供方偶尔仍能补全出合法 JSON：摘要停在
+    句子中间、没有终止标点。这类结果拿不到 ``finish_reason=length``，却和真正的
+    截断同源，应该继续走分段恢复而不是当成一次成功的单章重试。
+    """
+    if not isinstance(item, dict):
+        return False
+    summary = " ".join(str(item.get("summary") or "").split())
+    if not summary or not _is_substantive_section_summary(summary):
+        return False
+    return not re.search(r"[。！？；.!?;]$", summary)
 
 
 def _structured_output_hit_length_limit(exc: Exception | BaseException | None) -> bool:
@@ -1624,6 +1701,41 @@ def _structured_output_hit_length_limit(exc: Exception | BaseException | None) -
     ))
 
 
+def _rebindable_first_pass_claims(
+    first_pass: dict[str, Any] | None,
+    *,
+    summary: str,
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Re-validate first-pass claims against the full section payload.
+
+    Reduce never mints numbers: only claims that were already bound to a table
+    row or an exact source quote — and that still bind here — survive.  The
+    ordering mirrors ``_apply_table_claim_guard`` so a claim accepted here is
+    not rejected again inside the guard.
+    """
+    if not isinstance(first_pass, dict):
+        return [], []
+    table_evidence = payload.get("table_evidence") or []
+    metric_claims, _ = _normalize_metric_claims(first_pass.get("metric_claims"), table_evidence)
+    summary_numbers = _numeric_tokens(summary)
+    metric_claims = [
+        claim for claim in metric_claims
+        if set(claim.get("values") or []) & summary_numbers
+    ]
+    bound_summary, _ = _sanitize_table_bound_text(
+        summary,
+        metric_claims=metric_claims,
+        table_evidence=table_evidence,
+    )
+    prose_claims, _ = _normalize_prose_claims(
+        first_pass.get("prose_claims"),
+        summary=bound_summary,
+        payload=payload,
+    )
+    return metric_claims, prose_claims
+
+
 async def _generate_segmented_section_review(
     *,
     doc_id: str,
@@ -1634,6 +1746,7 @@ async def _generate_segmented_section_review(
     model: str,
     provider: str,
     endpoint: str,
+    first_pass_result: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Map every ordered source segment, then conservatively reduce it.
 
@@ -1877,15 +1990,23 @@ async def _generate_segmented_section_review(
     reduced_item = dict(reduced_item)
     reduced_item["evidence_block_ids"] = final_evidence_ids[:6]
     # Map-stage summaries are sufficient for a conservative section sentence,
-    # but never for exact numeric or causal claims.  Keep those claims only
-    # when a direct source block was supplied in the first pass.
-    reduced_item["metric_claims"] = []
-    reduced_item["prose_claims"] = []
+    # but never for exact numeric or causal claims.  Clearing the claims wholesale
+    # turned 表格/结果章节 into number-free blurbs, so instead reuse the first-pass
+    # claims that still bind against the full section payload; anything the reduce
+    # stage invents on its own stays unbound and is still stripped.
+    validation_payload = _full_section_validation_payload(payload, block_map)
+    reduced_metric_claims, reduced_prose_claims = _rebindable_first_pass_claims(
+        first_pass_result,
+        summary=str(reduced_item.get("summary") or ""),
+        payload=validation_payload,
+    )
+    reduced_item["metric_claims"] = reduced_metric_claims
+    reduced_item["prose_claims"] = reduced_prose_claims
     candidate = _canonical_brief_section_result(
         reduced_item,
         section_id=section_id,
         section_hash=str(payload.get("section_hash") or ""),
-        payload=_full_section_validation_payload(payload, block_map),
+        payload=validation_payload,
     )
     if not _section_result_is_usable(candidate):
         meta["reason"] = "segment_reduce_unusable"
@@ -2007,6 +2128,7 @@ async def _generate_ai_outline(
             for section in missing:
                 section_id = str(section.get("source_section_id"))
                 single_error: Exception | None = None
+                single_candidate: dict[str, Any] | None = None
                 try:
                     single = await _generate_section_batch(
                         doc_id=doc_id,
@@ -2026,17 +2148,26 @@ async def _generate_ai_outline(
                         None,
                     )
                     if candidate:
-                        generated[section_id] = _canonical_brief_section_result(
+                        single_candidate = _canonical_brief_section_result(
                             candidate,
                             section_id=section_id,
                             section_hash=section["section_hash"],
                             payload=section,
                         )
-                        continue
+                        if _section_result_is_usable(single_candidate):
+                            generated[section_id] = single_candidate
+                            continue
                 except Exception as exc:
                     single_error = exc
 
-                if _structured_output_hit_length_limit(single_error) or _structured_output_hit_length_limit(batch_error):
+                # 单章重试可能返回「能解析但被截断」的 JSON：拿到候选不等于恢复成功。
+                # 只要这一轮命中过长度上限，或候选本身像被截断，就仍然走分段恢复，
+                # 否则整章只会留下一个不可用结果。
+                if (
+                    _structured_output_hit_length_limit(single_error)
+                    or _structured_output_hit_length_limit(batch_error)
+                    or _section_result_looks_length_truncated(single_candidate)
+                ):
                     try:
                         segmented_candidate, segment_meta = await _generate_segmented_section_review(
                             doc_id=doc_id,
@@ -2079,6 +2210,11 @@ async def _generate_ai_outline(
                         warnings.append(
                             f"章节 {section.get('title') or section_id} 长度截断分段恢复失败：{exc}"
                         )
+                if single_candidate is not None:
+                    # 分段恢复没接住：保留可解析但不可用的单章结果，后面的定性
+                    # 救援仍会以它为线索重跑，不要退化成完全没有结果。
+                    generated[section_id] = single_candidate
+                    continue
                 if single_error is not None:
                     warnings.append(f"章节 {section.get('title') or section_id} 单独重试失败：{single_error}")
                 warnings.append(f"章节 {section.get('title') or section_id} 未返回有效结果，已局部回退")
@@ -2136,6 +2272,7 @@ async def _generate_ai_outline(
                 model=model,
                 provider=provider,
                 endpoint=endpoint,
+                first_pass_result=results.get(section_id),
             )
             segmented_review_meta[section_id] = segment_meta
             if segmented_candidate:
@@ -2347,6 +2484,9 @@ async def _generate_ai_outline(
                     section_hash=payload["section_hash"],
                     payload=payload,
                 )
+                # 修复批次要的是去数字的定性改写，判定档位与定性救援一致，
+                # 否则改写稿会被首轮 prose-claim 门整章否掉，只剩旧的坏结果。
+                candidate["repair_kind"] = "claim_rewrite"
                 if not _section_result_is_usable(candidate):
                     continue
                 expected_flow_labels = (
@@ -2750,6 +2890,25 @@ def _inline_abstract_node(
     return None
 
 
+def _is_front_matter_outline_title(title: str) -> bool:
+    """精读骨架里剔除作者/单位/期刊元信息标题。
+
+    MinerU 会把「Academic Editor: …」「Received: …」以及没有逗号的作者行提成
+    标题。它们进入骨架后会撑大 expected_body、拉低黄条覆盖率，还能把缺失章节数
+    推过 blocking 阈值。这里只裁精读骨架，左侧 MinerU 导航保持原样。
+    """
+    decision = classify_front_matter_text(title)
+    if not decision:
+        return False
+    role = str(decision["role"])
+    if role not in OUTLINE_EXCLUDED_ROLES:
+        return False
+    # 「Lab Setup」这类真实标题会被单个机构词判成低置信 affiliation，必须保住。
+    if role == ROLE_AFFILIATION and float(decision["confidence"]) < 0.9:
+        return False
+    return True
+
+
 def _build_reading_section_skeleton(block_index: dict[str, Any]) -> list[dict[str, Any]]:
     candidates = _outline_candidates(block_index)
     if not candidates:
@@ -2778,6 +2937,8 @@ def _build_reading_section_skeleton(block_index: dict[str, Any]) -> list[dict[st
         if _is_acknowledgment_heading(title):
             continue
         if references_seen and _is_post_reference_template_artifact(title):
+            continue
+        if _is_front_matter_outline_title(title):
             continue
 
         anchor_text = str(
@@ -7885,7 +8046,12 @@ def _section_study_quality_issues(
     if incomplete_body:
         issues.append(_incomplete_section_issue("正文", incomplete_body, expected_body))
     if incomplete_appendix:
-        issues.append(_incomplete_section_issue("附录", incomplete_appendix, expected_appendix))
+        issues.append(_incomplete_section_issue(
+            "附录",
+            incomplete_appendix,
+            expected_appendix,
+            widespread_is_blocking=False,
+        ))
 
     evidence_errors = 0
     for section_id, item in by_section.items():
