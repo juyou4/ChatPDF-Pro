@@ -1,7 +1,7 @@
 {
-    "version": "3.2.0",
-    "changelog": "流式思考与公式 · 问图对照原图 · 截图提问与设置优化",
-    "releaseDate": "2026-08-23",
+    "version": "3.3.0",
+    "changelog": "论文仓库对照讲解 · 精读降级修复 · 回答结束不再卡住 · 悬浮译文防裁切",
+    "releaseDate": "2026-08-27",
     "githubOwner": "juyou4",
     "githubRepo": "ChatPDF-Pro"
 }

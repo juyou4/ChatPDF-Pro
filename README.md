@@ -450,6 +450,7 @@ ChatPDF/
 
 当前开发分支主要完成了以下调整：
 
+- v3.3.0：论文仓库对照讲解、精读降级修复、回答结束后不再卡住生成态、悬浮译文防裁切。
 - v3.2.0：流式思考与公式、问图对照原图、截图提问与设置优化。
 - 上传前固定 MinerU / 本地主解析路线，下游统一使用同一解析身份。
 - MinerU 章节、图表和表格结果进入统一块级索引，供速览、阅读和问答复用。
@@ -458,7 +459,7 @@ ChatPDF/
 - 重做全文总结、大纲、翻译、笔记、任务进度和流式回答界面。
 - 加强缓存失效、任务取消、旧代次写入拦截和桌面发布数据过滤。
 
-当前版本为 [v3.2.0](https://github.com/juyou4/ChatPDF-Pro/releases/tag/v3.2.0)。完整变更记录以 [Git 提交历史](https://github.com/juyou4/ChatPDF-Pro/commits/main/) 和 Releases 为准。
+当前版本为 [v3.3.0](https://github.com/juyou4/ChatPDF-Pro/releases/tag/v3.3.0)。完整变更记录以 [Git 提交历史](https://github.com/juyou4/ChatPDF-Pro/commits/main/) 和 Releases 为准。
 
 ---
 
