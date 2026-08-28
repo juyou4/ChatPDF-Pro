@@ -14857,6 +14857,13 @@ def _merge_claim_verifier_into_critic(
     return merged
 
 
+# 终止事件被引用质量门禁按住期间，用户看到的是"正文已输出完但回复迟迟
+# 不完成"。critique_evidence_claims 默认 18s 超时会把辅助模型的偶发慢响应
+# 放大成十几秒的可感知卡顿；这里统一压到 8s——正常核验 1-3s 内返回，
+# 超时则沿用既有 fail-open 语义直接跳过核验。
+_CLAIM_VERIFIER_GATE_TIMEOUT_S = 8.0
+
+
 async def _run_selective_claim_verifier(
     *,
     answer: str,
@@ -14897,6 +14904,7 @@ async def _run_selective_claim_verifier(
             model=model,
             provider=provider,
             endpoint=endpoint,
+            timeout=_CLAIM_VERIFIER_GATE_TIMEOUT_S,
         )
     except Exception as exc:
         logger.debug("[Chat] selective claim verifier skipped: %s", exc)

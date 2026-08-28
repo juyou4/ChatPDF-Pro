@@ -295,6 +295,11 @@ const THINKING_STREAM_RENDER_PROFILE = {
 // 暂停时留下一个肉眼明显的空白等待。
 export const STREAM_FINAL_FLUSH_GRACE_MS = 500;
 
+// 收尾时最多再等这么久的模糊渐显尾巴（medium 的完整尾巴约 590ms）。
+// 渐显是 ease-out，280ms 后仅剩最后一批字符从 ~90% 透明度定格到 100%，
+// 肉眼几乎不可感知；换来的是"正文输出完但按钮迟迟不恢复"的空档明显缩短。
+export const STREAM_FINAL_REVEAL_WAIT_MAX_MS = 280;
+
 export const resolveStreamRenderProfile = (streamSpeed = 'normal') =>
   STREAM_RENDER_PROFILES[streamSpeed] || STREAM_RENDER_PROFILES.normal;
 
@@ -2355,9 +2360,12 @@ export function useMessageState({
           }
           if (!isRequestCurrent()) return;
           // 直写模式下最后一批字符已经进入 DOM，但其模糊渐显仍在播放。
-          // 只等待正文自己的动画尾巴；思考动画绝不能延迟最终回答。
+          // 只等待正文自己的动画尾巴（且设上限）；思考动画绝不能延迟最终回答。
           const revealShouldContinue = () => isRequestCurrent();
-          await contentStream.waitForRevealComplete?.(revealShouldContinue);
+          await contentStream.waitForRevealComplete?.(
+            revealShouldContinue,
+            STREAM_FINAL_REVEAL_WAIT_MAX_MS
+          );
           if (!isRequestCurrent()) return;
           const finalThinkingMs = finalizeThinkingDurationMs({
             thinkingStartTime,

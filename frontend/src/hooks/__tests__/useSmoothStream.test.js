@@ -125,4 +125,58 @@ describe('useSmoothStream', () => {
       global.cancelAnimationFrame = originalCancelRaf;
     }
   });
+
+  it('waitForRevealComplete 支持 maxWaitMs 上限，收尾不必等完整动画尾巴', async () => {
+    vi.useFakeTimers();
+    const originalRaf = global.requestAnimationFrame;
+    const originalCancelRaf = global.cancelAnimationFrame;
+    global.requestAnimationFrame = (cb) => setTimeout(() => cb(Date.now()), 16);
+    global.cancelAnimationFrame = (id) => clearTimeout(id);
+
+    try {
+      const { result } = renderHook(() =>
+        useSmoothStream({
+          streamDone: false,
+          minDelay: 0,
+          enableBlurReveal: true,
+          blurIntensity: 'strong',
+        })
+      );
+      const el = document.createElement('div');
+      act(() => {
+        result.current.contentRef.current = el;
+        result.current.addChunk('动画尾巴');
+      });
+      // 推进若干帧让字符带动画追加，刷新 revealTail 截止时间
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+      expect(el.textContent).toBe('动画尾巴');
+
+      let cappedResolved = false;
+      let uncappedResolved = false;
+      const capped = result.current
+        .waitForRevealComplete(null, 50)
+        .then(() => { cappedResolved = true; });
+      const uncapped = result.current
+        .waitForRevealComplete(null)
+        .then(() => { uncappedResolved = true; });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(80);
+      });
+      expect(cappedResolved).toBe(true);
+      // strong 的完整尾巴 >700ms，未加上限时此刻仍应在等待
+      expect(uncappedResolved).toBe(false);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1200);
+      });
+      expect(uncappedResolved).toBe(true);
+      await Promise.all([capped, uncapped]);
+    } finally {
+      global.requestAnimationFrame = originalRaf;
+      global.cancelAnimationFrame = originalCancelRaf;
+    }
+  });
 });

@@ -698,11 +698,16 @@ export const useSmoothStream = ({
   const getPendingChars = useCallback(() => pendingCharsRef.current, [])
 
   // 在流结束后等待最后一批字符的 CSS 动画完成。调用方可提供
-  // shouldContinue，在用户停止/切换文档时立即放弃等待。
-  const waitForRevealComplete = useCallback(async (shouldContinue = null) => {
-    while (Date.now() < revealTailUntilRef.current) {
+  // shouldContinue，在用户停止/切换文档时立即放弃等待；maxWaitMs 限制
+  // 收尾阶段的最长等待——渐显是 ease-out，播放过半后已接近完成态，
+  // 不值得为最后几个字符的动画尾巴把整条回复的完成时刻推迟半秒。
+  const waitForRevealComplete = useCallback(async (shouldContinue = null, maxWaitMs = null) => {
+    const deadline = Number.isFinite(maxWaitMs)
+      ? Date.now() + Math.max(0, maxWaitMs)
+      : Infinity
+    while (Date.now() < Math.min(revealTailUntilRef.current, deadline)) {
       if (typeof shouldContinue === 'function' && !shouldContinue()) return false
-      const remaining = revealTailUntilRef.current - Date.now()
+      const remaining = Math.min(revealTailUntilRef.current, deadline) - Date.now()
       await new Promise((resolve) => setTimeout(resolve, Math.min(32, Math.max(8, remaining))))
     }
     return true
