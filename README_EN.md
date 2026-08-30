@@ -126,6 +126,15 @@ Both routes publish the same block-index contract. Overview, summary, outline, t
 - Final citations must come from evidence actually returned by tools in the current run. Unknown or mismatched evidence IDs are removed.
 - The Trace panel shows retrieval steps, tool calls, and the stopping reason. Answer-risk checks appear separately.
 
+### Paper Code Repositories
+
+- After parsing, ChatPDF extracts repository links only from the paper's own text, page content, and block index. It does not guess a repository from pre-trained knowledge or turn a web-search result into a paper repository.
+- For implementation questions such as “where is the training script?” or “how is the loss implemented?”, the Agent follows `list_paper_repos → search_paper_repo → read_paper_repo`: register the repository, search its file tree by path keywords, then read the actual source file.
+- The first repository pass can read the README, recursive tree, and one likely implementation entry. A tree hit can automatically read up to two relevant source files; more files can be requested by path or cursor. Code is kept in a separate `PAPER_REPO_EVIDENCE` channel.
+- Only public GitHub repositories support anonymous tree and file reads. GitLab and Hugging Face links are registered and shown but are not fetched. The repository must be explicitly present in the paper; the Agent cannot invent a `repoId` or URL.
+- Access is read-only: no clone, write, or execution of repository code or README commands. Paths are validated as repository-relative paths, and binaries, weights, archives, and oversized files are skipped. Each run has bounded tree-search, file-read, and character budgets.
+- Paper facts continue to use document `[n]` citations. Code facts are labelled with a file path and symbol name. The Trace panel shows repository detection, path search, and file reads.
+
 ### Figures and Vision
 
 - MinerU figures, tables, and formulas are published as visual assets with page coordinates and document-version identity.
@@ -179,6 +188,14 @@ Screenshots belong to the current turn and clear from the input after send. Turn
 ### Show the source figure in chat
 
 Questions such as “explain figure 2”, “what does Fig. 3 show”, or “this architecture diagram” try to attach the parser crop under the answer, usually labelled as a parsed figure. Click it to return to the PDF page. If parsing never recorded that figure’s coordinates, you only get a text explanation. Older messages are not backfilled; ask again after parsing finishes.
+
+### Compare the paper with its code
+
+After parsing finishes, you can ask:
+
+> How is the loss function implemented in the public repository? Compare the training entry point, key parameters, and differences with the paper.
+
+You do not need to paste a repository URL. If the paper contains a public GitHub link, the Agent can identify it and read the relevant README, tree, and source windows. If the paper provides no readable GitHub repository, ChatPDF says so and answers from the paper evidence only.
 
 ### Selection and annotation
 
@@ -454,7 +471,7 @@ Switch between KaTeX and MathJax in Settings Center. KaTeX is faster; MathJax ha
 ## Recent Work
 
 ### v3.3.0
-- Paper-repo code walkthrough, reading-outline degrade recovery, multi-document retrieval with citation return navigation, settings-center restructuring, generating UI ends when the answer is done, and hover-translation panels stay on screen.
+- Paper Git-repository detection and code walkthroughs, reading-outline degrade recovery, multi-document retrieval with citation return navigation, settings-center restructuring, generating UI ends when the answer is done, and hover-translation panels stay on screen.
 
 ### v3.2.0
 - Streaming thinking and formula rendering, original-figure attachments when asking about a figure, screenshot questions, and settings polish.
