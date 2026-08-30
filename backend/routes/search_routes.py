@@ -27,6 +27,7 @@ from services.document_parse_state import (
 )
 from services.visual_supplement_service import committed_visual_evidence_for_document
 from services.semantic_group_store import active_manifest_path
+from services.rerank_service import validate_rerank_configuration
 from utils.middleware import (
     LoggingMiddleware,
     RetryMiddleware,
@@ -163,11 +164,16 @@ class SearchRequest(BaseModel):
     embedding_api_host: Optional[str] = None
 
     def validate_rerank(self):
-        provider = (self.rerank_provider or "").lower()
-        # 所有非本地的 rerank provider 都需要 api_key
-        cloud_providers = {"cohere", "jina", "silicon", "aliyun", "openai", "moonshot", "deepseek", "zhipu", "minimax"}
-        if self.use_rerank and provider in cloud_providers and not self.rerank_api_key:
-            raise HTTPException(status_code=400, detail=f"使用 {provider} rerank 需要提供 rerank_api_key")
+        try:
+            validate_rerank_configuration(
+                use_rerank=self.use_rerank,
+                model_name=self.reranker_model,
+                provider=self.rerank_provider,
+                api_key=self.rerank_api_key,
+                endpoint=self.rerank_endpoint,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _parse_identity(manifest: dict) -> tuple[str, str]:
@@ -344,23 +350,59 @@ async def search_in_pdf(request: SearchRequest):
 
         current_manifest = _require_search_snapshot_current(request, parse_identity)
         current_generation, current_source_hash = _parse_identity(current_manifest)
-        degraded = bool(search_status.get("degraded") or search_status.get("error"))
-
+        rerank_degraded = any(
+            isinstance(item, dict) and item.get("_rerank_degraded")
+            for item in results
+        )
+        degraded = bool(
+            search_status.get("degraded")
+            or search_status.get("error")
+            or rerank_degraded
+        )
+        response_error = search_status.get("error")
+        response_error_code = search_status.get("error_code")
+        response_fallback_reason = search_status.get("fallback_reason")
+        if rerank_degraded:
+            response_error = response_error or "重排模型暂不可用，已保留混合检索原排序"
+            response_error_code = response_error_code or "rerank_unavailable"
+            response_fallback_reason = response_fallback_reason or "rerank_unavailable"
+        public_results = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            safe_item = dict(item)
+            # Internal fallback diagnostics can contain provider/library
+            # details; expose the stable top-level status instead.
+            for key in ("_rerank_degraded", "_rerank_error_code", "_rerank_error"):
+                safe_item.pop(key, None)
+            public_results.append(safe_item)
         return {
-            "results": results,
+            "results": public_results,
             "query_type": intent.query_type,
             "dynamic_top_k": dynamic_top_k,
-            "rerank_enabled": request.use_rerank and len(results) > 0,
+            "rerank_enabled": request.use_rerank and len(results) > 0 and not rerank_degraded,
             "candidate_k": max(request.candidate_k, dynamic_top_k),
-            "used_provider": request.rerank_provider or "local",
-            "used_model": request.reranker_model or ("BAAI/bge-reranker-base" if request.use_rerank else None),
-            "fallback_used": bool(search_status.get("fallback_used")),
-            "fallback_reason": search_status.get("fallback_reason"),
+            # `used_*` describes what actually ran. An omitted/failed rerank
+            # must not be reported as the implicit local model.
+            "used_provider": (
+                request.rerank_provider or "local"
+                if request.use_rerank and not rerank_degraded
+                else None
+            ),
+            "used_model": (
+                request.reranker_model or "BAAI/bge-reranker-base"
+                if request.use_rerank and not rerank_degraded
+                else None
+            ),
+            "rerank_requested": bool(request.use_rerank),
+            "fallback_used": bool(search_status.get("fallback_used") or rerank_degraded),
+            "fallback_reason": response_fallback_reason,
             "degraded": degraded,
             "retrieval_degraded": degraded,
             "retrieval_status": "degraded" if degraded else "ok",
-            "error": search_status.get("error"),
-            "error_code": search_status.get("error_code"),
+            "error": response_error,
+            "error_code": response_error_code,
+            "rerank_degraded": rerank_degraded,
             "retrieval_timings": search_status.get("timings") or {},
             "parse_generation": current_generation,
             "document_source_hash": current_source_hash,

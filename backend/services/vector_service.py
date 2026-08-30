@@ -345,18 +345,31 @@ async def vector_search(
             ),
             timeout=60.0  # 60 秒超时
         )
+        rerank_fallback = next((
+            item for item in (results or [])
+            if isinstance(item, dict) and item.get("_rerank_degraded")
+        ), None)
+        rerank_degraded = bool(rerank_fallback or (timings or {}).get("rerank_degraded"))
         wrapped = {
             "results": results,
             "timings": timings,
             "error": (
                 "向量召回失败，已降级为关键词检索"
                 if retrieval_degrade["reason"]
+                else "重排模型暂不可用，已保留混合检索原排序"
+                if rerank_degraded
                 else None
             ),
-            "error_code": retrieval_degrade["reason"],
-            "degraded": bool(retrieval_degrade["reason"]),
-            "fallback_reason": retrieval_degrade["reason"],
-            "fallback_used": bool(retrieval_degrade["reason"]),
+            "error_code": retrieval_degrade["reason"] or (
+                rerank_fallback.get("_rerank_error_code") if rerank_fallback else None
+            ),
+            "degraded": bool(retrieval_degrade["reason"] or rerank_degraded),
+            "fallback_reason": retrieval_degrade["reason"] or (
+                "rerank_unavailable" if rerank_degraded else None
+            ),
+            "fallback_used": bool(retrieval_degrade["reason"] or rerank_degraded),
+            "rerank_degraded": rerank_degraded,
+            "rerank_error": rerank_fallback.get("_rerank_error") if rerank_fallback else None,
         }
     except HTTPException:
         raise
@@ -412,6 +425,16 @@ async def vector_search(
             wrapped.get("fallback_reason") or wrapped["error_code"]
         )
     wrapped["results"] = normalized_results
+    if any(
+        isinstance(item, dict) and item.get("_rerank_degraded")
+        for item in normalized_results
+    ):
+        wrapped["rerank_degraded"] = True
+        wrapped["degraded"] = True
+        wrapped["error"] = wrapped.get("error") or "重排模型暂不可用，已保留混合检索原排序"
+        wrapped["error_code"] = wrapped.get("error_code") or "rerank_unavailable"
+        wrapped["fallback_reason"] = wrapped.get("fallback_reason") or "rerank_unavailable"
+        wrapped["fallback_used"] = True
     wrapped["degraded"] = bool(wrapped.get("degraded") or wrapped.get("error"))
     if wrapped["degraded"] and not wrapped.get("fallback_reason"):
         wrapped["fallback_reason"] = wrapped.get("error_code") or "vector_search_failed"
@@ -529,7 +552,19 @@ async def vector_context(
             ),
             timeout=60.0  # 60 秒超时
         )
-        wrapped = {"context": ctx, "retrieval_meta": retrieval_meta}
+        rerank_degraded = bool(
+            isinstance(retrieval_meta, dict)
+            and (
+                retrieval_meta.get("rerank_degraded")
+                or (retrieval_meta.get("timings") or {}).get("rerank_degraded")
+            )
+        )
+        wrapped = {
+            "context": ctx,
+            "retrieval_meta": retrieval_meta,
+            "error": "重排模型暂不可用，已保留混合检索原排序" if rerank_degraded else None,
+            "error_code": "rerank_unavailable" if rerank_degraded else None,
+        }
     except HTTPException:
         raise
     except asyncio.TimeoutError:
@@ -540,6 +575,11 @@ async def vector_context(
         wrapped = {"context": "", "retrieval_meta": {}, "error": str(e)}
 
     wrapped = await apply_middlewares_after(wrapped, middlewares or [])
+    if isinstance(wrapped, dict):
+        meta = wrapped.get("retrieval_meta")
+        if isinstance(meta, dict) and meta.get("rerank_degraded"):
+            wrapped["error"] = wrapped.get("error") or "重排模型暂不可用，已保留混合检索原排序"
+            wrapped["error_code"] = wrapped.get("error_code") or "rerank_unavailable"
     return {
         "context": wrapped.get("context", ""),
         "retrieval_meta": wrapped.get("retrieval_meta", {}),

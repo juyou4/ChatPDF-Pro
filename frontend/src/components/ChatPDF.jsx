@@ -48,7 +48,6 @@ import DocumentParseStatusBar from './DocumentParseStatusBar';
 import { useProvider } from '../contexts/ProviderContext';
 import { useModel } from '../contexts/ModelContext';
 import { useDefaults } from '../contexts/DefaultsContext';
-import { useCapabilities } from '../contexts/CapabilitiesContext';
 const loadEmbeddingSettings = () => import('./EmbeddingSettings');
 const preloadEmbeddingSettings = () => { void loadEmbeddingSettings().catch(() => {}); };
 const EmbeddingSettings = lazy(loadEmbeddingSettings);
@@ -530,6 +529,21 @@ const getParseIdentity = (manifest) => {
 
 const getStatusParseIdentity = (status) => getParseIdentity(status?.parse_manifest);
 
+// 状态轮询本来是 2.5 秒一次；这个短窗口只用于合并由 React 重渲染、
+// 面板切换或可见性事件在同一时刻触发的重复请求，避免同一个任务被毫秒级
+// 连续 abort/restart，反过来把状态接口打成高频轮询。
+const DEEP_PARSE_STATUS_MIN_REQUEST_INTERVAL_MS = 1200;
+
+const sameDeepParseStatus = (previous, next) => {
+  if (previous === next) return true;
+  if (!previous || !next) return false;
+  try {
+    return JSON.stringify(previous) === JSON.stringify(next);
+  } catch {
+    return false;
+  }
+};
+
 const buildOutlineCacheKey = (docId, parseIdentity, blockIndex) => (
   `${docId || ''}:${parseIdentity || ''}:${blockIndex?.block_index_hash || blockIndex?.block_index_revision || blockIndex?.visual_supplement_revision || ''}`
 );
@@ -752,7 +766,6 @@ const ChatPDF = () => {
   const { getProviderById } = useProvider();
   const { getModelById, allModels } = useModel();
   const { getDefaultModel } = useDefaults();
-  const { hasLocalRerank } = useCapabilities();
   const globalSettings = useGlobalSettings();
   const {
     setReasoningEffort,
@@ -911,7 +924,13 @@ const ChatPDF = () => {
   const blockTranslationEpochRef = useRef(0);
   const visualSupplementRevisionRef = useRef('');
   const parseContextRef = useRef({ docId: '', parseIdentity: '', epoch: 0 });
-  const deepParseStatusRequestRef = useRef({ sequence: 0, controller: null });
+  const deepParseStatusRequestRef = useRef({
+    sequence: 0,
+    controller: null,
+    contextKey: '',
+    lastRequestAt: 0,
+    lastResult: null,
+  });
   const prevShouldAutoPretranslateRef = useRef(shouldAutoPretranslate);
   const readingOutlineRequestRef = useRef(0);
   const readingOutlineForceRef = useRef(false);
@@ -1029,6 +1048,9 @@ const ChatPDF = () => {
     if (!provider) {
       return { isValid: false, reason: 'provider_missing', compositeKey: emk, providerId: pid, modelId };
     }
+    if (provider.enabled === false) {
+      return { isValid: false, reason: 'provider_disabled', compositeKey: emk, providerId: pid, modelId, provider };
+    }
 
     const modelObj = modelId ? getModelById(modelId, pid) : null;
     if (!modelObj) {
@@ -1075,14 +1097,16 @@ const ChatPDF = () => {
     const apiKey = isKeylessLocalProvider(providerId)
       ? ''
       : String(config.provider?.apiKey || '').trim();
+    const apiHost = String(config.provider?.apiHost || '').trim();
 
     return {
       isValid: true,
       providerId,
       providerName,
       apiKey,
-      apiHost: String(config.provider?.apiHost || '').trim(),
+      apiHost,
       isMissingApiKey: !isKeylessLocalProvider(providerId) && !apiKey,
+      isMissingApiHost: providerId !== 'local' && !apiHost,
     };
   }, [getEmbeddingConfig]);
 
@@ -1093,17 +1117,26 @@ const ChatPDF = () => {
         model_not_found: '当前默认 Embedding 模型不存在或已下线，请重新选择',
         wrong_type: '当前默认模型不是 Embedding 类型，请切换后重试',
         provider_missing: '当前默认 Embedding Provider 不存在，请在模型服务中重新配置',
+        provider_disabled: '当前默认 Embedding Provider 已停用，请重新启用或切换模型',
       };
       return {
         ...credentials,
         message: messages[credentials.reason] || '请先在模型设置里选择可用的 Embedding 模型',
       };
     }
-    if (!credentials.isMissingApiKey) return null;
-    return {
-      ...credentials,
-      message: getMissingEmbeddingApiKeyMessage(credentials.providerName || credentials.providerId),
-    };
+    if (credentials.isMissingApiKey) {
+      return {
+        ...credentials,
+        message: getMissingEmbeddingApiKeyMessage(credentials.providerName || credentials.providerId),
+      };
+    }
+    if (credentials.isMissingApiHost) {
+      return {
+        ...credentials,
+        message: `请先为 ${credentials.providerName || credentials.providerId || '当前 Embedding Provider'} 配置 Embedding API 地址`,
+      };
+    }
+    return null;
   }, [getEmbeddingCredentialState]);
 
   const getEmbeddingApiKey = useCallback(() => {
@@ -1119,7 +1152,12 @@ const ChatPDF = () => {
     }
     const config = getEmbeddingConfig();
     const credentials = getEmbeddingCredentialState();
-    if (!config.isValid || !credentials.isValid || credentials.isMissingApiKey) {
+    if (
+      !config.isValid
+      || !credentials.isValid
+      || credentials.isMissingApiKey
+      || credentials.isMissingApiHost
+    ) {
       return undefined;
     }
 
@@ -1190,11 +1228,27 @@ const ChatPDF = () => {
     const chatKey = getDefaultModel('assistantModel');
     const { providerId, modelId } = getCurrentChatModel();
     const provider = getProviderById(providerId);
-    if (chatKey) {
-      return { providerId, modelId, apiKey: provider?.apiKey || '', apiHost: provider?.apiHost || '' };
+    const modelObject = getModelById(modelId, providerId);
+    const base = {
+      providerId,
+      modelId,
+      apiKey: String(chatKey ? provider?.apiKey || '' : provider?.apiKey || apiKey || '').trim(),
+      apiHost: String(provider?.apiHost || '').trim(),
+    };
+    if (!provider) {
+      return { ...base, isValid: false, reason: 'provider_missing', errorMessage: '当前对话模型对应的 Provider 不存在，请重新配置' };
     }
-    return { providerId, modelId, apiKey: provider?.apiKey || apiKey, apiHost: provider?.apiHost || '' };
-  }, [getDefaultModel, getCurrentChatModel, getProviderById, apiKey]);
+    if (provider.enabled === false) {
+      return { ...base, isValid: false, reason: 'provider_disabled', errorMessage: `当前对话 Provider 已停用：${provider.name || providerId}` };
+    }
+    if (!modelObject) {
+      return { ...base, isValid: false, reason: 'model_not_found', errorMessage: '当前默认对话模型不存在或已下线，请重新选择' };
+    }
+    if (modelObject.type && modelObject.type !== 'chat') {
+      return { ...base, isValid: false, reason: 'wrong_type', errorMessage: '当前默认模型不是 Chat 对话模型，请重新选择' };
+    }
+    return { ...base, isValid: true };
+  }, [getDefaultModel, getCurrentChatModel, getModelById, getProviderById, apiKey]);
 
   const getVisualCredentials = useCallback(() => {
     const chatCredentials = getChatCredentials?.() || {};
@@ -1205,22 +1259,31 @@ const ChatPDF = () => {
     const providerId = useDedicatedModel ? visualModelKey.slice(0, separator) : chatProvider;
     const modelId = useDedicatedModel ? visualModelKey.slice(separator + 1) : chatModel;
     const provider = getProviderById?.(providerId);
-    const modelObject = getModelById?.(modelId, providerId) || { id: modelId, providerId };
+    // A stale dedicated key must not be inferred as a vision model from its
+    // name alone. Follow-chat may still use the current transport model when
+    // its registry entry is supplied by a dynamic provider.
+    const modelObject = getModelById?.(modelId, providerId)
+      || (useDedicatedModel ? null : { id: modelId, providerId });
     const useLocalModel = Boolean(localVisualModelKey && localVisualModelKey !== 'none' && localVisualModelKey.includes(':'));
     const localSeparator = useLocalModel ? localVisualModelKey.indexOf(':') : -1;
     const localProviderId = useLocalModel ? localVisualModelKey.slice(0, localSeparator) : '';
     const localModelId = useLocalModel ? localVisualModelKey.slice(localSeparator + 1) : '';
     const localProvider = useLocalModel ? getProviderById?.(localProviderId) : null;
     const localModelObject = useLocalModel
-      ? getModelById?.(localModelId, localProviderId) || { id: localModelId, providerId: localProviderId }
+      ? getModelById?.(localModelId, localProviderId)
       : null;
-    const strongIsVisionCapable = supportsVision(modelObject);
-    const localIsVisionCapable = useLocalModel && supportsVision(localModelObject);
+    const strongIsVisionCapable = Boolean(provider)
+      && provider.enabled !== false
+      && supportsVision(modelObject);
+    const localIsVisionCapable = useLocalModel
+      && Boolean(localProvider)
+      && localProvider?.enabled !== false
+      && supportsVision(localModelObject);
     return {
       providerId,
       modelId,
-      apiKey: provider?.apiKey || (useDedicatedModel ? '' : chatCredentials.apiKey || ''),
-      apiHost: provider?.apiHost || '',
+      apiKey: String(provider?.apiKey || (useDedicatedModel ? '' : chatCredentials.apiKey || '') || '').trim(),
+      apiHost: String(provider?.apiHost || '').trim(),
       isVisionCapable: strongIsVisionCapable,
       policyVisionCapable: strongIsVisionCapable || localIsVisionCapable,
       source: useDedicatedModel ? 'dedicated' : 'follow_chat',
@@ -1228,8 +1291,8 @@ const ChatPDF = () => {
       local: useLocalModel ? {
         providerId: localProviderId,
         modelId: localModelId,
-        apiKey: localProvider?.apiKey || '',
-        apiHost: localProvider?.apiHost || '',
+        apiKey: String(localProvider?.apiKey || '').trim(),
+        apiHost: String(localProvider?.apiHost || '').trim(),
         isVisionCapable: localIsVisionCapable,
       } : null,
     };
@@ -1242,7 +1305,8 @@ const ChatPDF = () => {
     const chatApiKey = chatCredentials?.apiKey || '';
     const chatProviderFull = getProviderById?.(chatProvider);
     const providerLower = String(chatProvider || '').toLowerCase();
-    const canCallModel = Boolean(chatApiKey) || providerLower === 'local' || providerLower === 'ollama';
+    const canCallModel = chatCredentials?.isValid !== false
+      && (Boolean(chatApiKey) || providerLower === 'local' || providerLower === 'ollama');
     const headers = { 'Content-Type': 'application/json' };
 
     headers['X-ChatPDF-Provider'] = chatProvider;
@@ -1276,17 +1340,10 @@ const ChatPDF = () => {
         source: 'selected',
       };
     }
-    // 没有配置 rerank 模型时，仅在本地 rerank 可用时才 fallback 到本地
-    if (hasLocalRerank) {
-      return {
-        providerId: 'local',
-        modelId: 'BAAI/bge-reranker-base',
-        compositeKey: 'local:BAAI/bge-reranker-base',
-        source: 'fallback_local',
-      };
-    }
+    // Rerank 是可选增强。未显式选择时保持关闭，不能把“本地运行时可能
+    // 存在”解释成“用户已配置并启用某个本地模型”。
     return null;
-  }, [getDefaultModel, hasLocalRerank]);
+  }, [getDefaultModel]);
 
   const getRerankCredentials = useCallback(() => {
     const rerankModel = getCurrentRerankModel();
@@ -1301,6 +1358,16 @@ const ChatPDF = () => {
         modelId,
         providerName: providerId,
         errorMessage: '当前默认 Rerank Provider 不存在，请在模型服务中重新配置',
+      };
+    }
+    if (provider.enabled === false) {
+      return {
+        isValid: false,
+        reason: 'provider_disabled',
+        providerId,
+        modelId,
+        providerName: provider.name || providerId,
+        errorMessage: `当前 Rerank Provider 已停用：${provider.name || providerId}`,
       };
     }
 
@@ -1383,16 +1450,33 @@ const ChatPDF = () => {
       const provider = providerId ? getProviderById(providerId) : null;
       const selectedModel = providerId ? getModelById(modelId, providerId) : null;
       const isLocal = providerId === 'local';
+      const expectedModelType = type === 'assistantModel'
+        ? 'chat'
+        : type === 'embeddingModel'
+          ? 'embedding'
+          : 'rerank';
+      const modelMatchesType = Boolean(
+        selectedModel
+        && (!selectedModel.type || selectedModel.type === expectedModelType)
+      );
+      const providerApiKey = String(provider?.apiKey || '').trim();
+      const providerApiHost = String(provider?.apiHost || '').trim();
+      const isKeyless = isKeylessLocalProvider(providerId);
       const isReady = Boolean(
-        isLocal
-        || (provider?.enabled !== false && String(provider?.apiKey || '').trim())
+        provider
+        && provider.enabled !== false
+        && modelMatchesType
+        && (
+          isLocal
+          || (isKeyless ? providerApiHost : providerApiKey && providerApiHost)
+        )
       );
 
       return {
         modelName: selectedModel?.name || modelId,
         providerName: provider?.name || providerId || '默认服务',
-        state: isLocal ? 'local' : isReady ? 'ready' : 'needs_setup',
-        statusLabel: isLocal ? '本地' : isReady ? '已配置' : '需配置',
+        state: isReady && isLocal ? 'local' : isReady ? 'ready' : 'needs_setup',
+        statusLabel: isReady && isLocal ? '本地' : isReady ? '已配置' : '需配置',
       };
     };
 
@@ -1514,12 +1598,14 @@ const ChatPDF = () => {
   }, [getProviderById, setCheapModel, setCheapModelEndpoint, setCheapModelProvider]);
   const hasLocalVisualModel = localVisualModelKey !== 'none'
     && localVisualModelOptions.some((option) => option.value === localVisualModelKey);
-  const visualPolicyReady = visualStrategy === 'privacy'
-    ? hasLocalVisualModel
-    : (isVisionCapable || visualModelKey !== 'follow_chat' || hasLocalVisualModel);
   const visualCredentials = useMemo(() => getVisualCredentials?.() || {}, [getVisualCredentials]);
   const strongVisualModelAvailable = visualCredentials.isVisionCapable === true
     && (Boolean(visualCredentials.apiKey) || isKeylessLocalProvider(visualCredentials.providerId));
+  // “已选择模型”不等于“当前可调用”：专用视觉模型缺 API Key、Provider
+  // 被停用或跟随的对话模型不可视时，都应该显示需配置，而不是显示可用。
+  const visualPolicyReady = visualStrategy === 'privacy'
+    ? hasLocalVisualModel
+    : (strongVisualModelAvailable || hasLocalVisualModel);
   const visualModelSummary = useMemo(() => {
     const selectedStrong = visualModelOptions.find((option) => option.value === visualModelKey);
     const selectedLocal = localVisualModelOptions.find((option) => option.value === localVisualModelKey);
@@ -1723,6 +1809,11 @@ const ChatPDF = () => {
   }, [ensureLocalParserReady]);
 
   const handleChooseUploadFile = useCallback(async (startsNewChat = true) => {
+    const missingEmbeddingCredential = getMissingEmbeddingCredential();
+    if (missingEmbeddingCredential) {
+      alert(`${missingEmbeddingCredential.message}\n\n路径：设置中心 → 常用 → 模型服务 → EMBEDDING`);
+      return;
+    }
     preloadPDFViewer();
     const shouldStartNewChat = typeof startsNewChat === 'boolean' ? startsNewChat : true;
     if (selectedParseRoute === 'local') {
@@ -1734,7 +1825,7 @@ const ChatPDF = () => {
     }
     uploadStartsNewChatRef.current = shouldStartNewChat;
     fileInputRef.current?.click();
-  }, [ensureLocalParserReady, fileInputRef, selectedParseRoute]);
+  }, [ensureLocalParserReady, fileInputRef, getMissingEmbeddingCredential, selectedParseRoute]);
 
   const handleLocalParserInstallClose = useCallback(() => {
     pendingLocalParserUploadRef.current = null;
@@ -1752,9 +1843,15 @@ const ChatPDF = () => {
 
   const handleUploadInputChange = useCallback((event) => {
     if (!event.target.files?.[0]) return;
+    const missingEmbeddingCredential = getMissingEmbeddingCredential();
+    if (missingEmbeddingCredential) {
+      alert(`${missingEmbeddingCredential.message}\n\n路径：设置中心 → 常用 → 模型服务 → EMBEDDING`);
+      event.target.value = '';
+      return;
+    }
     if (uploadStartsNewChatRef.current) startNewChat();
     handleFileUpload(event, { parseRoute: selectedParseRoute });
-  }, [handleFileUpload, selectedParseRoute, startNewChat]);
+  }, [getMissingEmbeddingCredential, handleFileUpload, selectedParseRoute, startNewChat]);
   const docInfoParseIdentity = getParseIdentity(docInfo?.parse_manifest);
   const deepParseStatusMatchesDocument = Boolean(
     deepParseStatus
@@ -2087,9 +2184,13 @@ const ChatPDF = () => {
   }, []);
 
   const invalidateDeepParseStatusRequest = useCallback(() => {
-    deepParseStatusRequestRef.current.sequence += 1;
-    deepParseStatusRequestRef.current.controller?.abort();
-    deepParseStatusRequestRef.current.controller = null;
+    const tracker = deepParseStatusRequestRef.current;
+    tracker.sequence += 1;
+    tracker.controller?.abort();
+    tracker.controller = null;
+    tracker.contextKey = '';
+    tracker.lastRequestAt = 0;
+    tracker.lastResult = null;
   }, []);
 
   const refreshDeepParseStatus = useCallback(async () => {
@@ -2099,11 +2200,25 @@ const ChatPDF = () => {
       parseIdentity: documentParseIdentity,
       epoch: parseContextRef.current.epoch,
     };
-    const requestSequence = deepParseStatusRequestRef.current.sequence + 1;
-    deepParseStatusRequestRef.current.sequence = requestSequence;
-    deepParseStatusRequestRef.current.controller?.abort();
+    const tracker = deepParseStatusRequestRef.current;
+    const requestKey = `${requestContext.docId}:${requestContext.parseIdentity}:${requestContext.epoch}`;
+    const now = Date.now();
+    if (
+      tracker.contextKey === requestKey
+      && now - tracker.lastRequestAt < DEEP_PARSE_STATUS_MIN_REQUEST_INTERVAL_MS
+    ) {
+      // The preceding fetch may still be in flight. Returning the latest
+      // stable result (or null before the first response) is preferable to
+      // aborting it and recursively starting another status request.
+      return tracker.lastResult;
+    }
+    const requestSequence = tracker.sequence + 1;
+    tracker.sequence = requestSequence;
+    tracker.controller?.abort();
     const controller = new AbortController();
-    deepParseStatusRequestRef.current.controller = controller;
+    tracker.controller = controller;
+    tracker.contextKey = requestKey;
+    tracker.lastRequestAt = now;
     const releaseRequest = () => {
       if (deepParseStatusRequestRef.current.sequence === requestSequence) {
         deepParseStatusRequestRef.current.controller = null;
@@ -2143,7 +2258,10 @@ const ChatPDF = () => {
       return null;
     }
     settleParseIdentityHydration(requestContext.docId);
-    setDeepParseStatus(data);
+    tracker.lastResult = data;
+    setDeepParseStatus((current) => (
+      sameDeepParseStatus(current, data) ? current : data
+    ));
     if (data?.parse_manifest || typeof data?.parse_ready === 'boolean') {
       setDocInfo((current) => {
         if (!current) return current;
@@ -4055,6 +4173,9 @@ const ChatPDF = () => {
     enableVectorSearch,
     embeddingApiKey: getEmbeddingApiKey(),
     getEmbeddingConfig,
+    useRerank: useRerankSetting,
+    rerankerModel,
+    getRerankCredentials,
     enableGraphRAG,
     enableAgentRetrieval,
     forceAgentRetrieval,
@@ -6820,7 +6941,7 @@ const ChatPDF = () => {
                       {
                         Icon: Type,
                         label: '全局设置',
-                        desc: '字体、记忆和联网',
+                        desc: '记忆和联网',
                         meta: `${Math.round((globalScale || 1) * 100)}% 界面 · 记忆${enableMemory ? '开启' : '关闭'}`,
                         onClick: () => { setShowSettings(false); setShowGlobalSettings(true); },
                       },

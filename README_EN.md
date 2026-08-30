@@ -302,7 +302,7 @@ chmod +x start.sh
 ./start.sh
 ```
 
-The launcher installs the base runtime and opens `http://localhost:3000`. On `main`, it first attempts to pull the latest code. Local-parser components are installed only when the local route is selected for the first time.
+The launcher checks `origin/main` first and fast-forwards to the latest commit when the worktree is clean and currently on `main`. It then verifies the runtime dependencies and opens `http://localhost:3000`. Local changes are never overwritten: the launcher reports how many remote commits are pending and skips the merge. Network failures include diagnostics and fall back to the current version. Python and frontend dependencies are synchronized only when their manifests change, rather than on every launch. Set `CHATPDF_SKIP_UPDATE=1` for an offline launch. Local-parser components are installed only when the local route is selected for the first time.
 
 ### Manual Start
 

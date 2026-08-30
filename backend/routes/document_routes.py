@@ -1583,6 +1583,32 @@ def _get_rag_index_status(doc_id: str, artifact_validation: dict | None = None) 
             generation=str(active_lifecycle.get("parse_generation") or ""),
             source_hash=str(active_lifecycle.get("document_source_hash") or ""),
         )
+        manifest_status = str(active_manifest.get("status") or "").strip().lower()
+        if (
+            lifecycle_matches_parse
+            and _is_full_mineru_parse_manifest(active_manifest)
+            and manifest_status in {PARSE_STATUS_FAILED, PARSE_STATUS_CANCELLED}
+            and str(active_lifecycle.get("status") or "").strip().lower() in {"queued", "running"}
+        ):
+            cancelled = manifest_status == PARSE_STATUS_CANCELLED
+            _mark_full_mineru_index_unavailable(
+                doc_id,
+                parse_generation=str(active_manifest.get("generation") or ""),
+                document_source_hash=str(active_manifest.get("source_hash") or ""),
+                stage="mineru_parse_cancelled" if cancelled else "mineru_parse_failed",
+                error=(
+                    "MinerU 全程解析已取消，问答索引未发布"
+                    if cancelled
+                    else str(active_manifest.get("error") or "MinerU 全程解析失败，问答索引未发布")
+                ),
+            )
+            with _INDEX_STATUS_LOCK:
+                active_lifecycle = dict(_DOCUMENT_INDEX_STATUS.get(doc_id) or {})
+            lifecycle_matches_parse = bool(active_lifecycle) and matches_parse_generation(
+                active_manifest,
+                generation=str(active_lifecycle.get("parse_generation") or ""),
+                source_hash=str(active_lifecycle.get("document_source_hash") or ""),
+            )
         if lifecycle_matches_parse and active_lifecycle.get("status") in {"queued", "running"}:
             index_path, chunks_path = _vector_index_paths(doc_id)
             return {
@@ -1791,6 +1817,30 @@ def _get_document_index_status(doc_id: str) -> dict:
     )
     if current and not current_matches_parse:
         current = {}
+    # Reconcile records created by older workers as well as an active race:
+    # the primary parse is terminal, so its dependent index can never remain
+    # “waiting_for_mineru”. This makes a previously stuck task repair itself on
+    # the next status read even before the user retries the upload.
+    parse_status = str(parse_manifest.get("status") or "").strip().lower()
+    if (
+        _is_full_mineru_parse_manifest(parse_manifest)
+        and parse_status in {PARSE_STATUS_FAILED, PARSE_STATUS_CANCELLED}
+        and (not current or str(current.get("status") or "").strip().lower() in {"queued", "running"})
+    ):
+        cancelled = parse_status == PARSE_STATUS_CANCELLED
+        _mark_full_mineru_index_unavailable(
+            doc_id,
+            parse_generation=str(parse_manifest.get("generation") or ""),
+            document_source_hash=str(parse_manifest.get("source_hash") or ""),
+            stage="mineru_parse_cancelled" if cancelled else "mineru_parse_failed",
+            error=(
+                "MinerU 全程解析已取消，问答索引未发布"
+                if cancelled
+                else str(parse_manifest.get("error") or "MinerU 全程解析失败，问答索引未发布")
+            ),
+        )
+        with _INDEX_STATUS_LOCK:
+            current = dict(_DOCUMENT_INDEX_STATUS.get(doc_id) or {})
     if current.get("status") in {"queued", "running"}:
         index_path, chunks_path = _vector_index_paths(doc_id)
         artifact_present = index_path.exists() and chunks_path.exists()
@@ -2324,6 +2374,41 @@ def _validate_mineru_access(config: dict) -> tuple[bool, str]:
         return False, "网络连接失败，请检查网络设置"
     except Exception as exc:
         return False, f"MinerU Worker 验证失败: {exc}"
+
+
+def _mark_full_mineru_index_unavailable(
+    doc_id: str,
+    *,
+    parse_generation: str,
+    document_source_hash: str,
+    stage: str,
+    error: str,
+) -> None:
+    """Keep the dependent RAG state terminal when its primary MinerU parse is terminal.
+
+    A full MinerU upload creates its index status as ``waiting_for_mineru``
+    before the background worker begins.  If remote authentication or parsing
+    fails later, leaving that record queued makes the UI look active forever.
+    Only update the current parse generation so an old worker cannot fail a
+    newer re-upload of the same file.
+    """
+    manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    if not _is_full_mineru_parse_manifest(manifest):
+        return
+    if parse_generation and not matches_parse_generation(
+        manifest,
+        generation=parse_generation,
+        source_hash=document_source_hash or None,
+    ):
+        return
+    _set_document_index_status(
+        doc_id,
+        "failed",
+        stage=stage,
+        error=error,
+        parse_generation=parse_generation or str(manifest.get("generation") or ""),
+        document_source_hash=document_source_hash or str(manifest.get("source_hash") or ""),
+    )
 
 
 def _clear_block_bound_reading_cache(doc_id: str) -> list[str]:
@@ -2966,22 +3051,39 @@ def _get_deep_parse_status(doc_id: str) -> dict:
     is_full_mineru_route = _is_full_mineru_parse_manifest(parse_manifest)
 
     if not current:
+        manifest_status = str(parse_manifest.get("status") or "").strip().lower()
+        terminal_full_route = is_full_mineru_route and manifest_status in {
+            PARSE_STATUS_FAILED,
+            PARSE_STATUS_CANCELLED,
+        }
         waiting_for_full_route = active_mineru and is_full_mineru_route and not parse_ready
         status = (
-            "running"
-            if waiting_for_full_route
-            else (_mineru_ready_status(block_index) if active_mineru else "idle")
+            manifest_status
+            if terminal_full_route
+            else (
+                "running"
+                if waiting_for_full_route
+                else (_mineru_ready_status(block_index) if active_mineru else "idle")
+            )
         )
         current = {
             "doc_id": doc_id,
             "provider": "mineru",
             "status": status,
             "stage": (
-                str(parse_manifest.get("stage") or "building_rag_index")
-                if waiting_for_full_route
-                else (_mineru_ready_status(block_index) if active_mineru else "not_started")
+                str(parse_manifest.get("stage") or manifest_status or "failed")
+                if terminal_full_route
+                else (
+                    str(parse_manifest.get("stage") or "building_rag_index")
+                    if waiting_for_full_route
+                    else (_mineru_ready_status(block_index) if active_mineru else "not_started")
+                )
             ),
-            "error": "",
+            "error": (
+                str(parse_manifest.get("error") or "MinerU 全程解析未完成")
+                if terminal_full_route
+                else ""
+            ),
             "created_at": str(parse_manifest.get("created_at") or ""),
             "started_at": str(parse_manifest.get("started_at") or ""),
             "parse_generation": str(parse_manifest.get("generation") or ""),
@@ -3500,6 +3602,13 @@ def _run_mineru_deep_parse(
                     )
                 except Exception:
                     logger.debug("[DeepParse] failed to mark quality-gated parse failed for %s", doc_id)
+                _mark_full_mineru_index_unavailable(
+                    doc_id,
+                    parse_generation=parse_generation,
+                    document_source_hash=parse_source_hash,
+                    stage="mineru_quality_failed",
+                    error=quality_message,
+                )
             _set_worker_status(
                 "failed",
                 stage="failed",
@@ -3686,6 +3795,13 @@ def _run_mineru_deep_parse(
                 )
             except Exception:
                 logger.debug("[DeepParse] failed to mark quality-gate manifest failed for %s", doc_id)
+            _mark_full_mineru_index_unavailable(
+                doc_id,
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+                stage="mineru_quality_failed",
+                error=str(exc),
+            )
         _set_worker_status("failed", stage="failed", error=str(exc), **quality_meta)
     except Exception as exc:
         if parser_attempted and not parser_outcome_recorded and not cancel_event.is_set():
@@ -3732,6 +3848,13 @@ def _run_mineru_deep_parse(
                 )
             except Exception:
                 logger.debug("[DeepParse] failed to mark parse manifest failed for %s", doc_id)
+            _mark_full_mineru_index_unavailable(
+                doc_id,
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+                stage="mineru_parse_failed",
+                error=str(exc),
+            )
         _set_worker_status("failed", stage="failed", error=str(exc))
     finally:
         if acquired_document_lock:
@@ -3859,6 +3982,13 @@ def _queue_mineru_deep_parse(
                 error=queue_error,
                 expected_statuses={PARSE_STATUS_PENDING, PARSE_STATUS_QUEUED, PARSE_STATUS_RUNNING},
             )
+            _mark_full_mineru_index_unavailable(
+                doc_id,
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+                stage="mineru_queue_full",
+                error=queue_error,
+            )
         _set_deep_parse_status(
             doc_id,
             "failed",
@@ -3984,6 +4114,13 @@ def _cancel_mineru_deep_parse(doc_id: str) -> dict:
             PARSE_STATUS_RUNNING,
             PARSE_STATUS_FAILED,
         },
+    )
+    _mark_full_mineru_index_unavailable(
+        doc_id,
+        parse_generation=parse_generation,
+        document_source_hash=document_source_hash,
+        stage="mineru_parse_cancelled",
+        error="MinerU 深度解析已取消，问答索引未发布",
     )
     remote_cancel = {"attempted": False, "state": "not_requested"}
     batch_id = str(current.get("batch_id") or "")
@@ -5900,11 +6037,26 @@ def _start_mineru_full_route_upload(
     embedding_provider: Optional[str] = None,
 ) -> dict:
     """Persist a pending MinerU-first document and queue its atomic publication."""
-    mineru_config_error = _mineru_configuration_error()
+    mineru_config = _load_online_ocr_config("mineru")
+    mineru_config_error = _mineru_configuration_error(mineru_config)
     if mineru_config_error:
         raise HTTPException(
             status_code=400,
             detail=f"已选择 MinerU 全程解析，但{mineru_config_error}",
+        )
+
+    # Do this before the PDF is persisted as a pending MinerU document. A
+    # non-empty but invalid/expired Token used to pass the configuration check,
+    # return HTTP 200 from the local upload endpoint, and only fail after the
+    # task panel had already shown “解析中”.
+    access_ok, access_message = _validate_mineru_access(mineru_config)
+    if not access_ok:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "MinerU 连接验证失败："
+                f"{access_message}。请在文档解析设置中修正 Token 后重新测试连接。"
+            ),
         )
 
     embedding_identity = _require_explicit_rag_embedding_identity_or_400(

@@ -148,7 +148,7 @@ def infer_model_tags(model_id: str, model_type: str | None = None) -> list[str]:
     elif re.search(r'^gemini-(2|[3-9])', lower_id):
         # Google Gemini 2+ 系列均支持视觉
         tags.append("vision")
-    elif re.search(r'^(qwen-vl|qwen-max|qwen3\.[567])', lower_id):
+    elif re.search(r'^(qwen-vl|qwen-max|qwen3\.[5678])', lower_id):
         # 阿里云 Qwen-VL、Qwen-Max 和 Qwen3.5+ 系列
         tags.append("vision")
     elif re.search(r'^(grok-vision|grok-4)', lower_id):
@@ -171,6 +171,9 @@ def infer_model_tags(model_id: str, model_type: str | None = None) -> list[str]:
         tags.append("vision")
     elif re.search(r'^mimo-v2\.5$', lower_id):
         # 小米 MiMo V2.5 是全模态理解模型；Pro 为文本旗舰
+        tags.append("vision")
+    elif re.search(r'^glm-5\.3-flash', lower_id):
+        # 智谱 GLM-5.3-Flash 原生多模态；GLM-5.3 本体为纯文本
         tags.append("vision")
 
     # 中文优化标签

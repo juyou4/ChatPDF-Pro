@@ -135,13 +135,17 @@ export function shouldShowLocalOcrInstallGuide(ocrStatus) {
 export function parseSettingsStatusText({
   parseRoute,
   mineruConfigured,
+  mineruConnectionVerified = false,
   ocrModeLabel,
   ocrBackendLabel,
 }) {
   if (parseRoute === 'local') {
     return `本地解析 · ${ocrModeLabel || '自动'} · ${ocrBackendLabel || '自动选择'}`
   }
-  return mineruConfigured ? 'MinerU · 已连接' : 'MinerU · 待配置'
+  // 配置已保存不代表远端 Token 已经验证通过。此前这里写成“已连接”，
+  // 会让填写错误 Token 的用户误以为可以直接上传。
+  if (!mineruConfigured) return 'MinerU · 待配置'
+  return mineruConnectionVerified ? 'MinerU · 已验证' : 'MinerU · 已配置，待验证'
 }
 
 function OptionToggle({ title, description, checked, onToggle }) {
@@ -450,6 +454,11 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
     }
   }, [])
 
+  const clearMineruValidation = useCallback(() => {
+    setMineruValidateStatus(null)
+    setMineruValidateMessage('')
+  }, [])
+
   /**
    * MinerU 测试连接：验证 Worker 可达性
    */
@@ -575,7 +584,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
       })
       const data = await res.json().catch(() => ({}))
       if (res.ok && data.success) {
-        setMineruSaveMessage('配置已保存')
+        setMineruSaveMessage('配置已保存，请测试连接确认 Token 有效性')
         // 重新加载配置和状态
         fetchOnlineConfig()
         fetchOCRStatus()
@@ -774,6 +783,10 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
   const mineruConfigured = Boolean(
     onlineConfig?.mineru?.worker_url || onlineConfig?.mineru?.token_configured
   )
+  // 只在当前弹窗会话里、且测试请求真实通过后才展示“已验证”。
+  // 配置文件只保存密钥，不保存可长期信赖的连接状态，避免 Token 过期后
+  // 重开页面仍被误标为已连接。
+  const mineruConnectionVerified = mineruValidateStatus === 'success'
   const mineruCanTest = mineruAccessMode === 'direct'
     ? Boolean(mineruToken.trim() || onlineConfig?.mineru?.token_configured)
     : Boolean(mineruWorkerUrl.trim() || onlineConfig?.mineru?.worker_url)
@@ -913,9 +926,15 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                         </p>
                       </div>
                       {mineruConfigured && (
-                        <span className="shrink-0 text-[11px] text-green-700 bg-green-50 px-2 py-0.5 rounded-full border border-green-100 flex items-center gap-1">
-                          <CheckCircle2 className="w-3 h-3" />
-                          已连接
+                        <span className={`shrink-0 text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1 ${
+                          mineruConnectionVerified
+                            ? 'text-green-700 bg-green-50 border-green-100'
+                            : 'text-amber-700 bg-amber-50 border-amber-100'
+                        }`}>
+                          {mineruConnectionVerified
+                            ? <CheckCircle2 className="w-3 h-3" />
+                            : <Key className="w-3 h-3" />}
+                          {mineruConnectionVerified ? '已验证' : '已配置'}
                         </span>
                       )}
                     </div>
@@ -963,7 +982,10 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                               <SettingsSegmentedControl
                                 ariaLabel="MinerU 接入模式"
                                 value={mineruAccessMode}
-                                onChange={setMineruAccessMode}
+                                onChange={(value) => {
+                                  setMineruAccessMode(value)
+                                  clearMineruValidation()
+                                }}
                                 options={[
                                   { value: 'direct', label: '直连 API' },
                                   { value: 'worker', label: 'Worker 代理' },
@@ -987,7 +1009,10 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                                   <input
                                     type="text"
                                     value={mineruBaseUrl}
-                                    onChange={(e) => setMineruBaseUrl(e.target.value)}
+                                    onChange={(e) => {
+                                      setMineruBaseUrl(e.target.value)
+                                      clearMineruValidation()
+                                    }}
                                     placeholder="https://mineru.net/api/v4"
                                     className={FIELD_INPUT_CLASS}
                                   />
@@ -1005,7 +1030,10 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                                   <input
                                     type="text"
                                     value={mineruWorkerUrl}
-                                    onChange={(e) => setMineruWorkerUrl(e.target.value)}
+                                    onChange={(e) => {
+                                      setMineruWorkerUrl(e.target.value)
+                                      clearMineruValidation()
+                                    }}
                                     placeholder="https://your-worker.workers.dev"
                                     className={FIELD_INPUT_CLASS}
                                   />
@@ -1025,8 +1053,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                                     value={mineruAuthKey}
                                     onChange={(e) => {
                                       setMineruAuthKey(e.target.value)
-                                      setMineruValidateStatus(null)
-                                      setMineruValidateMessage('')
+                                      clearMineruValidation()
                                     }}
                                     placeholder={
                                       onlineConfig?.mineru?.auth_key_configured
@@ -1053,7 +1080,10 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                                 <SettingsSegmentedControl
                                   ariaLabel="MinerU Token 模式"
                                   value={mineruTokenMode}
-                                  onChange={setMineruTokenMode}
+                                  onChange={(value) => {
+                                    setMineruTokenMode(value)
+                                    clearMineruValidation()
+                                  }}
                                   options={[
                                     { value: 'frontend', label: '在此填写' },
                                     { value: 'worker', label: 'Worker 环境变量' },
@@ -1073,7 +1103,10 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                                   <input
                                     type={showMineruToken ? 'text' : 'password'}
                                     value={mineruToken}
-                                    onChange={(e) => setMineruToken(e.target.value)}
+                                    onChange={(e) => {
+                                      setMineruToken(e.target.value)
+                                      clearMineruValidation()
+                                    }}
                                     placeholder={
                                       onlineConfig?.mineru?.token_configured
                                         ? '输入新 Token 以更新（留空保持不变）'
@@ -1147,19 +1180,23 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                     {(mineruValidateMessage || mineruSaveMessage) && (
                       <div
                         className={`mt-3 flex items-center gap-2 px-3 py-2 rounded-xl text-xs ${
-                          mineruValidateStatus === 'success' || mineruSaveMessage === '配置已保存'
-                            ? 'bg-green-50/60 border border-green-100 text-green-700'
-                            : mineruValidating
-                              ? 'bg-gray-50 border border-gray-100 text-gray-600'
-                              : 'bg-red-50/60 border border-red-100 text-red-700'
+                          mineruValidating
+                            ? 'bg-gray-50 border border-gray-100 text-gray-600'
+                            : mineruValidateStatus === 'success'
+                              ? 'bg-green-50/60 border border-green-100 text-green-700'
+                              : mineruValidateStatus === 'error'
+                                ? 'bg-red-50/60 border border-red-100 text-red-700'
+                                : 'bg-amber-50/60 border border-amber-100 text-amber-800'
                         }`}
                       >
                         {mineruValidating ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-                        ) : mineruValidateStatus === 'success' || mineruSaveMessage === '配置已保存' ? (
+                        ) : mineruValidateStatus === 'success' ? (
                           <CheckCircle2 className="w-3.5 h-3.5 text-green-500 shrink-0" />
-                        ) : (
+                        ) : mineruValidateStatus === 'error' ? (
                           <XCircle className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                        ) : (
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                         )}
                         <span>{mineruValidateMessage || mineruSaveMessage}</span>
                       </div>
@@ -1478,6 +1515,7 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
                 {parseSettingsStatusText({
                   parseRoute,
                   mineruConfigured,
+                  mineruConnectionVerified,
                   ocrModeLabel: OCR_MODES.find((item) => item.value === mode)?.label,
                   ocrBackendLabel: BACKEND_OPTIONS.find((item) => item.value === backend)?.label,
                 })}
@@ -1489,6 +1527,3 @@ export default function OCRSettingsPanel({ isOpen, onClose }) {
     </AnimatePresence>
   )
 }
-
-
-

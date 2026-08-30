@@ -7545,10 +7545,10 @@ def _build_retrieval_diagnostics(results: List[dict], query: str) -> dict:
         "source_mix": dict(source_counts),
         "source_mix_entropy": round(source_entropy, 4),
         "multi_source_result_count": multi_source_count,
-        "rerank_applied": any(
-            item.get("reranked") or item.get("rerank_score") is not None or item.get("combined_score") is not None
-            for item in results
-        ),
+        # 仅以调用器写入的显式布尔标记为准。combined_score 可能来自证据
+        # 门控或历史索引，即使没有真正执行 rerank 也会存在。
+        "rerank_applied": any(item.get("reranked") is True for item in results),
+        "rerank_degraded": any(item.get("_rerank_degraded") is True for item in results),
         "unique_group_count": len(unique_groups),
         "unique_group_coverage": round(len(unique_groups) / max(total, 1), 4),
         "unique_section_count": len(unique_sections),
@@ -7799,7 +7799,10 @@ def _apply_rerank(
             api_key=rerank_api_key,
             endpoint=rerank_endpoint
         )
-        logger.info(f"[Rerank] 重排序完成，返回 {len(result)} 条结果")
+        if any(item.get("_rerank_degraded") for item in result if isinstance(item, dict)):
+            logger.info(f"[Rerank] 重排序不可用，已保留原排序，共 {len(result)} 条结果")
+        else:
+            logger.info(f"[Rerank] 重排序完成，返回 {len(result)} 条结果")
         return result
     except Exception as e:
         logger.error(f"[Rerank] 重排序失败: {e}", exc_info=True)
@@ -13203,6 +13206,10 @@ def _finalize_with_optional_rerank(
         rerank_api_key,
         rerank_endpoint,
     )
+    rerank_fallback = next((
+        item for item in reranked_results
+        if isinstance(item, dict) and item.get("_rerank_degraded")
+    ), None)
     reranked_results = _apply_evidence_gate(reranked_results, query)
     effective_top_k = _resolve_numeric_table_effective_top_k(
         query,
@@ -13237,7 +13244,17 @@ def _finalize_with_optional_rerank(
             )
         reranked_results = kept
     timings["rerank_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-    _emit_retrieval_progress(progress_callback, "rerank_done", "重排序完成。")
+    if rerank_fallback:
+        timings["rerank_degraded"] = True
+        _emit_retrieval_progress(
+            progress_callback,
+            "rerank_fallback",
+            "重排模型暂不可用，已保留混合检索原排序。",
+            error_code=rerank_fallback.get("_rerank_error_code") or "rerank_unavailable",
+            reason=rerank_fallback.get("_rerank_error") or "",
+        )
+    else:
+        _emit_retrieval_progress(progress_callback, "rerank_done", "重排序完成。")
 
     final = _ensure_numeric_table_evidence_slots(reranked_results, query, effective_top_k)
     final = _apply_numeric_table_same_bundle_hard_gate(final, query)
@@ -16178,6 +16195,10 @@ def _build_context_with_groups(
     # 将检索耗时数据合并到 retrieval_meta（需求 1.2）
     if timings is not None:
         retrieval_meta["timings"] = {k: v for k, v in timings.items() if not k.startswith("_")}
+        if timings.get("rerank_degraded"):
+            retrieval_meta["rerank_degraded"] = True
+            retrieval_meta["rerank_status"] = "fallback"
+            retrieval_meta["rerank_fallback_reason"] = "rerank_unavailable"
 
     # 传递原始 chunks 用于结构化引文匹配
     retrieval_meta["_chunks"] = [

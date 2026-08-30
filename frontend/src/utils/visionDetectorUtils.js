@@ -21,10 +21,12 @@ export const VISION_CAPABLE_RULES = {
   anthropic: /^(claude-3|claude-(fable|mythos|sonnet|opus|haiku))/i,
   // Google Gemini 2+ 全系均支持视觉
   gemini: /^gemini-(2|[3-9])/i,
+  // 智谱 GLM-5.3-Flash 原生支持图像、视频和文件输入；GLM-5.3 为纯文本
+  zhipu: /^glm-5\.3-flash/i,
   // 通义千问 VL 和 Max 系列
-  qwen: /^(qwen-vl|qwen-max)/i,
+  qwen: /^(qwen-vl|qwen-max|glm-5\.3-flash)/i,
   // 阿里云通义 3.x 多模态系列
-  aliyun: /^(qwen-vl|qwen-max|qwen3\.[567]|qwen3\.5-omni)/i,
+  aliyun: /^(qwen-vl|qwen-max|qwen3\.[5678]|qwen3\.5-omni|glm-5\.3-flash)/i,
   // xAI Grok 4 系列及专用视觉模型
   grok: /^(grok-vision|grok-4)/i,
   xai: /^(grok-vision|grok-4)/i,

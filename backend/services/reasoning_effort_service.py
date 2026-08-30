@@ -174,7 +174,7 @@ def requires_preserved_reasoning_history(provider: str, model: str) -> bool:
     value = str(model or "").strip().lower()
     return bool(
         re.search(
-            r"deepseek-v4|glm-5\.2|kimi-k3|qwen3\.8-max|mimo-v2\.5",
+            r"deepseek-v4|glm-5\.[23]|kimi-k3|qwen3\.8-(?:max|flash)|mimo-v2\.5",
             value,
         )
     )
@@ -343,7 +343,11 @@ def _gemini_level_profile(model: str) -> ReasoningProfile | None:
     """Resolve Gemini 3 thinking levels at model granularity."""
 
     value = str(model or "").strip().lower()
-    if "gemini-3.6-flash" in value:
+    if "gemini-3.7-flash" in value:
+        # Gemini 3.7 Flash rejects the minimal level; only these three
+        # values are documented by Google for the stable endpoint.
+        options, default = ("low", "medium", "high"), "high"
+    elif "gemini-3.6-flash" in value:
         options, default = ("minimal", "low", "medium", "high"), "medium"
     elif "gemini-3.5-flash-lite" in value:
         options, default = ("minimal", "low", "medium", "high"), "minimal"
@@ -720,6 +724,12 @@ def get_reasoning_profile(
         return _finish(ReasoningProfile("unsupported", ("off",), note="当前 Gemini 模型未声明思考能力"))
 
     if pid == "grok":
+        if "grok-4.6" in mid:
+            return _finish(ReasoningProfile(
+                "openai_effort", ("low", "medium", "high", "xhigh"), default="high",
+                always_enabled=True,
+                note="Grok 4.6 始终思考，支持 low / medium / high / xhigh",
+            ))
         if "grok-4.5" in mid:
             return _finish(ReasoningProfile(
                 "openai_effort", ("low", "medium", "high"), default="high",
@@ -739,11 +749,11 @@ def get_reasoning_profile(
         return _finish(ReasoningProfile("unsupported", ("off",), note="当前 Grok 模型未声明思考能力"))
 
     if pid in {"aliyun", "qwen", "dashscope", "bailian", "tongyi"} or "qwen3" in mid or "qwq" in mid:
-        if "qwen3.8-max" in mid:
+        if re.search(r"qwen3\.8-(?:max|flash)", mid):
             return _finish(ReasoningProfile(
                 "openai_effort", ("off", "low", "medium", "xhigh"),
                 default="xhigh",
-                note="Qwen3.8-Max 使用 reasoning_effort；不可与 thinking_budget 同时发送",
+                note="Qwen3.8 使用 reasoning_effort（low / medium / xhigh）；不可与 thinking_budget 同时发送",
                 off_control="enable_thinking_false",
                 on_control="enable_thinking_true",
             ))
@@ -765,6 +775,16 @@ def get_reasoning_profile(
             "openai_effort", ("off", "low", "high", "max"), default="high",
             note="DeepSeek V4 原生 reasoning_effort：low / high / max",
             off_control="thinking_disabled",
+            on_control="thinking_enabled",
+        ))
+
+    if pid == "zhipu" and "glm-5.3" in mid:
+        return _finish(ReasoningProfile(
+            "openai_effort",
+            ("low", "high", "max"),
+            default="max",
+            always_enabled=True,
+            note="GLM-5.3 始终思考，仅支持 low / high / max",
             on_control="thinking_enabled",
         ))
 
@@ -893,6 +913,7 @@ _REASONING_BODY_KEYS = {
     "thinking_budget",
     "thinkingBudget",
     "reasoning_split",
+    "preserve_thinking",
     "output_config",
     "reasoning",
     "think",
@@ -1034,6 +1055,14 @@ def apply_reasoning_to_payload(
         body["think"] = True
     if resolution.profile.split_reasoning_output:
         body["reasoning_split"] = True
+    # Qwen3.8 accepts historical reasoning_content only when this explicit
+    # compatibility flag is enabled. Keep it scoped to the documented family
+    # so generic OpenAI-compatible gateways never receive an unknown field.
+    provider_id = str(provider or "").strip().lower()
+    if provider_id in {"aliyun", "qwen", "dashscope", "bailian", "tongyi"} and re.search(
+        r"qwen3\.8-(?:max|flash)", str(model or "").strip().lower()
+    ):
+        body["preserve_thinking"] = True
     if _wants_incremental_output(provider, model):
         body["incremental_output"] = True
     return resolution

@@ -6,6 +6,7 @@ export function startVisiblePoll(callback, intervalMs, options = {}) {
   const immediate = options.immediate !== false;
   let cancelled = false;
   let timer = null;
+  let running = false;
 
   const clearTimer = () => {
     if (timer != null) {
@@ -25,12 +26,15 @@ export function startVisiblePoll(callback, intervalMs, options = {}) {
   };
 
   const tick = async () => {
-    if (cancelled || isHidden()) return;
+    if (cancelled || isHidden() || running) return;
+    running = true;
     let shouldContinue = true;
     try {
       shouldContinue = await callback();
     } catch {
       shouldContinue = true;
+    } finally {
+      running = false;
     }
     if (shouldContinue !== false) schedule();
   };

@@ -76,16 +76,18 @@ _REASONING_ON_CONTROLS = {
 
 
 _LATEST_MODEL_IDS = {
+    "qwen3.7-text-embedding",
     "gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
-    "qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash",
+    "qwen3.8-max", "qwen3.8-flash",
+    "qwen3.7-plus",
     "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp",
     "kimi-k3", "kimi-k2.7-code", "kimi-k2.6",
-    "glm-5.2", "MiniMax-M3",
+    "glm-5.3", "glm-5.3-flash", "MiniMax-M3",
     "mimo-v2.5-pro", "mimo-v2.5",
-    "claude-opus-5", "claude-fable-5", "claude-sonnet-5",
-    "gemini-3.6-flash", "gemini-3.1-pro-preview",
-    "grok-4.5",
-    "doubao-seed-evolving",
+    "claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-haiku-4-5-20251001",
+    "gemini-3.7-flash",
+    "grok-4.6",
+    "doubao-seed-evolving", "doubao-seed-2-1-pro-260628", "doubao-seed-2-1-turbo-260628",
     "gemini-embedding-2-preview",
 }
 
@@ -324,6 +326,8 @@ async def get_models():
             "gpt-4o-mini": "GPT-4o mini",
         },
         "aliyun": {
+            "qwen3.8-max": "Qwen3.8-Max",
+            "qwen3.8-flash": "Qwen3.8-Flash",
             "qwen3.7-max": "Qwen3.7-Max",
             "qwen3.7-plus": "Qwen3.7-Plus",
             "qwen3.7-flash": "Qwen3.7-Flash",
@@ -340,6 +344,8 @@ async def get_models():
             "kimi-k2.6": "Kimi K2.6",
         },
         "zhipu": {
+            "glm-5.3": "GLM-5.3",
+            "glm-5.3-flash": "GLM-5.3-Flash",
             "glm-5.2": "GLM-5.2",
             "glm-5.1": "GLM-5.1",
         },
@@ -364,6 +370,7 @@ async def get_models():
             "claude-haiku-4-5-20251001": "Claude Haiku 4.5",
         },
         "gemini": {
+            "gemini-3.7-flash": "Gemini 3.7 Flash",
             "gemini-3.6-flash": "Gemini 3.6 Flash",
             "gemini-3.5-flash": "Gemini 3.5 Flash",
             "gemini-3.1-pro-preview": "Gemini 3.1 Pro Preview",
@@ -373,6 +380,7 @@ async def get_models():
             "gemini-2.5-flash-lite": "Gemini 2.5 Flash-Lite",
         },
         "grok": {
+            "grok-4.6": "Grok 4.6",
             "grok-4.5": "Grok 4.5",
             "grok-4.3": "Grok 4.3",
             "grok-build-0.1": "Grok Build 0.1",
@@ -1053,7 +1061,7 @@ async def fetch_provider_models(request: ModelFetchRequest):
                 {"id": "claude-fable-5", "name": "Claude Fable 5", "type": "chat",
                  "metadata": {"description": "Anthropic 最新 Claude 5 系列模型，400K 上下文，适合通用与创作任务"}},
                 {"id": "claude-opus-4-8", "name": "Claude Opus 4.8", "type": "chat",
-                 "metadata": {"description": "Claude Opus 最新旗舰，复杂推理与编码能力强"}},
+                 "metadata": {"description": "Claude Opus 上一代版本，保留用于兼容已有配置"}},
                 {"id": "claude-sonnet-5", "name": "Claude Sonnet 5", "type": "chat",
                  "metadata": {"description": "Claude Sonnet 5 均衡旗舰，适合编码、Agent 和通用推理"}},
                 {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "type": "chat",
@@ -1082,10 +1090,12 @@ async def fetch_provider_models(request: ModelFetchRequest):
         # Google Gemini：返回预设模型列表
         if request.providerId == 'gemini':
             GEMINI_PRESET_MODELS = [
+                {"id": "gemini-3.7-flash", "name": "Gemini 3.7 Flash", "type": "chat",
+                 "metadata": {"description": "Google 最新稳定 Flash 模型，原生多模态、1M 上下文，支持 Search grounding 与工具调用"}},
                 {"id": "gemini-3.6-flash", "name": "Gemini 3.6 Flash", "type": "chat",
-                 "metadata": {"description": "Google 当前最新稳定模型，兼顾速度、智能水平与 Agent/多模态任务"}},
+                 "metadata": {"description": "Google 上一代稳定 Flash 模型，保留用于兼容已有配置"}},
                 {"id": "gemini-3.5-flash", "name": "Gemini 3.5 Flash", "type": "chat",
-                 "metadata": {"description": "Google 最新稳定 Gemini 3.5 Flash，强调速度、多模态与思考能力"}},
+                 "metadata": {"description": "Google 旧版 Flash 模型，建议迁移到 Gemini 3.7 Flash"}},
                 {"id": "gemini-3.1-pro-preview", "name": "Gemini 3.1 Pro Preview", "type": "chat",
                  "metadata": {"description": "Gemini 3.1 Pro 预览版，适合复杂多模态和推理任务"}},
                 {"id": "gemini-3.1-flash-lite", "name": "Gemini 3.1 Flash-Lite", "type": "chat",
@@ -1322,6 +1332,46 @@ async def test_model(request: ModelTestRequest):
 
     try:
         if request.providerId == 'local':
+            if request.modelType == "rerank":
+                # 本地 Rerank 必须测试真实的 CrossEncoder，不能复用
+                # SentenceTransformer 的 embedding encode，否则设置页会
+                # 把“能产向量”误报成“能做重排”。
+                from services.rerank_service import is_local_rerank_available, rerank_service
+
+                if not is_local_rerank_available():
+                    raise HTTPException(
+                        status_code=400,
+                        detail="本地 Rerank 不可用（缺少 sentence-transformers 或当前运行时不兼容）",
+                    )
+                try:
+                    model = rerank_service._get_model(request.modelId)
+                    scores = model.predict([("这是一个测试查询", "这是一个用于验证重排的测试文档")])
+                    score = float(scores[0]) if len(scores) else None
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"本地 Rerank 模型加载或推理失败：{str(exc)[:300]}",
+                    ) from exc
+                response_time = int((time() - start_time) * 1000)
+                return {
+                    "success": True,
+                    "modelId": request.modelId,
+                    "providerId": "local",
+                    "score": score,
+                    "responseTime": response_time,
+                }
+            if request.modelType == "chat":
+                raise HTTPException(
+                    status_code=400,
+                    detail="本地 Chat 模型测试不适用，请使用 Ollama 或远程 Chat Provider",
+                )
+            from services.embedding_service import is_local_embedding_runtime_supported
+
+            if not is_local_embedding_runtime_supported():
+                raise HTTPException(
+                    status_code=400,
+                    detail="本地 Embedding 不可用（当前运行时与 FAISS 不兼容），请改用远程 Embedding 服务",
+                )
             try:
                 from sentence_transformers import SentenceTransformer
             except (ImportError, OSError):

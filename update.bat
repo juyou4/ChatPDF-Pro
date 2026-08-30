@@ -20,7 +20,7 @@ if errorlevel 1 (
 for /f "tokens=*" %%i in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "CURRENT_BRANCH=%%i"
 if /i not "!CURRENT_BRANCH!"=="main" (
     echo [X] 当前目录在分支 !CURRENT_BRANCH!，一键升级只允许在 main 上执行
-    echo     请切换到 main 工作树，或使用 E:\Project\run-chatpdf-main.bat 启动 main 版本。
+    echo     请切换到 Chatpdf 主工作树，并从该目录运行 start.bat。
     pause
     exit /b 1
 )

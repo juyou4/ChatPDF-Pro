@@ -50,6 +50,45 @@ class LocalRerankModelUnavailable(RuntimeError):
     """本地 rerank 模型当前不可用，可直接降级到原始排序。"""
 
 
+_RERANK_DEFAULT_ENDPOINT_PROVIDERS = frozenset({"cohere", "jina", "silicon", "aliyun", "llm"})
+
+
+def is_local_rerank_available() -> bool:
+    """Return whether the current process may expose local rerank as usable."""
+    return bool(_HAS_CROSS_ENCODER and is_local_rerank_runtime_supported())
+
+
+def validate_rerank_configuration(
+    *,
+    use_rerank: bool,
+    model_name: Optional[str],
+    provider: Optional[str],
+    api_key: Optional[str],
+    endpoint: Optional[str],
+) -> None:
+    """Validate an explicitly enabled rerank request before retrieval starts."""
+    if not use_rerank:
+        return
+
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_model = str(model_name or "").strip()
+    normalized_key = str(api_key or "").strip()
+    normalized_endpoint = str(endpoint or "").strip()
+
+    if not normalized_provider:
+        raise ValueError("已启用 Rerank，但未配置 rerank_provider")
+    if not normalized_model:
+        raise ValueError("已启用 Rerank，但未配置 reranker_model")
+    if normalized_provider == "local":
+        if not is_local_rerank_available():
+            raise ValueError("当前后端没有可用的本地 Rerank 运行时，请选择远程 Rerank 模型或关闭重排")
+        return
+    if not normalized_key:
+        raise ValueError(f"使用 {normalized_provider} Rerank 需要提供 rerank_api_key")
+    if normalized_provider not in _RERANK_DEFAULT_ENDPOINT_PROVIDERS and not normalized_endpoint:
+        raise ValueError(f"使用 {normalized_provider} Rerank 需要显式提供 rerank_endpoint")
+
+
 class RerankService:
     """重排服务：支持本地 CrossEncoder + 云端 Cohere/Jina"""
 
@@ -474,12 +513,25 @@ class RerankService:
             result = self._rerank_local(query, candidates_for_provider, model_name)
             return self._aggregate_chunked_rerank_results(result, original_candidates) if used_chunking else result
         except Exception as e:
-            # 记录错误日志后回退到原有排序
+            # 重排是增强层，调用失败时保留原始排序，但必须把降级原因写进
+            # 结果，供搜索/聊天状态链展示，不能继续冒充“重排序完成”。
             if isinstance(e, LocalRerankModelUnavailable):
                 logger.info(f"[RerankService] 重排序降级 (provider={provider}): {e}")
             else:
                 logger.warning(f"[RerankService] 重排序失败 (provider={provider}): {e}", exc_info=True)
-            return sorted(candidates, key=lambda x: x.get("similarity", 0), reverse=True)
+            error_code = (
+                "local_rerank_unavailable"
+                if isinstance(e, (LocalRerankModelUnavailable, ImportError))
+                else "rerank_request_failed"
+            )
+            reason = self._compact_error(e)
+            fallback = [dict(item) for item in original_candidates]
+            for item in fallback:
+                item["_rerank_degraded"] = True
+                item["_rerank_error_code"] = error_code
+                item["_rerank_error"] = reason
+                item["reranked"] = False
+            return sorted(fallback, key=lambda x: x.get("similarity", 0), reverse=True)
 
 
 rerank_service = RerankService()

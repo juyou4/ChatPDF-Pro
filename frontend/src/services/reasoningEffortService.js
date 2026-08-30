@@ -120,7 +120,11 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
   if (pid === 'gemini' && /gemini-3/.test(mid)) {
     let options = ['low', 'medium', 'high']
     let defaultValue = 'high'
-    if (/gemini-3\.6-flash/.test(mid)) {
+    if (/gemini-3\.7-flash/.test(mid)) {
+      // 官方文档明确只接受 low / medium / high；minimal 会返回参数错误。
+      options = ['low', 'medium', 'high']
+      defaultValue = 'high'
+    } else if (/gemini-3\.6-flash/.test(mid)) {
       options = ['minimal', 'low', 'medium', 'high']
       defaultValue = 'medium'
     } else if (/gemini-3\.5-flash-lite/.test(mid)) {
@@ -151,6 +155,9 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
     return normalizeReasoningProfile({ mode: 'gemini_budget', options: ['off', 'low', 'medium', 'high', 'max'], note: 'Gemini thinking budget', off_control: 'gemini_budget_zero', off_is_guaranteed: true })
   }
   if (pid === 'grok') {
+    if (mid.includes('grok-4.6')) {
+      return normalizeReasoningProfile({ mode: 'openai_effort', options: ['low', 'medium', 'high', 'xhigh'], default: 'high', always_enabled: true, note: 'Grok 4.6 始终思考，支持 low / medium / high / xhigh' })
+    }
     if (mid.includes('grok-4.5')) {
       return normalizeReasoningProfile({ mode: 'openai_effort', options: ['low', 'medium', 'high'], default: 'high', always_enabled: true, note: 'Grok 4.5 始终思考' })
     }
@@ -176,12 +183,12 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
     })
   }
   if (pid === 'aliyun' || pid === 'qwen' || /qwen3|qwq/.test(mid)) {
-    if (mid.includes('qwen3.8-max')) {
+    if (/qwen3\.8-(?:max|flash)/.test(mid)) {
       return normalizeReasoningProfile({
         mode: 'openai_effort',
         options: ['off', 'low', 'medium', 'xhigh'],
         default: 'xhigh',
-        note: 'Qwen3.8-Max 使用 reasoning_effort，不能与 thinking_budget 同时发送',
+        note: 'Qwen3.8 使用 reasoning_effort，不能与 thinking_budget 同时发送',
         off_control: 'enable_thinking_false',
         on_control: 'enable_thinking_true',
         can_disable: true,
@@ -208,6 +215,16 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
       : { mode: 'unsupported', options: ['off'], note: '当前模型未声明思考能力' })
   }
   if (pid === 'zhipu') {
+    if (mid.includes('glm-5.3')) {
+      return normalizeReasoningProfile({
+        mode: 'openai_effort',
+        options: ['low', 'high', 'max'],
+        default: 'max',
+        always_enabled: true,
+        note: 'GLM-5.3 始终思考，仅支持 low / high / max',
+        on_control: 'thinking_enabled',
+      })
+    }
     if (mid.includes('glm-5.2')) {
       return normalizeReasoningProfile({
         mode: 'openai_effort',
@@ -249,7 +266,7 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
 // 只按明确的模型族启用，避免普通 OpenAI 兼容接口拒绝未知消息字段。
 export const requiresPreservedReasoning = ({ modelId } = {}) => {
   const mid = String(modelId || '').trim().toLowerCase()
-  return /deepseek-v4|glm-5\.2|kimi-k3|qwen3\.8-max|mimo-v2\.5/.test(mid)
+  return /deepseek-v4|glm-5\.[23]|kimi-k3|qwen3\.8-(?:max|flash)|mimo-v2\.5/.test(mid)
 }
 
 export const getStoredReasoningEffort = (modelKey) => {

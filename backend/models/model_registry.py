@@ -51,6 +51,17 @@ EMBEDDING_MODELS = {
         "price": "CNY 0.000514/1K tokens",
         "description": "Qwen3-Embedding based multilingual embedding model"
     },
+    "qwen3.7-text-embedding": {
+        "name": "Alibaba: qwen3.7-text-embedding",
+        "provider": "openai",
+        "provider_id": "aliyun",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "embedding_endpoint": "/embeddings",
+        "dimension": 1024,
+        "max_tokens": 131072,
+        "price": "USD 0.07/M tokens",
+        "description": "Qwen3.7 多语言文本向量模型，支持 256-2560 维自定义输出"
+    },
     "qwen3-rerank": {
         "name": "Alibaba: qwen3-rerank",
         "provider": "openai",

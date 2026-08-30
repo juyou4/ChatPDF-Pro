@@ -1046,6 +1046,94 @@ body,
     font-size: 0.8125rem;
 }
 
+/* 悬浮/吸附翻译面板的内容边界：Markdown 根节点本身还有
+   `.message-content` 的通用规则，必须在这里补上 min-width 和断词，
+   否则英文长词、模型标识符和公式会把卡片撑出可视区域。 */
+.translation-markdown,
+.translation-markdown .message-content,
+.translation-markdown .prose {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.translation-markdown .message-content {
+    overflow-x: visible;
+}
+
+.translation-markdown .message-content > * {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.translation-markdown .message-content p,
+.translation-markdown .message-content ul,
+.translation-markdown .message-content ol,
+.translation-markdown .message-content blockquote {
+    margin-top: 0.45em;
+    margin-bottom: 0.45em;
+}
+
+.translation-markdown .message-content pre,
+.translation-markdown .message-content code {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+
+.translation-markdown .message-content pre {
+    overflow-x: auto;
+}
+
+.translation-markdown .message-content table {
+    max-width: 100%;
+}
+
+.translation-source-scroll,
+.translation-dock-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(125, 105, 92, 0.38) transparent;
+}
+
+.translation-source-scroll::-webkit-scrollbar,
+.translation-dock-scroll::-webkit-scrollbar {
+    width: 5px;
+}
+
+.translation-source-scroll::-webkit-scrollbar-track,
+.translation-dock-scroll::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.translation-source-scroll::-webkit-scrollbar-thumb,
+.translation-dock-scroll::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: rgba(125, 105, 92, 0.32);
+}
+
+.translation-source-scroll:hover::-webkit-scrollbar-thumb,
+.translation-dock-scroll:hover::-webkit-scrollbar-thumb {
+    background: rgba(125, 105, 92, 0.52);
+}
+
+.chatpdf-shell--dark .translation-source-scroll,
+.chatpdf-shell--dark .translation-dock-scroll {
+    scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
+}
+
+.chatpdf-shell--dark .translation-source-scroll::-webkit-scrollbar-thumb,
+.chatpdf-shell--dark .translation-dock-scroll::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.22);
+}
+
+.chatpdf-shell--dark .translation-source-scroll:hover::-webkit-scrollbar-thumb,
+.chatpdf-shell--dark .translation-dock-scroll:hover::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.36);
+}
+
 .note-markdown--dark.translation-markdown--source {
     color: #9ca3af;
 }

@@ -17,7 +17,7 @@ import {
   Shield,
   Trash2,
   ChevronLeft,
-  Box, Edit3, Link2, Play, ChevronRight, CheckSquare, Sparkles, Cloud, Moon, Fish, Cpu, MessageSquare, Zap, Settings2
+  Box, Edit3, Link2, Play, ChevronRight, CheckSquare, Sparkles, Cloud, Moon, Fish, Cpu, MessageSquare, Zap, Settings2, Brain
 } from 'lucide-react'
 
 const GlassInput = ({ icon: Icon, placeholder, value, onChange, type = "text", disabled = false, trailing = null, className = '', ...props }) => (
@@ -2053,56 +2053,103 @@ export default function EmbeddingSettings({ isOpen, onClose, onExitComplete }) {
                                 transition={{ type: 'spring', stiffness: 320, damping: 24 }}
                                 className="overflow-hidden"
                               >
-                                <div className="p-2 pt-0 space-y-1">
-                                  {list.map(model => (
-                                      <div key={model.id} className={`bg-white/80 hover:bg-white rounded-[16px] p-2.5 flex items-center justify-between ${lastAddedModelKey === `${model.providerId}:${model.id}` ? 'ring-1 ring-green-300' : ''} cursor-pointer transition-colors group`}>
-                                        <div className="flex items-center space-x-2.5 overflow-hidden min-w-0 flex-1">
-                                          <div className="w-8 h-8 rounded-[12px] bg-[#faf9f7] flex items-center justify-center shrink-0 ring-1 ring-black/[0.04]">
-                                            <ProviderAvatar providerId={getIconProviderId(model)} size={20} />
-                                          </div>
-                                          <div className="flex flex-col flex-1 min-w-0 py-0.5">
-                                            <div className="flex flex-wrap items-center gap-1.5 mb-1">
-                                              {/* 不用 break-words：长模型名会在词内断开，把 "v2" 这类尾巴孤立到下一行。 */}
-                                              <h4 className="text-[13px] font-bold text-gray-800 text-pretty line-clamp-2 leading-snug" title={model.name || model.id}>{model.name || model.id}</h4>
-                                              {model.tags?.map(tag => (
-                                                <span key={tag} className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-gray-100 text-gray-500 border border-gray-200/70">
-                                                  {TAG_LABELS[tag] || tag}
-                                                </span>
-                                              ))}
-                                              {model.metadata?.dimension && (
-                                                <span className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-amber-50 text-amber-600 border border-amber-100">
-                                                  {model.metadata.dimension}维
+                                <div className="space-y-1.5 px-1.5 pb-1.5">
+                                  {list.map(model => {
+                                    const isDefault = isDefaultModel(model.type, model.id)
+                                    const tags = new Set(model.tags || [])
+                                    const isRecentlyAdded = lastAddedModelKey === `${model.providerId}:${model.id}`
+
+                                    return (
+                                      <div
+                                        key={model.id}
+                                        className={`group flex min-h-[54px] items-center gap-2.5 rounded-[14px] bg-white px-2.5 py-2 transition-[background-color,box-shadow,transform] duration-200 ${
+                                          isRecentlyAdded
+                                            ? 'bg-green-50/70 ring-1 ring-green-200'
+                                            : 'hover:-translate-y-px hover:bg-[#fffdfa] hover:shadow-[0_5px_14px_rgba(80,58,42,0.08)]'
+                                        }`}
+                                      >
+                                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[11px] bg-[#faf9f7] ring-1 ring-black/[0.04]">
+                                          <ProviderAvatar providerId={getIconProviderId(model)} size={19} />
+                                        </div>
+
+                                        <div className="min-w-0 flex-1">
+                                          <div className="flex min-w-0 items-center gap-1.5">
+                                            <h4
+                                              className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-5 text-gray-800"
+                                              title={model.name || model.id}
+                                            >
+                                              {model.name || model.id}
+                                            </h4>
+                                            {isDefault && (
+                                              <span className="shrink-0 rounded-full bg-[#f5eee8] px-1.5 py-0.5 text-[9px] font-semibold leading-none text-[#9a6b56]">
+                                                默认
+                                              </span>
+                                            )}
+                                            <span className="flex shrink-0 items-center gap-0.5 text-gray-400">
+                                              {tags.has('vision') && (
+                                                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#f4f5f5]" title="支持视觉输入" aria-label="支持视觉输入">
+                                                  <Eye size={11} strokeWidth={2.1} />
                                                 </span>
                                               )}
-                                            </div>
-                                            <div className="flex items-start gap-1.5 mt-0.5">
-                                               {isDefaultModel(model.type, model.id) && <span className="text-[10px] bg-[#FFA07A]/10 text-[#B85F47] px-1.5 py-0.5 rounded-sm font-bold shrink-0 mt-px">默认</span>}
-                                               {/* ID 是次要信息：单行省略号比 break-all 的逐字符断行可读得多，完整值在 title 里。 */}
-                                               <p className="min-w-0 flex-1 truncate text-[11px] font-medium text-gray-400" title={model.id}>{model.id}</p>
-                                            </div>
+                                              {tags.has('reasoning') && (
+                                                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#f4f5f5]" title="支持思考模式" aria-label="支持思考模式">
+                                                  <Brain size={11} strokeWidth={2.1} />
+                                                </span>
+                                              )}
+                                              {tags.has('latest') && (
+                                                <span className="rounded-full bg-[#fbf0e9] px-1.5 py-0.5 text-[9px] font-semibold leading-none text-[#a66b51]" title="当前推荐模型">
+                                                  最新
+                                                </span>
+                                              )}
+                                            </span>
+                                          </div>
+                                          <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+                                            <p className="min-w-0 flex-1 truncate text-[10.5px] font-medium leading-4 text-gray-400" title={model.id}>
+                                              {model.id}
+                                            </p>
+                                            {model.metadata?.dimension && (
+                                              <span className="shrink-0 text-[9px] font-medium text-gray-400" title="向量维度">
+                                                {model.metadata.dimension}维
+                                              </span>
+                                            )}
                                           </div>
                                         </div>
-                                        <div className="flex shrink-0 items-center gap-1.5 ml-2">
-                                            {!isDefaultModel(model.type, model.id) && (
-                                              <button
-                                                type="button"
-                                                onClick={(e) => { e.stopPropagation(); handleSetDefault(model.type, model.id); }}
-                                                className="inline-flex items-center gap-1 rounded-full bg-[#F3EDE8] px-2.5 py-1 text-[11px] font-medium text-[#5c564f] transition-colors hover:bg-[#ece6df] hover:text-[#3f3a35]"
-                                                title="设为默认模型"
-                                                aria-label={`将 ${model.name || model.id} 设为默认模型`}
-                                              >
-                                                <CheckCircle2 size={13} strokeWidth={2.1} />
-                                                设为默认
-                                              </button>
-                                            )}
-                                            {model.isUserAdded && (
-                                              <button onClick={(e) => { e.stopPropagation(); removeModelFromCollection(model.id, model.providerId); }} className="p-1.5 text-gray-400 hover:text-red-500 rounded-md hover:bg-red-50 opacity-0 transition-opacity group-hover:opacity-100" title="删除">
-                                                <Trash2 size={16} />
-                                              </button>
-                                            )}
+
+                                        <div className="flex shrink-0 items-center gap-0.5">
+                                          {isDefault ? (
+                                            <span
+                                              className="flex h-7 w-7 items-center justify-center rounded-full bg-[#f5eee8] text-[#a66b51]"
+                                              title="当前默认模型"
+                                              aria-label="当前默认模型"
+                                            >
+                                              <CheckCircle2 size={15} strokeWidth={2.1} />
+                                            </span>
+                                          ) : (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => { e.stopPropagation(); handleSetDefault(model.type, model.id); }}
+                                              className="flex h-7 w-7 items-center justify-center rounded-full text-gray-400 transition-[background-color,color,transform] duration-200 hover:bg-[#f5eee8] hover:text-[#9a6b56] active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#d9b9a8]/60"
+                                              title="设为默认模型"
+                                              aria-label={`将 ${model.name || model.id} 设为默认模型`}
+                                            >
+                                              <CheckCircle2 size={15} strokeWidth={2.1} />
+                                            </button>
+                                          )}
+                                          {model.isUserAdded && (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => { e.stopPropagation(); removeModelFromCollection(model.id, model.providerId); }}
+                                              className="flex h-7 w-7 items-center justify-center rounded-full text-gray-300 opacity-0 transition-[background-color,color,opacity] duration-200 group-hover:opacity-100 hover:bg-red-50 hover:text-red-500 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-200"
+                                              title="删除模型"
+                                              aria-label={`删除 ${model.name || model.id}`}
+                                            >
+                                              <Trash2 size={14} />
+                                            </button>
+                                          )}
                                         </div>
                                       </div>
-                                  ))}
+                                    )
+                                  })}
                                 </div>
                               </motion.div>
                             )}

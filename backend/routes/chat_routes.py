@@ -116,6 +116,7 @@ from services.table_visual_verifier import maybe_verify_numeric_table_visual
 from services.visual_document_enrichment_service import enrich_referenced_figure
 from services.visual_model_service import resolve_visual_enrichment_policy
 from services.visual_supplement_service import committed_visual_evidence_for_document
+from services.rerank_service import validate_rerank_configuration
 from services.block_index_service import active_block_index_revision, load_block_index
 from services.reading_outline_service import get_or_create_reading_outline, save_reading_outline
 from services.full_document_summary_service import build_full_document_summary
@@ -3720,12 +3721,16 @@ class ChatVisionRequest(BaseModel):
 
 
 def _validate_rerank_request(req):
-    provider = getattr(req, "rerank_provider", None)
-    api_key = getattr(req, "rerank_api_key", None)
-    use_rerank = getattr(req, "use_rerank", False)
-    cloud_providers = {"cohere", "jina", "silicon", "aliyun", "openai", "moonshot", "deepseek", "zhipu", "minimax"}
-    if use_rerank and provider and provider.lower() in cloud_providers and not api_key:
-        raise HTTPException(status_code=400, detail=f"使用 {provider} rerank 需要提供 rerank_api_key")
+    try:
+        validate_rerank_configuration(
+            use_rerank=bool(getattr(req, "use_rerank", False)),
+            model_name=getattr(req, "reranker_model", None),
+            provider=getattr(req, "rerank_provider", None),
+            api_key=getattr(req, "rerank_api_key", None),
+            endpoint=getattr(req, "rerank_endpoint", None),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # 触发智能 rerank 默认开启的 evidence_need 集合
@@ -3750,9 +3755,9 @@ def _auto_enable_rerank_if_beneficial(request, evidence_need: list, query_type: 
         return False
     # Windows 的 FAISS 与 Torch wheel 使用不同 OpenMP 运行库。本地
     # CrossEncoder 会让整个流式后端直接退出，自动策略必须先做运行时围栏。
-    from services.rerank_service import is_local_rerank_runtime_supported
+    from services.rerank_service import is_local_rerank_available
 
-    if not is_local_rerank_runtime_supported():
+    if not is_local_rerank_available():
         return False
     need_set = {str(e).lower() for e in (evidence_need or [])}
     qt = (query_type or "").lower()
@@ -13359,6 +13364,8 @@ def _safe_retrieval_error_contract(
     if not re.fullmatch(r"[a-z0-9_]{3,80}", raw_code):
         raw_code = ""
     error_text = str(error or "").casefold()
+    if raw_code in {"rerank_unavailable", "local_rerank_unavailable", "rerank_request_failed"} or "重排模型" in error_text:
+        return "rerank_unavailable", "重排模型暂不可用，已保留混合检索原排序"
     if raw_code in {"vector_search_timeout", "vector_context_timeout"} or any(
         marker in error_text for marker in ("timeout", "timed out", "超时")
     ):
@@ -13383,7 +13390,11 @@ def _mark_retrieval_degraded(
     retrieval_meta["degraded"] = True
     retrieval_meta["error"] = safe_error
     retrieval_meta["error_code"] = safe_code
-    retrieval_meta["fallback_reason"] = str(fallback_reason or "document_text_after_vector_failure")
+    retrieval_meta["fallback_reason"] = (
+        "rerank_unavailable"
+        if safe_code == "rerank_unavailable"
+        else str(fallback_reason or "document_text_after_vector_failure")
+    )
     retrieval_meta["fallback_used"] = True
 
 
@@ -17129,6 +17140,10 @@ async def _retry_generation_after_stream_error(
 @router.post("/chat")
 async def chat_with_pdf(request: ChatRequest):
     _validate_chat_request_limits(request)
+    # Fail fast for an explicitly enabled but incomplete rerank config. The
+    # optional feature must never spend a full retrieval turn before reporting
+    # that its credentials are missing.
+    _validate_rerank_request(request)
     with request_override_scope(
         numeric_table=request.override_numeric_table,
         answer_critic=request.override_answer_critic,
@@ -18515,6 +18530,7 @@ async def _chat_with_pdf_impl(request: ChatRequest):
 @router.post("/chat/stream")
 async def chat_with_pdf_stream(request: ChatRequest):
     _validate_chat_request_limits(request)
+    _validate_rerank_request(request)
     if not hasattr(router, "documents_store"):
         raise HTTPException(status_code=500, detail="文档存储未初始化")
     store = _chat_document_store(request)

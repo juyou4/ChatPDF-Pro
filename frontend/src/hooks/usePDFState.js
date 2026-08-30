@@ -119,6 +119,8 @@ export function usePDFState({
         message = '当前默认模型不是 Embedding 类型，请切换后再搜索';
       } else if (embeddingConfig?.reason === 'provider_missing') {
         message = '当前默认 Embedding Provider 不存在，请在模型服务中重新配置';
+      } else if (embeddingConfig?.reason === 'provider_disabled') {
+        message = '当前默认 Embedding Provider 已停用，请重新启用或切换模型';
       }
       return {
         isValid: false,
@@ -130,11 +132,19 @@ export function usePDFState({
     const providerId = String(embeddingConfig.providerId || '').trim();
     const provider = embeddingConfig.provider || null;
     const providerApiKey = String(provider?.apiKey || '').trim();
+    const providerApiHost = String(provider?.apiHost || '').trim();
     if (!isKeylessLocalProvider(providerId) && !providerApiKey) {
       return {
         isValid: false,
         errorCode: 'embedding_api_key_missing',
         errorMessage: `请先为 ${provider?.name || providerId} 配置 Embedding API Key`,
+      };
+    }
+    if (providerId !== 'local' && !providerApiHost) {
+      return {
+        isValid: false,
+        errorCode: 'embedding_api_host_missing',
+        errorMessage: `请先为 ${provider?.name || providerId} 配置 Embedding API 地址`,
       };
     }
 
@@ -143,7 +153,7 @@ export function usePDFState({
       apiKey: providerApiKey || null,
       embeddingModel: embeddingConfig.compositeKey || '',
       embeddingProvider: providerId || null,
-      embeddingApiHost: String(provider?.apiHost || '').trim() || null,
+      embeddingApiHost: providerApiHost || null,
     };
   }, [getEmbeddingConfig]);
 
@@ -163,10 +173,9 @@ export function usePDFState({
     const rerankConfig = getRerankCredentials();
     if (!rerankConfig) {
       return {
-        isValid: false,
-        enabled: true,
-        errorCode: 'rerank_model_missing',
-        errorMessage: '请先选择可用的 Rerank 模型后再搜索',
+        isValid: true,
+        enabled: false,
+        reason: 'rerank_not_configured',
       };
     }
     if (rerankConfig.isValid === false) {
@@ -325,6 +334,7 @@ export function usePDFState({
     }
 
     const {
+      enabled: rerankEnabled,
       providerId: rp,
       modelId: rm,
       apiKey: rk,
@@ -347,11 +357,11 @@ export function usePDFState({
           embedding_api_key: searchEmbeddingRequest.apiKey,
           top_k: 5,
           candidate_k: 20,
-          use_rerank: useRerank,
-          reranker_model: useRerank ? (rm || rerankerModel) : undefined,
-          rerank_provider: useRerank ? rp : undefined,
-          rerank_api_key: useRerank ? rk : undefined,
-          rerank_endpoint: useRerank ? rerankEndpoint : undefined,
+          use_rerank: rerankEnabled === true,
+          reranker_model: rerankEnabled === true ? (rm || rerankerModel) : undefined,
+          rerank_provider: rerankEnabled === true ? rp : undefined,
+          rerank_api_key: rerankEnabled === true ? rk : undefined,
+          rerank_endpoint: rerankEnabled === true ? rerankEndpoint : undefined,
           embedding_model: searchEmbeddingRequest.embeddingModel,
           embedding_provider: searchEmbeddingRequest.embeddingProvider,
           embedding_api_host: searchEmbeddingRequest.embeddingApiHost,

@@ -99,10 +99,11 @@ export function detectModelTags(modelId: string, modelType?: ModelType): string[
         /gemini/.test(id) ||
         /grok-[34]/.test(id) ||
         /grok-build/.test(id) ||
+        /glm-5\.3-flash/.test(id) ||
         /kimi-(latest|k2|k3)/.test(id) ||
         /doubao-seed/.test(id) ||
         /moonshot-v1/.test(id) ||
-        /qwen3\.[567]/.test(id) ||
+        /qwen3\.[5678]/.test(id) ||
         /minimax-m3/.test(id) ||
         /^mimo-v2\.5$/.test(id)
     if (hasVision) tags.push('vision')

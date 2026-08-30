@@ -3,10 +3,17 @@
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$BASE_DIR" || exit 1
 
-APP_VERSION="$(grep -E '"version"' version.json 2>/dev/null | head -1 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
-if [ -z "$APP_VERSION" ]; then
-    APP_VERSION="unknown"
-fi
+# 禁止 Git 在启动过程中等待交互式凭据输入；网络异常应尽快反馈并继续使用当前代码。
+export GIT_TERMINAL_PROMPT=0
+
+read_app_version() {
+    APP_VERSION="$(grep -E '"version"' version.json 2>/dev/null | head -1 | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')"
+    if [ -z "$APP_VERSION" ]; then
+        APP_VERSION="unknown"
+    fi
+}
+
+read_app_version
 
 # 颜色和样式定义；NO_COLOR 可用于关闭 ANSI 颜色。
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -143,6 +150,173 @@ kill_port() {
     done
 }
 
+update_from_origin() {
+    show_progress "检查代码更新"
+
+    if [ "${CHATPDF_SKIP_UPDATE:-0}" = "1" ]; then
+        show_info "已通过 CHATPDF_SKIP_UPDATE=1 跳过更新检查"
+        return 0
+    fi
+    if ! command_exists git || ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        show_info "当前目录不是 Git 工作区，跳过自动更新"
+        return 0
+    fi
+
+    local current_branch
+    current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [ "$current_branch" != "main" ]; then
+        if [ -n "$current_branch" ]; then
+            show_info "当前在分支 $current_branch（仅 main 自动更新）"
+        else
+            show_info "无法识别当前分支，跳过自动更新"
+        fi
+        return 0
+    fi
+
+    # 只更新远端跟踪引用，不会覆盖本地改动；这样即使工作树脏，也能告诉用户远端落后多少提交。
+    local fetch_output="" fetched=0 attempt
+    for attempt in 1 2; do
+        if fetch_output="$(git -c http.connectTimeout=10 -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 fetch --prune origin main 2>&1)"; then
+            fetched=1
+            break
+        fi
+        if [ "$attempt" -lt 2 ]; then
+            show_info "上游更新连接失败，2 秒后重试（$attempt/2）"
+            sleep 2
+        fi
+    done
+    if [ "$fetched" != "1" ]; then
+        show_info "无法检查上游更新，将继续使用当前版本"
+        [ -n "$fetch_output" ] && printf "     ${YELLOW}Git${NC}  %s\n" "$fetch_output"
+        return 0
+    fi
+
+    local divergence local_only remote_only
+    divergence="$(git rev-list --left-right --count HEAD...origin/main 2>/dev/null || true)"
+    local_only=0
+    remote_only=0
+    if [ -n "$divergence" ]; then
+        read -r local_only remote_only <<<"${divergence//$'\t'/ }"
+    fi
+    if [[ ! "$local_only" =~ ^[0-9]+$ || ! "$remote_only" =~ ^[0-9]+$ ]]; then
+        show_info "无法比较本地与 origin/main 的提交，跳过自动合并"
+        return 0
+    fi
+
+    local current_sha remote_sha
+    current_sha="$(git rev-parse --short HEAD 2>/dev/null || true)"
+    remote_sha="$(git rev-parse --short origin/main 2>/dev/null || true)"
+
+    if [ "$remote_only" -eq 0 ] && [ "$local_only" -eq 0 ]; then
+        show_success "代码已是最新（$current_sha）"
+        return 0
+    fi
+
+    local working_tree
+    working_tree="$(git status --porcelain=v1 --untracked-files=normal 2>/dev/null || true)"
+    if [ "$remote_only" -gt 0 ] && [ "$local_only" -eq 0 ]; then
+        if [ -n "$working_tree" ]; then
+            show_info "上游有 $remote_only 个新提交（$remote_sha），本地有未提交改动，已跳过合并"
+            return 0
+        fi
+
+        local merge_output=""
+        if merge_output="$(git merge --ff-only origin/main 2>&1)"; then
+            read_app_version
+            current_sha="$(git rev-parse --short HEAD 2>/dev/null || true)"
+            show_success "代码已更新到 origin/main（$current_sha）"
+        else
+            show_info "自动合并失败，将继续使用当前版本（本地 $current_sha，远端 $remote_sha）"
+            [ -n "$merge_output" ] && printf "     ${YELLOW}Git${NC}  %s\n" "$merge_output"
+        fi
+        return 0
+    fi
+
+    if [ "$local_only" -gt 0 ] && [ "$remote_only" -eq 0 ]; then
+        show_info "本地版本领先 origin/main $local_only 个提交，跳过自动覆盖（$current_sha）"
+    else
+        show_info "本地与 origin/main 已分叉（本地 +$local_only，远端 +$remote_only），跳过自动合并"
+    fi
+}
+
+dependency_fingerprint() {
+    "$PYTHON_CMD" "$BASE_DIR/scripts/startup_dependency_fingerprint.py" --group "$1" 2>/dev/null || true
+}
+
+read_dependency_stamp() {
+    local stamp_path="$1" value=""
+    if [ -f "$stamp_path" ]; then
+        IFS= read -r value < "$stamp_path" || true
+    fi
+    printf '%s' "$value"
+}
+
+write_dependency_stamp() {
+    local stamp_path="$1" fingerprint="$2"
+    mkdir -p "$BASE_DIR/data"
+    if ! printf '%s\n' "$fingerprint" >"$stamp_path" 2>/dev/null; then
+        show_info "无法写入依赖指纹，下次启动会再次校验依赖"
+    fi
+}
+
+sync_python_dependencies() {
+    local fingerprint stored stamp_path need_sync=0
+    stamp_path="$BASE_DIR/data/.startup-python-deps.sha256"
+    fingerprint="$(dependency_fingerprint python)"
+    stored="$(read_dependency_stamp "$stamp_path")"
+    if [ -z "$fingerprint" ] || [ "$fingerprint" != "$stored" ]; then
+        need_sync=1
+    fi
+    if ! "$PYTHON_CMD" -c "import importlib.util as u,sys; names=('fastapi','uvicorn','fitz','pdfplumber','faiss','langchain','openai','sentence_transformers'); sys.exit(0 if all(u.find_spec(n) for n in names) else 1)" >/dev/null 2>&1; then
+        need_sync=1
+    fi
+
+    if [ "$need_sync" = "1" ]; then
+        show_info "后端依赖清单有变化或尚未安装，正在同步 requirements-core.txt"
+        if ! "$PYTHON_CMD" -m pip install --disable-pip-version-check -q -r backend/requirements-core.txt; then
+            show_error "基础运行时安装失败，请检查 Python、网络或 requirements-core.txt"
+            return 1
+        fi
+        [ -n "$fingerprint" ] && write_dependency_stamp "$stamp_path" "$fingerprint"
+    fi
+    return 0
+}
+
+sync_frontend_dependencies() {
+    local fingerprint stored stamp_path need_sync=0
+    stamp_path="$BASE_DIR/data/.startup-frontend-deps.sha256"
+    fingerprint="$(dependency_fingerprint frontend)"
+    stored="$(read_dependency_stamp "$stamp_path")"
+    if [ -z "$fingerprint" ] || [ "$fingerprint" != "$stored" ]; then
+        need_sync=1
+    fi
+    if [ ! -x "frontend/node_modules/.bin/vite" ] || [ ! -d "frontend/node_modules/rehype-raw" ]; then
+        need_sync=1
+    fi
+
+    if [ "$need_sync" = "1" ]; then
+        if [ -f "frontend/package-lock.json" ]; then
+            show_info "前端依赖清单有变化或尚未安装，正在按 package-lock.json 同步"
+            if ! (cd frontend && npm ci --silent); then
+                show_error "前端依赖安装失败，请检查 Node.js、npm 和网络"
+                return 1
+            fi
+        else
+            show_info "未找到 package-lock.json，正在安装前端依赖"
+            if ! (cd frontend && npm install --silent); then
+                show_error "前端依赖安装失败，请检查 Node.js、npm 和网络"
+                return 1
+            fi
+        fi
+        if [ ! -x "frontend/node_modules/.bin/vite" ] || [ ! -d "frontend/node_modules/rehype-raw" ]; then
+            show_error "前端依赖安装后仍缺少 Vite 或 rehype-raw"
+            return 1
+        fi
+        [ -n "$fingerprint" ] && write_dependency_stamp "$stamp_path" "$fingerprint"
+    fi
+    return 0
+}
+
 CLEANED_UP=0
 cleanup_services() {
     if [ "$CLEANED_UP" = "1" ]; then
@@ -152,33 +326,18 @@ cleanup_services() {
     if [ -n "${BACKEND_PID:-}" ] && ps -p "$BACKEND_PID" >/dev/null 2>&1; then
         kill "$BACKEND_PID" 2>/dev/null || true
     fi
-    rm -f "$BASE_DIR/backend.pid"
+    # 兼容旧版本残留的根目录 PID 文件，并将新文件固定放在被忽略的 data/ 下。
+    rm -f "$BASE_DIR/backend.pid" "${BACKEND_PID_FILE:-$BASE_DIR/data/.backend.pid}"
     for port in 3000 8000 8001 8002 8003 8004 8005; do
         kill_port "$port"
     done
 }
 
 # ==================== 自动更新 ====================
-show_progress "检查代码更新"
-CURRENT_BRANCH=""
-if command_exists git && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-    if [ "$CURRENT_BRANCH" = "main" ]; then
-        if [ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]; then
-            show_info "检测到本地代码改动，为避免覆盖已跳过自动更新"
-        elif git pull --ff-only origin main >/dev/null 2>&1; then
-            show_success "代码已更新到 main 最新版本"
-        else
-            show_info "自动更新未完成，将继续使用当前版本"
-        fi
-    elif [ -n "$CURRENT_BRANCH" ]; then
-        show_info "当前在分支 $CURRENT_BRANCH（仅 main 自动更新）"
-    else
-        show_info "无法识别当前分支，跳过自动更新"
-    fi
-else
-    show_info "当前目录不是 Git 工作区，跳过自动更新"
-fi
+update_from_origin
+# git merge 可能刚刚更新了 version.json；重新读取，避免标题落后一轮。
+read_app_version
+show_info "当前代码版本 v$APP_VERSION"
 
 # ==================== 环境检查 ====================
 show_progress "检查运行环境"
@@ -218,36 +377,14 @@ show_success "旧服务端口已释放"
 
 # ==================== 基础运行时 ====================
 show_progress "检查基础运行时"
-if ! "$PYTHON_CMD" -c "import importlib.util as u,sys; names=('fastapi','uvicorn','fitz','pdfplumber','faiss','langchain','openai','sentence_transformers'); sys.exit(0 if all(u.find_spec(n) for n in names) else 1)" >/dev/null 2>&1; then
-    show_info "首次运行，正在安装基础运行时"
-    if ! "$PYTHON_CMD" -m pip install -q -r backend/requirements-core.txt; then
-        show_error "基础运行时安装失败，请检查 Python、网络或 requirements-core.txt"
-        exit 1
-    fi
+if ! sync_python_dependencies; then
+    exit 1
 fi
 show_success "基础运行时已就绪"
 show_info "本地解析组件将在选择本地路线时按需准备"
 
-# 只看 node_modules 目录不够：半残安装会留下包、丢掉 .bin，随后 npm run dev 找不到 vite。
-if [ ! -x "frontend/node_modules/.bin/vite" ]; then
-    if [ -d "frontend/node_modules" ]; then
-        show_info "前端命令入口缺失，正在重装依赖"
-    else
-        show_info "首次运行，正在安装前端依赖（约 1-2 分钟）"
-    fi
-    if ! (cd frontend && npm install --silent >/dev/null 2>&1); then
-        show_error "前端依赖安装失败，请检查 Node.js、npm 和网络"
-        exit 1
-    fi
-fi
-if [ ! -d "frontend/node_modules/rehype-raw" ]; then
-    if ! (cd frontend && npm install rehype-raw --silent >/dev/null 2>&1); then
-        show_error "rehype-raw 安装失败，请检查 npm 和网络"
-        exit 1
-    fi
-fi
-if [ ! -x "frontend/node_modules/.bin/vite" ]; then
-    show_error "前端依赖安装失败，请检查 Node.js、npm 和网络"
+# package.json/package-lock.json 变更时才重建前端依赖，避免每次启动都重新安装。
+if ! sync_frontend_dependencies; then
     exit 1
 fi
 show_success "前端依赖已就绪"
@@ -258,7 +395,8 @@ mkdir -p "$BASE_DIR/data/logs"
 BACKEND_LOG="$BASE_DIR/data/logs/backend_startup.log"
 nohup "$PYTHON_CMD" backend/app.py >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
-echo "$BACKEND_PID" > "$BASE_DIR/backend.pid"
+BACKEND_PID_FILE="$BASE_DIR/data/.backend.pid"
+echo "$BACKEND_PID" > "$BACKEND_PID_FILE"
 trap cleanup_services EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM

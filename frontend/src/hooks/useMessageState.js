@@ -1121,6 +1121,8 @@ export const finalizeThinkingDurationMs = ({
  * @param {Function} options.getProviderById - 根据 ID 获取 provider
  * @param {string} options.streamSpeed - 流式输出速度设置
  * @param {boolean} options.enableVectorSearch - 是否启用向量搜索
+ * @param {boolean} options.useRerank - 是否在配置可用时启用重排
+ * @param {Function} options.getRerankCredentials - 获取当前重排模型与凭证
  * @param {boolean} options.enableBlurReveal - 是否启用 Blur Reveal 动画
  * @param {string} options.blurIntensity - Blur Reveal 强度（light|medium|strong）
  * @param {Object} options.globalSettings - 全局设置（来自 useGlobalSettings）
@@ -1141,6 +1143,9 @@ export function useMessageState({
   enableVectorSearch = false,
   embeddingApiKey = '',
   getEmbeddingConfig,
+  useRerank = false,
+  rerankerModel = '',
+  getRerankCredentials,
   enableGraphRAG = false,
   enableAgentRetrieval = false,
   forceAgentRetrieval = false,
@@ -1488,16 +1493,39 @@ export function useMessageState({
     const currentInput = overrideInput ?? textareaRef.current?.value ?? '';
     if (!currentInput.trim() && screenshots.length === 0) return;
 
-    const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = getChatCredentials?.() || {};
+    const chatCredentials = getChatCredentials?.() || {};
+    const { providerId: chatProvider, modelId: chatModel, apiKey: chatApiKey } = chatCredentials;
     const visualCredentials = getVisualCredentials?.() || null;
     if (!docId) { alert('请先上传文档'); return; }
     if (!parseIdentityReady) {
       alert('正在同步文档解析状态，请稍后再试');
       return;
     }
+    if (chatCredentials.isValid === false) {
+      alert(chatCredentials.errorMessage || '当前对话模型配置无效，请在模型服务中重新选择');
+      return;
+    }
     if (!chatApiKey && chatProvider !== 'ollama' && chatProvider !== 'local') {
       alert('请先配置API Key\n\n请点击左下角"设置 & API Key"按钮进行配置');
       return;
+    }
+
+    let activeRerankConfig = null;
+    if (useRerank) {
+      if (typeof getRerankCredentials !== 'function') {
+        alert('当前页面未接入 Rerank 配置，请刷新后重试');
+        return;
+      }
+      const resolvedRerank = getRerankCredentials();
+      // Rerank 是可选能力：完全未选择模型时正常关闭；已经选择但配置
+      // 残缺时则明确阻止，避免界面显示“已启用”而后端静默降级。
+      if (resolvedRerank?.isValid === false) {
+        alert(resolvedRerank.errorMessage || '当前 Rerank 配置无效，请重新检查');
+        return;
+      }
+      if (resolvedRerank?.isValid === true) {
+        activeRerankConfig = resolvedRerank;
+      }
     }
 
     // Companion documents are always explicit user choices. Keep the current
@@ -1671,6 +1699,11 @@ export function useMessageState({
       embedding_model: embeddingModelId || null,
       embedding_provider: embeddingProviderId || null,
       embedding_api_host: embeddingApiHost || null,
+      use_rerank: Boolean(activeRerankConfig),
+      reranker_model: activeRerankConfig ? (activeRerankConfig.modelId || rerankerModel || null) : null,
+      rerank_provider: activeRerankConfig?.providerId || null,
+      rerank_api_key: activeRerankConfig?.apiKey || null,
+      rerank_endpoint: activeRerankConfig?.rerankEndpoint || null,
       enable_graphrag: enableGraphRAG,
       enable_agent_retrieval: isMultiDocumentRequest ? false : enableAgentRetrieval,
       force_agent_retrieval: isMultiDocumentRequest ? false : forceAgentRetrieval,
@@ -2725,6 +2758,7 @@ export function useMessageState({
     reasoningEffort, answerDetailLevel, enableMemory, memoryTopK, memoryInjectionBudget, memoryPrivacyMode,
     webSearchMode, enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist,
     webSearchIncludeDocumentContext, embeddingApiKey, getEmbeddingConfig,
+    useRerank, rerankerModel, getRerankCredentials,
     streamRenderProfile, shouldUseStreaming,
     overrideNumericTable, overrideAnswerCritic, overrideAnswerClaimVerifier, overrideLLMQueryRewrite, overrideBM25Synonyms,
     numericTableVisualVerification, cheapModel, cheapModelProvider, cheapModelEndpoint,

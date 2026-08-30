@@ -485,6 +485,40 @@ export function useDocumentState({
   const handleFileUpload = useCallback(async (event, options = {}) => {
     const file = event.target.files[0];
     if (!file) return;
+    // 获取 embedding 配置（直接从 DefaultsContext 读取 compositeKey，不依赖 ModelContext）
+    const embeddingConfig = getEmbeddingConfig?.();
+    if (!embeddingConfig || embeddingConfig.isValid === false) {
+      let reasonHint = '请先在设置中选择可用的 Embedding 模型并配置 API Key。';
+      if (embeddingConfig?.reason === 'model_not_found') {
+        reasonHint = `当前默认 Embedding 模型不存在或已下线：${embeddingConfig.providerId || ''}:${embeddingConfig.modelId || ''}。\n请重新选择可用的 Embedding 模型。`;
+      } else if (embeddingConfig?.reason === 'wrong_type') {
+        reasonHint = `当前默认模型类型是 ${embeddingConfig.modelType || 'unknown'}，不是 Embedding。\n请切换到 Embedding 模型后再上传。`;
+      } else if (embeddingConfig?.reason === 'provider_missing') {
+        reasonHint = `当前默认模型对应的 Provider 不存在：${embeddingConfig.providerId || 'unknown'}。\n请在模型服务中重新配置。`;
+      } else if (embeddingConfig?.reason === 'provider_disabled') {
+        reasonHint = `当前默认 Embedding Provider 已停用：${embeddingConfig.provider?.name || embeddingConfig.providerId || 'unknown'}。\n请重新启用或切换模型。`;
+      }
+      alert(`${reasonHint}\n\n路径：设置中心 → 常用 → 模型服务 → EMBEDDING`);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
+    const embeddingProviderId = String(embeddingConfig.providerId || '').trim();
+    const embeddingApiHost = String(embeddingConfig.provider?.apiHost || '').trim();
+    if (!isKeylessLocalProvider(embeddingProviderId)) {
+      const embeddingApiKey = String(embeddingConfig.provider?.apiKey || '').trim();
+      if (!embeddingApiKey) {
+        alert(`请先为 ${embeddingConfig.provider?.name || embeddingConfig.providerId} 配置 API Key`);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        return;
+      }
+    }
+    if (embeddingProviderId !== 'local' && !embeddingApiHost) {
+      alert(`请先为 ${embeddingConfig.provider?.name || embeddingConfig.providerId} 配置 Embedding API 地址`);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
+
     const uploadEpoch = ++uploadEpochRef.current;
     if (uploadResetTimerRef.current) {
       window.clearTimeout(uploadResetTimerRef.current);
@@ -499,43 +533,16 @@ export function useDocumentState({
       size: Number(file.size) || 0,
     });
     clearUploadProcessingTimer();
-    // 同一 PDF 重传会复用 docId，必须在上传开始时丢弃旧解析代际的速览结果。
+    // 同一 PDF 重传会复用 docId，只有配置完整、上传真正开始时才能
+    // 失效旧缓存；配置错误不能破坏当前会话的可用状态。
     invalidateOverviewEpoch(docId, { clearDocumentCache: Boolean(docId) });
 
     const formData = new FormData();
     formData.append('file', file);
-
-    // 获取 embedding 配置（直接从 DefaultsContext 读取 compositeKey，不依赖 ModelContext）
-    const embeddingConfig = getEmbeddingConfig?.();
-    if (!embeddingConfig || embeddingConfig.isValid === false) {
-      let reasonHint = '请先在设置中选择可用的 Embedding 模型并配置 API Key。';
-      if (embeddingConfig?.reason === 'model_not_found') {
-        reasonHint = `当前默认 Embedding 模型不存在或已下线：${embeddingConfig.providerId || ''}:${embeddingConfig.modelId || ''}。\n请重新选择可用的 Embedding 模型。`;
-      } else if (embeddingConfig?.reason === 'wrong_type') {
-        reasonHint = `当前默认模型类型是 ${embeddingConfig.modelType || 'unknown'}，不是 Embedding。\n请切换到 Embedding 模型后再上传。`;
-      } else if (embeddingConfig?.reason === 'provider_missing') {
-        reasonHint = `当前默认模型对应的 Provider 不存在：${embeddingConfig.providerId || 'unknown'}。\n请在模型服务中重新配置。`;
-      }
-      alert(`${reasonHint}\n\n路径：设置中心 → 常用 → 模型服务 → EMBEDDING`);
-      setIsUploading(false);
-      setUploadFileInfo(null);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      return;
-    }
-
     formData.append('embedding_model', embeddingConfig.compositeKey);
     formData.append('embedding_provider', embeddingConfig.providerId || '');
-    const embeddingProviderId = String(embeddingConfig.providerId || '').trim();
-    const embeddingApiHost = String(embeddingConfig.provider?.apiHost || '').trim();
     if (!isKeylessLocalProvider(embeddingProviderId)) {
-      if (!embeddingConfig.provider?.apiKey) {
-        alert(`请先为 ${embeddingConfig.provider?.name || embeddingConfig.providerId} 配置 API Key`);
-        setIsUploading(false);
-        setUploadFileInfo(null);
-        if (fileInputRef.current) fileInputRef.current.value = '';
-        return;
-      }
-      formData.append('embedding_api_key', embeddingConfig.provider.apiKey);
+      formData.append('embedding_api_key', String(embeddingConfig.provider.apiKey || '').trim());
     }
     if (embeddingApiHost) {
       formData.append('embedding_api_host', embeddingApiHost);
@@ -907,6 +914,10 @@ export function useDocumentState({
     const visualApiKey = visualCredentials?.apiKey || '';
     const visualProviderFull = useDedicatedVisualModel ? getProviderById?.(visualProvider) : null;
 
+    if (chatCredentials?.isValid === false) {
+      setOverviewError(chatCredentials.errorMessage || '当前对话模型配置无效，请在模型服务中重新选择');
+      return;
+    }
     if (getChatCredentials && !chatApiKey && chatProvider !== 'local' && chatProvider !== 'ollama') {
       setOverviewError(`请先为 ${chatProviderFull?.name || chatProvider} 配置 API Key`);
       return;

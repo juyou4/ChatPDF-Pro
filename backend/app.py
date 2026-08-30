@@ -257,7 +257,7 @@ async def get_capabilities():
         _HAS_SENTENCE_TRANSFORMERS,
         is_local_embedding_runtime_supported,
     )
-    from services.rerank_service import _HAS_CROSS_ENCODER, is_local_rerank_runtime_supported
+    from services.rerank_service import is_local_rerank_available
     build = get_public_build_identity()
 
     # 收集可用的 embedding provider 列表
@@ -271,7 +271,7 @@ async def get_capabilities():
 
     # 收集可用的 rerank provider 列表
     rerank_providers = ["cohere", "jina", "silicon", "aliyun"]
-    has_safe_local_rerank = bool(_HAS_CROSS_ENCODER and is_local_rerank_runtime_supported())
+    has_safe_local_rerank = is_local_rerank_available()
     if has_safe_local_rerank:
         rerank_providers.insert(0, "local")
 

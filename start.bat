@@ -4,11 +4,9 @@ setlocal EnableExtensions EnableDelayedExpansion
 
 set "BASE_DIR=%~dp0"
 cd /d "%BASE_DIR%"
+set "GIT_TERMINAL_PROMPT=0"
 
-set "APP_VERSION=unknown"
-for /f "tokens=2 delims=:," %%v in ('findstr /i /c:"version" version.json 2^>nul ^| findstr /v /i /c:"schema_version"') do set "APP_VERSION=%%~v"
-set "APP_VERSION=!APP_VERSION: =!"
-set "APP_VERSION=!APP_VERSION:"=!"
+call :READ_APP_VERSION
 
 set "ACCENT="
 set "SUCCESS="
@@ -32,34 +30,9 @@ cls
 call :PRINT_HEADER
 
 :: ==================== 自动更新 ====================
-call :PRINT_STEP "检查代码更新"
-set "CURRENT_BRANCH="
-where git >nul 2>&1
-if errorlevel 1 (
-    call :PRINT_INFO "未找到 Git，跳过自动更新"
-) else (
-    for /f "tokens=*" %%i in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "CURRENT_BRANCH=%%i"
-    if /i "!CURRENT_BRANCH!"=="main" (
-        set "HAS_TRACKED_CHANGES="
-        for /f "delims=" %%i in ('git status --porcelain --untracked-files=normal 2^>nul') do set "HAS_TRACKED_CHANGES=1"
-        if defined HAS_TRACKED_CHANGES (
-            call :PRINT_INFO "检测到本地代码改动，为避免覆盖已跳过自动更新"
-        ) else (
-            git pull --ff-only origin main >nul 2>&1
-            if !errorlevel! equ 0 (
-                call :PRINT_SUCCESS "代码已更新到 main 最新版本"
-            ) else (
-                call :PRINT_INFO "自动更新未完成，将继续使用当前版本"
-            )
-        )
-    ) else (
-        if defined CURRENT_BRANCH (
-            call :PRINT_INFO "当前在分支 !CURRENT_BRANCH!（仅 main 自动更新）"
-        ) else (
-            call :PRINT_INFO "当前目录不是 Git 工作区，跳过自动更新"
-        )
-    )
-)
+call :UPDATE_FROM_ORIGIN
+call :READ_APP_VERSION
+call :PRINT_INFO "当前代码版本 v!APP_VERSION!"
 
 :: ==================== 环境检查 ====================
 call :PRINT_STEP "检查运行环境"
@@ -93,37 +66,14 @@ call :PRINT_SUCCESS "旧服务端口已释放"
 
 :: ==================== 基础运行时 ====================
 call :PRINT_STEP "检查基础运行时"
-!PYTHON_CMD! -c "import importlib.util as u,sys; names=('fastapi','uvicorn','fitz','pdfplumber','faiss','langchain','openai','sentence_transformers'); sys.exit(0 if all(u.find_spec(n) for n in names) else 1)" >nul 2>&1
-if errorlevel 1 (
-    call :PRINT_INFO "首次运行，正在安装基础运行时"
-    !PYTHON_CMD! -m pip install -q -r backend\requirements-core.txt >nul 2>&1
-    if errorlevel 1 goto PIPFAIL
-)
+call :SYNC_PYTHON_DEPENDENCIES
+if errorlevel 1 goto PIPFAIL
 call :PRINT_SUCCESS "基础运行时已就绪"
 call :PRINT_INFO "本地解析组件将在选择本地路线时按需准备"
 
-:: 前端依赖。只看 node_modules 目录不够：半残安装会留下包、丢掉 .bin，
-:: 随后 npm run dev 会变成 Windows 找不到 vite。
-if not exist "frontend\node_modules\.bin\vite.cmd" (
-    if exist "frontend\node_modules" (
-        call :PRINT_INFO "前端命令入口缺失，正在重装依赖"
-    ) else (
-        call :PRINT_INFO "首次运行，正在安装前端依赖（约 1-2 分钟）"
-    )
-    pushd frontend
-    call npm install --silent >nul 2>&1
-    set "NPM_EXIT=!errorlevel!"
-    popd
-    if not "!NPM_EXIT!"=="0" goto NPMFAIL
-)
-if not exist "frontend\node_modules\rehype-raw" (
-    pushd frontend
-    call npm install rehype-raw --silent >nul 2>&1
-    set "NPM_EXIT=!errorlevel!"
-    popd
-    if not "!NPM_EXIT!"=="0" goto NPMFAIL
-)
-if not exist "frontend\node_modules\.bin\vite.cmd" goto NPMFAIL
+:: package.json/package-lock.json 变更时才重建前端依赖，避免每次启动都重新安装。
+call :SYNC_FRONTEND_DEPENDENCIES
+if errorlevel 1 goto NPMFAIL
 call :PRINT_SUCCESS "前端依赖已就绪"
 
 :: ==================== 启动服务 ====================
@@ -152,7 +102,7 @@ set /a WAIT_COUNT+=1
 if !WAIT_COUNT! equ 10 call :PRINT_INFO "后端正在加载检索与文档服务"
 if !WAIT_COUNT! equ 30 call :PRINT_INFO "后端仍在初始化，请稍候"
 if !WAIT_COUNT! geq 60 goto BACK_CHECK_DONE
-timeout /t 1 /nobreak >nul
+"%SystemRoot%\System32\timeout.exe" /t 1 /nobreak >nul
 goto WAIT_BACKEND
 
 :BACK_HEALTHY
@@ -225,6 +175,189 @@ goto ERROR_EXIT
 echo.
 pause
 exit /b 1
+
+:: ==================== 更新与依赖组件 ====================
+:UPDATE_FROM_ORIGIN
+call :PRINT_STEP "检查代码更新"
+if "!CHATPDF_SKIP_UPDATE!"=="1" (
+    call :PRINT_INFO "已通过 CHATPDF_SKIP_UPDATE=1 跳过更新检查"
+    exit /b 0
+)
+
+where git >nul 2>&1
+if errorlevel 1 (
+    call :PRINT_INFO "未找到 Git，跳过自动更新"
+    exit /b 0
+)
+git rev-parse --is-inside-work-tree >nul 2>&1
+if errorlevel 1 (
+    call :PRINT_INFO "当前目录不是 Git 工作区，跳过自动更新"
+    exit /b 0
+)
+
+set "CURRENT_BRANCH="
+for /f "tokens=*" %%i in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "CURRENT_BRANCH=%%i"
+if /i not "!CURRENT_BRANCH!"=="main" (
+    if defined CURRENT_BRANCH (
+        call :PRINT_INFO "当前在分支 !CURRENT_BRANCH!（仅 main 自动更新）"
+    ) else (
+        call :PRINT_INFO "无法识别当前分支，跳过自动更新"
+    )
+    exit /b 0
+)
+
+:: fetch 只更新 origin/main 引用，不会覆盖工作树；失败时有限重试并显示诊断。
+set "GIT_FETCH_LOG=%TEMP%\chatpdf-git-fetch-!RANDOM!.log"
+set "FETCH_ATTEMPT=0"
+:FETCH_ORIGIN_RETRY
+set /a FETCH_ATTEMPT+=1
+git -c http.connectTimeout=10 -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=15 fetch --prune origin main >"!GIT_FETCH_LOG!" 2>&1
+if not errorlevel 1 goto FETCH_ORIGIN_OK
+if !FETCH_ATTEMPT! lss 2 (
+    call :PRINT_INFO "上游更新连接失败，2 秒后重试（!FETCH_ATTEMPT!/2）"
+    "%SystemRoot%\System32\timeout.exe" /t 2 /nobreak >nul
+    goto FETCH_ORIGIN_RETRY
+)
+call :PRINT_INFO "无法检查上游更新，将继续使用当前版本"
+if exist "!GIT_FETCH_LOG!" type "!GIT_FETCH_LOG!"
+if exist "!GIT_FETCH_LOG!" del /q "!GIT_FETCH_LOG!" >nul 2>&1
+exit /b 0
+
+:FETCH_ORIGIN_OK
+if exist "!GIT_FETCH_LOG!" del /q "!GIT_FETCH_LOG!" >nul 2>&1
+set "LOCAL_ONLY="
+set "REMOTE_ONLY="
+for /f "tokens=1,2" %%a in ('git rev-list --left-right --count HEAD...origin/main 2^>nul') do (
+    set "LOCAL_ONLY=%%a"
+    set "REMOTE_ONLY=%%b"
+)
+if not defined LOCAL_ONLY goto UPDATE_COMPARE_FAILED
+if not defined REMOTE_ONLY goto UPDATE_COMPARE_FAILED
+if "!LOCAL_ONLY!"=="" goto UPDATE_COMPARE_FAILED
+if "!REMOTE_ONLY!"=="" goto UPDATE_COMPARE_FAILED
+
+for /f "tokens=*" %%i in ('git rev-parse --short HEAD 2^>nul') do set "CURRENT_SHA=%%i"
+for /f "tokens=*" %%i in ('git rev-parse --short origin/main 2^>nul') do set "REMOTE_SHA=%%i"
+if "!LOCAL_ONLY!"=="0" if "!REMOTE_ONLY!"=="0" (
+    call :PRINT_SUCCESS "代码已是最新（!CURRENT_SHA!）"
+    exit /b 0
+)
+
+set "HAS_LOCAL_CHANGES="
+for /f "delims=" %%i in ('git status --porcelain=v1 --untracked-files=normal 2^>nul') do set "HAS_LOCAL_CHANGES=1"
+if !REMOTE_ONLY! GTR 0 if "!LOCAL_ONLY!"=="0" (
+    if defined HAS_LOCAL_CHANGES (
+        call :PRINT_INFO "上游有 !REMOTE_ONLY! 个新提交（!REMOTE_SHA!），本地有未提交改动，已跳过合并"
+        exit /b 0
+    )
+
+    set "GIT_MERGE_LOG=%TEMP%\chatpdf-git-merge-!RANDOM!.log"
+    git merge --ff-only origin/main >"!GIT_MERGE_LOG!" 2>&1
+    if not errorlevel 1 (
+        call :READ_APP_VERSION
+        for /f "tokens=*" %%i in ('git rev-parse --short HEAD 2^>nul') do set "CURRENT_SHA=%%i"
+        call :PRINT_SUCCESS "代码已更新到 origin/main（!CURRENT_SHA!）"
+    ) else (
+        call :PRINT_INFO "自动合并失败，将继续使用当前版本（本地 !CURRENT_SHA!，远端 !REMOTE_SHA!）"
+        if exist "!GIT_MERGE_LOG!" type "!GIT_MERGE_LOG!"
+    )
+    if exist "!GIT_MERGE_LOG!" del /q "!GIT_MERGE_LOG!" >nul 2>&1
+    exit /b 0
+)
+
+if !LOCAL_ONLY! GTR 0 if "!REMOTE_ONLY!"=="0" (
+    call :PRINT_INFO "本地版本领先 origin/main !LOCAL_ONLY! 个提交，跳过自动覆盖（!CURRENT_SHA!）"
+) else (
+    call :PRINT_INFO "本地与 origin/main 已分叉（本地 +!LOCAL_ONLY!，远端 +!REMOTE_ONLY!），跳过自动合并"
+)
+exit /b 0
+
+:UPDATE_COMPARE_FAILED
+call :PRINT_INFO "无法比较本地与 origin/main 的提交，跳过自动合并"
+exit /b 0
+
+:READ_APP_VERSION
+set "APP_VERSION=unknown"
+if exist "version.json" (
+    for /f "tokens=2 delims=:," %%v in ('findstr /i /c:"version" version.json 2^>nul ^| findstr /v /i /c:"schema_version"') do set "APP_VERSION=%%~v"
+)
+set "APP_VERSION=!APP_VERSION: =!"
+set "APP_VERSION=!APP_VERSION:"=!"
+exit /b 0
+
+:GET_DEPENDENCY_FINGERPRINT
+set "DEPENDENCY_FINGERPRINT="
+for /f "delims=" %%h in ('!PYTHON_CMD! scripts\startup_dependency_fingerprint.py --group %~1 2^>nul') do if not defined DEPENDENCY_FINGERPRINT set "DEPENDENCY_FINGERPRINT=%%h"
+exit /b 0
+
+:READ_DEPENDENCY_STAMP
+set "STORED_DEPENDENCY_FINGERPRINT="
+set "DEPENDENCY_STAMP_PATH=%~1"
+if exist "!DEPENDENCY_STAMP_PATH!" set /p "STORED_DEPENDENCY_FINGERPRINT="<"!DEPENDENCY_STAMP_PATH!"
+exit /b 0
+
+:WRITE_DEPENDENCY_STAMP
+set "DEPENDENCY_STAMP_PATH=%~1"
+set "DEPENDENCY_STAMP_VALUE=%~2"
+>"!DEPENDENCY_STAMP_PATH!" echo(!DEPENDENCY_STAMP_VALUE!
+if errorlevel 1 call :PRINT_INFO "无法写入依赖指纹，下次启动会再次校验依赖"
+exit /b 0
+
+:SYNC_PYTHON_DEPENDENCIES
+if not exist "%BASE_DIR%data" mkdir "%BASE_DIR%data" >nul 2>&1
+set "PYTHON_DEPENDENCY_STAMP=%BASE_DIR%data\.startup-python-deps.sha256"
+call :GET_DEPENDENCY_FINGERPRINT python
+set "PYTHON_DEPENDENCY_FINGERPRINT=!DEPENDENCY_FINGERPRINT!"
+call :READ_DEPENDENCY_STAMP "!PYTHON_DEPENDENCY_STAMP!"
+set "PYTHON_DEPENDENCIES_NEED_SYNC=0"
+if not defined PYTHON_DEPENDENCY_FINGERPRINT set "PYTHON_DEPENDENCIES_NEED_SYNC=1"
+if not exist "!PYTHON_DEPENDENCY_STAMP!" set "PYTHON_DEPENDENCIES_NEED_SYNC=1"
+if defined PYTHON_DEPENDENCY_FINGERPRINT if /i not "!PYTHON_DEPENDENCY_FINGERPRINT!"=="!STORED_DEPENDENCY_FINGERPRINT!" set "PYTHON_DEPENDENCIES_NEED_SYNC=1"
+!PYTHON_CMD! -c "import importlib.util as u,sys; names=('fastapi','uvicorn','fitz','pdfplumber','faiss','langchain','openai','sentence_transformers'); sys.exit(0 if all(u.find_spec(n) for n in names) else 1)" >nul 2>&1
+if errorlevel 1 set "PYTHON_DEPENDENCIES_NEED_SYNC=1"
+if "!PYTHON_DEPENDENCIES_NEED_SYNC!"=="1" (
+    call :PRINT_INFO "后端依赖清单有变化或尚未安装，正在同步 requirements-core.txt"
+    !PYTHON_CMD! -m pip install --disable-pip-version-check -q -r backend\requirements-core.txt
+    if errorlevel 1 exit /b 1
+    if defined PYTHON_DEPENDENCY_FINGERPRINT call :WRITE_DEPENDENCY_STAMP "!PYTHON_DEPENDENCY_STAMP!" "!PYTHON_DEPENDENCY_FINGERPRINT!"
+)
+exit /b 0
+
+:SYNC_FRONTEND_DEPENDENCIES
+if not exist "%BASE_DIR%data" mkdir "%BASE_DIR%data" >nul 2>&1
+set "FRONTEND_DEPENDENCY_STAMP=%BASE_DIR%data\.startup-frontend-deps.sha256"
+call :GET_DEPENDENCY_FINGERPRINT frontend
+set "FRONTEND_DEPENDENCY_FINGERPRINT=!DEPENDENCY_FINGERPRINT!"
+call :READ_DEPENDENCY_STAMP "!FRONTEND_DEPENDENCY_STAMP!"
+set "FRONTEND_DEPENDENCIES_NEED_SYNC=0"
+if not defined FRONTEND_DEPENDENCY_FINGERPRINT set "FRONTEND_DEPENDENCIES_NEED_SYNC=1"
+if not exist "!FRONTEND_DEPENDENCY_STAMP!" set "FRONTEND_DEPENDENCIES_NEED_SYNC=1"
+if defined FRONTEND_DEPENDENCY_FINGERPRINT if /i not "!FRONTEND_DEPENDENCY_FINGERPRINT!"=="!STORED_DEPENDENCY_FINGERPRINT!" set "FRONTEND_DEPENDENCIES_NEED_SYNC=1"
+if not exist "frontend\node_modules\.bin\vite.cmd" set "FRONTEND_DEPENDENCIES_NEED_SYNC=1"
+if not exist "frontend\node_modules\rehype-raw" set "FRONTEND_DEPENDENCIES_NEED_SYNC=1"
+if "!FRONTEND_DEPENDENCIES_NEED_SYNC!"=="1" (
+    set "NPM_EXIT=1"
+    if exist "frontend\package-lock.json" (
+        call :PRINT_INFO "前端依赖清单有变化或尚未安装，正在按 package-lock.json 同步"
+        pushd frontend
+        if errorlevel 1 exit /b 1
+        call npm ci --silent
+        set "NPM_EXIT=!errorlevel!"
+        popd
+    ) else (
+        call :PRINT_INFO "未找到 package-lock.json，正在安装前端依赖"
+        pushd frontend
+        if errorlevel 1 exit /b 1
+        call npm install --silent
+        set "NPM_EXIT=!errorlevel!"
+        popd
+    )
+    if not "!NPM_EXIT!"=="0" exit /b 1
+    if not exist "frontend\node_modules\.bin\vite.cmd" exit /b 1
+    if not exist "frontend\node_modules\rehype-raw" exit /b 1
+    if defined FRONTEND_DEPENDENCY_FINGERPRINT call :WRITE_DEPENDENCY_STAMP "!FRONTEND_DEPENDENCY_STAMP!" "!FRONTEND_DEPENDENCY_FINGERPRINT!"
+)
+exit /b 0
 
 :: ==================== 运行时组件 ====================
 :SELECT_PYTHON

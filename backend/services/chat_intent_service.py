@@ -39,6 +39,11 @@ InteractionMode = Literal[
     "preset",
     "retry_failed_turn",
 ]
+# 这些模式描述问题的入口，而不是内容范围。预设问题、手动输入和失败重试
+# 都可以表达“总结全文”；selection/image 始终携带更窄的上下文边界。
+_DOCUMENT_WIDE_INTERACTION_MODES = frozenset(
+    {"default", "preset", "retry_failed_turn"}
+)
 IntentTask = Literal[
     "qa",
     "summarize",
@@ -57,7 +62,7 @@ GraphMode = Literal["local", "global", "hybrid"]
 
 _SUMMARY_RE = re.compile(
     r"(?:总结|概括|概述|简述|大意|主要内容|讲了什么|讲什么|"
-    r"\b(?:summary|summarize|overview|outline|main\s+idea)\b)",
+    r"\b(?:summary|summari[sz]e|overview|outline|main\s+idea)\b)",
     re.IGNORECASE,
 )
 # ``overview`` 不能仅凭 query_type 推断为全文总结："总结方法部分"同样会落入
@@ -66,8 +71,9 @@ _SUMMARY_RE = re.compile(
 _FULL_DOCUMENT_SUMMARY_TARGET_RE = re.compile(
     r"(?:全文|全篇|整篇|整份|整个(?:文档|论文|文章)?|通篇|本文|这篇(?:论文|文章)|"
     r"该(?:文档|论文|文章)|当前(?:文档|论文)|这份(?:文档|论文)|"
+    r"\b(?:this|the|that|my|current)\s+(?:paper|document|article)\b|"
     r"\b(?:full|whole|entire|complete)\s+(?:paper|document|article)\b|"
-    r"\b(?:the\s+)?(?:paper|document)\s+as\s+a\s+whole\b)",
+    r"\b(?:the\s+)?(?:paper|document|article)\s+as\s+a\s+whole\b)",
     re.IGNORECASE,
 )
 _EXPLICIT_WHOLE_DOCUMENT_RE = re.compile(
@@ -80,16 +86,94 @@ _SUMMARY_NARROW_SCOPE_RE = re.compile(
     r"(?:第\s*[\d一二三四五六七八九十]+\s*(?:节|章|部分|页)|"
     r"\b(?:section|chapter)\s*\d+\b|"
     r"摘要|引言|背景|相关工作|方法(?:部分)?|实验(?:部分)?|结果(?:部分)?|"
-    r"结论(?:部分)?|附录|消融|局限|abstract|introduction|background|related\s+work|"
-    r"methods?|experiments?|results?|conclusion|appendix|ablation|limitation)",
+    r"结论(?:部分)?|附录|消融|局限|贡献(?:点)?|创新(?:点)?|动机|研究问题|研究目标|"
+    r"假设|数据集|数据|发现|未来(?:工作|方向)?|展望|意义|影响|优点|缺点|优势|劣势|"
+    r"abstract|introduction|background|related\s+work|methods?|experiments?|results?|"
+    r"conclusion|appendix|ablation|limitation|contribution(?:s)?|innovation|motivation|"
+    r"research\s+(?:question|problem|objective)|objectives?|hypothes(?:is|es)|datasets?|"
+    r"findings?|future\s+(?:work|direction|directions?)|implications?|strengths?|"
+    r"weakness(?:es)?|novelty)",
     re.IGNORECASE,
 )
 _GENERIC_DOCUMENT_SUMMARY_RE = re.compile(
     r"^\s*(?:请|请你|帮我|麻烦|能否|可以|给我|please|could\s+you|can\s+you)?\s*"
-    r"(?:总结|概括|概述|简述|summarize|summary|overview)\s*"
+    r"(?:总结|概括|概述|简述|summari[sz]e|summary|overview)\s*"
     r"(?:一下|下|吧|一下吧|please)?\s*[。.!！?？]*\s*$",
     re.IGNORECASE,
 )
+_NEGATED_SECTION_DETAIL_SUMMARY_RE = re.compile(
+    r"(?:不要|不用|别|不必|无需|不需要|禁止|不能|跳过|略过|不看)\s*"
+    r"(?:再\s*)?(?:把\s*)?(?:按|分|逐|每|各)?\s*(?:个|一)?\s*"
+    r"(?:章节?|小节)\s*(?:梳理|总结|概览|详解|讲解|介绍|说明|回顾|阅读)|"
+    r"\b(?:do\s+not|don't|dont|never|skip)\b"
+    r"(?:[^。.!?;；,，]{0,40}\b(?:summari[sz]e|outline|review|go\s+through|"
+    r"walk\s+(?:me\s+)?through)\b[^。.!?;；,，]{0,40}"
+    r"\b(?:sections?|chapters?|subsections?)(?:[-\s]wise)?\b|"
+    r"[^。.!?;；,，]{0,40}\b(?:sections?|chapters?|subsections?)(?:[-\s]wise)?\b"
+    r"[^。.!?;；,，]{0,40}\b(?:summari[sz]e|summari[sz]ation|summary|outline|review|go\s+through|"
+    r"walk\s+(?:me\s+)?through)\b)",
+    re.IGNORECASE,
+)
+
+
+def _is_negated_section_detail_summary(text: object) -> bool:
+    return bool(_NEGATED_SECTION_DETAIL_SUMMARY_RE.search(str(text or "").strip()))
+
+
+def _has_document_wide_summary_signal(text: object) -> bool:
+    """Return whether the wording itself can denote a whole-document summary.
+
+    This is intentionally a lexical signal, separate from the final route
+    predicate below.  The chat contextualizer is allowed to rewrite a query
+    for retrieval, but it must not erase an explicit whole-document request
+    from the original user turn.  Narrow targets (methods, a page, a named
+    section, etc.) are filtered here so that ``本文的方法`` is not promoted
+    merely because it also contains the soft target ``本文``.
+    """
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+    if _is_negated_section_detail_summary(normalized):
+        return False
+    strategy = get_retrieval_strategy(normalized)
+    operations = _infer_operations(
+        normalized,
+        str(strategy.get("query_type") or "specific"),
+        retry_resolved=False,
+    )
+    requested_kinds = {
+        str(item.get("kind") or "").strip()
+        for item in operations
+        if str(item.get("polarity") or "") == "requested"
+        and str(item.get("kind") or "").strip() != "qa"
+    }
+    section_detail = is_full_document_section_summary_request(normalized)
+    if section_detail:
+        has_prohibited_summary = any(
+            str(item.get("kind") or "").strip() == "summarize"
+            and str(item.get("polarity") or "") == "prohibited"
+            for item in operations
+        )
+        if has_prohibited_summary or (requested_kinds - {"summarize"}):
+            # A negated or compound section request must stay on the normal
+            # route; only a pure structural summary can use the outline path.
+            return False
+        return True
+    if "summarize" not in requested_kinds or requested_kinds - {"summarize"}:
+        # A negated summary (or a compound request) must not become a source
+        # of whole-document routing just because it mentions ``本文``/``paper``.
+        return False
+    if (
+        _SUMMARY_NARROW_SCOPE_RE.search(normalized)
+        and not _EXPLICIT_WHOLE_DOCUMENT_RE.search(normalized)
+    ):
+        return False
+    return bool(
+        _FULL_DOCUMENT_SUMMARY_TARGET_RE.search(normalized)
+        or _GENERIC_DOCUMENT_SUMMARY_RE.fullmatch(normalized)
+    )
+
+
 # 「译为」原本只写在 _TRANSLATION_TARGET_RE 的触发词表里，这里却漏了，
 # 于是「把这一段译为德语」根本建不起 translate 操作，目标语抽取也就永远不会被调用。
 # 两张表必须覆盖同一组触发词。
@@ -107,6 +191,11 @@ _CALCULATE_RE = re.compile(
 _EXPLAIN_RE = re.compile(
     r"(?:解释|说明|讲解|介绍|为什么|为何|原因|原理|机制|如何|怎么|含义|意思|"
     r"\b(?:explain|why|how|reason|mechanism|principle|meaning)\b)",
+    re.IGNORECASE,
+)
+_ANALYZE_RE = re.compile(
+    r"(?:分析|评估|评价|讨论|审视|解读|"
+    r"\b(?:analy[sz]e|evaluate|assess|discuss|critique)\b)",
     re.IGNORECASE,
 )
 _CONTINUE_RE = re.compile(
@@ -252,12 +341,13 @@ _EN_DEGREE_SCOPE_RE = re.compile(
     r"\s*(?:way\s+)?(?:too|overly|excessively)\s+\w+",
     re.IGNORECASE,
 )
-# 「被否定动作之外的残余抽取请求」。只在 summarize 被明确禁止、且 query_type
-# 恰好是 overview 时才参与判定——那个 overview 正是被用户否定掉的那句话产生的，
-# 本身不可信。正常问句与 query_type 已经正确的问句都走不到这里。
+# 显式抽取动作。除了处理“不要总结、列出数值”这类残余请求，也用于识别
+# “总结全文并列出/提取……”中的第二个动作，避免全文专用渲染器漏掉后半句。
 _EXTRACT_REQUEST_RE = re.compile(
-    r"(?:列出|列举|提取|抽取|摘出|具体数值|准确数值|原始数值|"
-    r"\b(?:extract|verbatim|exact)\b)",
+    r"(?:列出|列举|罗列|枚举|列明|列示|提取|抽取|摘出|具体数值|准确数值|原始数值|"
+    r"给出\s*(?:具体|准确|关键|主要|所有|全部)?\s*(?:公式|数值|数字|指标|结果|列表|清单)|"
+    r"\b(?:extract|enumerate|list|verbatim|exact)\b|"
+    r"\bprovide\s+(?:the\s+)?(?:key\s+)?(?:formulas?|values?|numbers?|metrics?|results?|list)\b)",
     re.IGNORECASE,
 )
 # 翻译目标语的规范表：每个 code 至少覆盖「X文」「X语」两种说法与英文名。
@@ -451,11 +541,39 @@ def prepare_chat_intent(
     # chat.  Full-document / each-section semantics belong to the original
     # user turn, so retain them if either representation carries the explicit
     # signal.  Ordinary retrieval still uses the resolved question below.
+    original_section_detail_summary = is_full_document_section_summary_request(original)
+    original_section_detail_negated = _is_negated_section_detail_summary(original)
     section_detail_summary = bool(
-        is_full_document_section_summary_request(original)
-        or is_full_document_section_summary_request(question)
+        (original_section_detail_summary and not original_section_detail_negated)
+        or (
+            is_full_document_section_summary_request(question)
+            and not original_section_detail_negated
+        )
+    )
+    original_summary_snapshot = _summary_intent_snapshot(
+        original,
+        mode,
+        retry_resolved=retry_resolved,
     )
     operations = _infer_operations(question, query_type, retry_resolved=retry_resolved)
+    if original_section_detail_negated:
+        # A lossy contextualizer may turn "不要按章节总结" into a positive
+        # summary query. Preserve the original prohibition before task/scope
+        # inference so it cannot enter the outline route.
+        operations = tuple(
+            item
+            for item in operations
+            if not (
+                str(item.get("kind") or "") == "summarize"
+                and str(item.get("polarity") or "") == "requested"
+            )
+        )
+        if not any(
+            str(item.get("kind") or "") == "summarize"
+            and str(item.get("polarity") or "") == "prohibited"
+            for item in operations
+        ):
+            operations = (*operations, {"kind": "summarize", "polarity": "prohibited"})
     if section_detail_summary:
         # A request such as "请按章节梳理全文" or "Please go through the
         # sections" carries summary intent even though it may not include the
@@ -469,11 +587,17 @@ def prepare_chat_intent(
                 and str(item.get("polarity") or "") == "requested"
             )
         )
-        if not any(
+        has_requested_summary = any(
             str(item.get("kind") or "") == "summarize"
             and str(item.get("polarity") or "") == "requested"
             for item in operations
-        ):
+        )
+        has_prohibited_summary = any(
+            str(item.get("kind") or "") == "summarize"
+            and str(item.get("polarity") or "") == "prohibited"
+            for item in operations
+        )
+        if not has_requested_summary and not has_prohibited_summary:
             operations = (*operations, {"kind": "summarize", "polarity": "requested"})
     task, task_rule = _infer_task(
         question,
@@ -484,19 +608,103 @@ def prepare_chat_intent(
     page_ranges = extract_page_ranges(question)
     inventory_kinds = tuple(detect_inventory_kinds(question))
     scope, scope_rule = _infer_scope(question, mode)
-    if section_detail_summary and mode == "default" and not page_ranges:
+    if section_detail_summary and mode in _DOCUMENT_WIDE_INTERACTION_MODES and not page_ranges:
         # "Each section" denotes a complete-document projection, not a
         # request about one named section.  Recording document scope keeps the
         # route trace, Agent gate and renderer contract semantically aligned.
         scope, scope_rule = "document", "scope:document_section_detail"
+    resolved_requested_kinds = {
+        str(item.get("kind") or "").strip()
+        for item in operations
+        if str(item.get("polarity") or "") == "requested"
+        and str(item.get("kind") or "").strip() != "qa"
+    }
+    resolved_prohibited_kinds = {
+        str(item.get("kind") or "").strip()
+        for item in operations
+        if str(item.get("polarity") or "") == "prohibited"
+    }
+    resolved_has_hard_boundary = bool(
+        page_ranges
+        or scope != "document"
+        or task != "summarize"
+        or "summarize" in resolved_prohibited_kinds
+        or (resolved_requested_kinds - {"summarize"})
+        or (
+            _SUMMARY_NARROW_SCOPE_RE.search(question)
+            and not _EXPLICIT_WHOLE_DOCUMENT_RE.search(question)
+        )
+    )
+    original_full_document_summary = bool(
+        original_summary_snapshot.get("full_document_summary")
+    )
+    original_has_hard_boundary = bool(
+        original_summary_snapshot.get("hard_boundary")
+    )
+    original_is_explicit = bool(
+        original_summary_snapshot.get("explicit_document_target")
+    )
+    original_summary_related = bool(
+        original_section_detail_summary
+        or any(
+            str(item.get("kind") or "") == "summarize"
+            for item in (original_summary_snapshot.get("operations") or ())
+        )
+    )
+    if original_summary_related and (
+        original_has_hard_boundary
+        or (original_full_document_summary and original_is_explicit)
+    ):
+        # Keep the raw summary operation/polarity and hard scope constraints
+        # when the contextualizer changed the wording. This prevents a lost
+        # "不要"/"翻译"/page marker from becoming a new positive summary.
+        operations = tuple(original_summary_snapshot.get("operations") or ())
+        task = str(original_summary_snapshot.get("task") or task)  # type: ignore[assignment]
+        scope = str(original_summary_snapshot.get("scope") or scope)  # type: ignore[assignment]
+        page_ranges = tuple(original_summary_snapshot.get("page_ranges") or ())
+        task_rule = f"task:{task}"
+        scope_rule = f"scope:{scope}"
+
+    use_original_summary_question = bool(
+        original_summary_related
+        and (
+            original_has_hard_boundary
+            or (original_full_document_summary and original_is_explicit)
+            or not resolved_has_hard_boundary
+        )
+    )
     full_document_summary = _is_full_document_summary_request(
-        question=original if section_detail_summary else question,
+        question=original if use_original_summary_question else question,
         task=task,
         scope=scope,
         interaction_mode=mode,
         operations=operations,
         page_ranges=page_ranges,
+        retry_resolved=retry_resolved,
     )
+    full_document_summary_from_original = False
+    mode_allows_document_summary = mode in _DOCUMENT_WIDE_INTERACTION_MODES
+    if not mode_allows_document_summary:
+        # Selection/image turns stay local; their attachment or selection is
+        # a stronger evidence boundary than the textual summary wording.
+        full_document_summary = False
+    elif original_has_hard_boundary:
+        # Raw user constraints (page/section/compound/negation) take priority
+        # over any broader wording invented by a contextualizer.
+        full_document_summary = original_full_document_summary
+    elif (
+        original_full_document_summary
+        and task == "summarize"
+        and scope == "document"
+        and (original_is_explicit or not resolved_has_hard_boundary)
+    ):
+        # Preserve a clean whole-document request when the rewrite only
+        # dropped its scope marker. Generic "总结一下" may still be narrowed
+        # by a resolved explicit section target; an explicit "本文/this paper"
+        # request may not.
+        if not full_document_summary:
+            full_document_summary_from_original = True
+        full_document_summary = True
     agent_policy = "force" if (force_agent and enable_agent) else ("auto" if enable_agent else "off")
     normalized_web_policy = normalize_route_policy(web_policy, enabled=enable_web)
     graph_mode = _infer_graph_mode(task, query_type, evidence_need)
@@ -531,6 +739,7 @@ def prepare_chat_intent(
         *(f"operation:{item['kind']}:{item['polarity']}" for item in operations),
         *(f"page_range:{start}-{end}" for start, end in page_ranges),
         *(["summary_scope:full_document"] if full_document_summary else []),
+        *(["summary_scope:original_question"] if full_document_summary_from_original else []),
         *(f"inventory:{item}" for item in inventory_kinds),
         *(f"evidence_source:{item}" for item in evidence_sources),
         *(f"modality:{item}" for item in modalities if item != "text"),
@@ -994,6 +1203,12 @@ def _infer_operations(
         ("summarize", _SUMMARY_RE),
         ("explain", _EXPLAIN_RE),
     )
+    if query_type != "inventory":
+        # query_type=overview can mask a trailing explicit list/extraction
+        # request ("总结全文并列出关键公式"). Keep it as a separate operation
+        # so the fixed full-summary renderer cannot drop that second action.
+        patterns = (*patterns, ("extract", _EXTRACT_REQUEST_RE))
+    patterns = (*patterns, ("explain", _ANALYZE_RE))
     matches: list[tuple[int, int, dict[str, str]]] = []
     serial = 0
     for kind, raw_pattern in patterns:
@@ -1076,6 +1291,7 @@ def _is_full_document_summary_request(
     interaction_mode: InteractionMode,
     operations: Sequence[dict[str, str]],
     page_ranges: Sequence[tuple[int, int]],
+    retry_resolved: bool = False,
 ) -> bool:
     """Return whether a turn asks for a whole-document summary.
 
@@ -1087,7 +1303,7 @@ def _is_full_document_summary_request(
     if (
         task != "summarize"
         or scope != "document"
-        or interaction_mode != "default"
+        or interaction_mode not in _DOCUMENT_WIDE_INTERACTION_MODES
         or page_ranges
     ):
         return False
@@ -1097,6 +1313,15 @@ def _is_full_document_summary_request(
         for item in operations
         if str(item.get("polarity") or "") == "requested"
     }
+    prohibited_kinds = {
+        str(item.get("kind") or "").strip()
+        for item in operations
+        if str(item.get("polarity") or "") == "prohibited"
+    }
+    if "summarize" in prohibited_kinds:
+        # Conflicting summary polarity is not safe to route to a fixed
+        # outline answer; keep the normal operation contract instead.
+        return False
     # Compound requests must retain the normal operation contract.  In
     # particular, "总结并翻译" cannot be satisfied by a fixed outline reply.
     if requested_kinds - {"summarize"}:
@@ -1104,6 +1329,8 @@ def _is_full_document_summary_request(
 
     text = str(question or "").strip()
     if not text:
+        return False
+    if _is_negated_section_detail_summary(text):
         return False
     if is_full_document_section_summary_request(text):
         # "Summarize each section" naturally contains the word "section",
@@ -1118,6 +1345,129 @@ def _is_full_document_summary_request(
     if _FULL_DOCUMENT_SUMMARY_TARGET_RE.search(text):
         return True
     return bool(_GENERIC_DOCUMENT_SUMMARY_RE.fullmatch(text))
+
+
+def _summary_intent_snapshot(
+    text: object,
+    mode: InteractionMode,
+    *,
+    retry_resolved: bool = False,
+) -> dict[str, object]:
+    """Classify summary boundaries for one un-rewritten question.
+
+    The route normally classifies the contextualized question because that is
+    useful for retrieval.  This snapshot records the raw turn's constraints so
+    a rewrite cannot broaden a local/compound/negated request into the full
+    document outline route.
+    """
+    normalized = str(text or "").strip()
+    strategy = get_retrieval_strategy(normalized)
+    query_type = str(strategy.get("query_type") or "specific")
+    operations = _infer_operations(
+        normalized,
+        query_type,
+        retry_resolved=retry_resolved,
+    )
+    section_detail = is_full_document_section_summary_request(normalized)
+    section_negated = _is_negated_section_detail_summary(normalized)
+    if section_negated:
+        operations = tuple(
+            item
+            for item in operations
+            if not (
+                str(item.get("kind") or "") == "summarize"
+                and str(item.get("polarity") or "") == "requested"
+            )
+        )
+        if not any(
+            str(item.get("kind") or "") == "summarize"
+            and str(item.get("polarity") or "") == "prohibited"
+            for item in operations
+        ):
+            operations = (*operations, {"kind": "summarize", "polarity": "prohibited"})
+    if section_detail and not section_negated:
+        operations = tuple(
+            item
+            for item in operations
+            if not (
+                str(item.get("kind") or "") == "qa"
+                and str(item.get("polarity") or "") == "requested"
+            )
+        )
+        has_summary = any(
+            str(item.get("kind") or "") == "summarize"
+            and str(item.get("polarity") or "") == "requested"
+            for item in operations
+        )
+        has_prohibited_summary = any(
+            str(item.get("kind") or "") == "summarize"
+            and str(item.get("polarity") or "") == "prohibited"
+            for item in operations
+        )
+        if not has_summary and not has_prohibited_summary:
+            operations = (*operations, {"kind": "summarize", "polarity": "requested"})
+    task, _task_rule = _infer_task(
+        normalized,
+        query_type,
+        retry_resolved=retry_resolved,
+        operations=operations,
+    )
+    page_ranges = extract_page_ranges(normalized)
+    scope, _scope_rule = _infer_scope(normalized, mode)
+    if (
+        section_detail
+        and not section_negated
+        and mode in _DOCUMENT_WIDE_INTERACTION_MODES
+        and not page_ranges
+    ):
+        scope = "document"
+
+    requested_kinds = {
+        str(item.get("kind") or "").strip()
+        for item in operations
+        if str(item.get("polarity") or "") == "requested"
+        and str(item.get("kind") or "").strip() != "qa"
+    }
+    prohibited_kinds = {
+        str(item.get("kind") or "").strip()
+        for item in operations
+        if str(item.get("polarity") or "") == "prohibited"
+    }
+    narrow_text = bool(
+        _SUMMARY_NARROW_SCOPE_RE.search(normalized)
+        and not _EXPLICIT_WHOLE_DOCUMENT_RE.search(normalized)
+    )
+    document_wide_signal = _has_document_wide_summary_signal(normalized)
+    full_document_summary = _is_full_document_summary_request(
+        question=normalized,
+        task=task,
+        scope=scope,
+        interaction_mode=mode,
+        operations=operations,
+        page_ranges=page_ranges,
+        retry_resolved=retry_resolved,
+    )
+    hard_boundary = bool(
+        page_ranges
+        or scope != "document"
+        or task != "summarize"
+        or "summarize" in prohibited_kinds
+        or (requested_kinds - {"summarize"})
+        or narrow_text
+    )
+    explicit_document_target = bool(
+        document_wide_signal
+        and not _GENERIC_DOCUMENT_SUMMARY_RE.fullmatch(normalized)
+    )
+    return {
+        "full_document_summary": full_document_summary,
+        "hard_boundary": hard_boundary,
+        "explicit_document_target": explicit_document_target,
+        "operations": operations,
+        "task": task,
+        "scope": scope,
+        "page_ranges": page_ranges,
+    }
 
 
 def _infer_scope(question: str, mode: InteractionMode) -> tuple[IntentScope, str]:

@@ -1775,7 +1775,8 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
             return (
                 <div className="space-y-3">
                     <div
-                        className={`select-text overflow-y-auto pr-1 text-[13px] leading-relaxed ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}
+                        ref={bodyRef}
+                        className={`translation-markdown translation-markdown--source select-text overflow-y-auto pr-1 text-[13px] leading-relaxed ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}
                         style={{ maxHeight: bodyMaxHeight }}
                     >
                         {hoverCaptionOriginalText}
@@ -1785,7 +1786,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                             <div className={`mb-1 text-[10px] font-semibold tracking-wide ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
                                 参考译文
                             </div>
-                            <div className={`text-[12px] leading-relaxed ${darkMode ? 'text-gray-300' : 'text-slate-600'}`}>
+                            <div className={`translation-markdown translation-markdown--target text-[12px] leading-relaxed ${darkMode ? 'text-gray-300' : 'text-slate-600'}`}>
                                 <StreamingMarkdown content={hoverTranslationBodyContent} isStreaming={false} suppressInitialDots />
                             </div>
                         </div>
@@ -1801,14 +1802,14 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                             <div className={`mb-1 text-[10px] font-semibold tracking-wide ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
                                 要点 / 讲解
                             </div>
-                            <div className={`text-[12px] font-semibold leading-relaxed ${darkMode ? 'text-gray-200' : 'text-slate-700'}`}>
+                            <div className={`translation-markdown translation-markdown--target text-[12px] font-semibold leading-relaxed ${darkMode ? 'text-gray-200' : 'text-slate-700'}`}>
                                 <StreamingMarkdown content={hoverTranslationSummaryContent} isStreaming={false} suppressInitialDots />
                             </div>
                         </div>
                     )}
                     <div
                         ref={bodyRef}
-                        className={`overflow-y-auto pr-1 text-[14px] leading-relaxed ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}
+                        className={`translation-markdown translation-markdown--target overflow-y-auto pr-1 text-[14px] leading-relaxed ${darkMode ? 'text-gray-100' : 'text-gray-800'}`}
                         style={{ maxHeight: bodyMaxHeight }}
                     >
                         <StreamingMarkdown content={hoverTranslationBodyContent} isStreaming={false} suppressInitialDots />
@@ -1826,10 +1827,14 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
         }
         return (
             <>
-                <div className={`text-[12px] leading-relaxed line-clamp-4 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                <div
+                    ref={bodyRef}
+                    className={`translation-markdown translation-markdown--source translation-source-scroll overflow-y-auto pr-1 text-[12px] leading-relaxed ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}
+                    style={{ maxHeight: bodyMaxHeight }}
+                >
                     {hoverTranslationBlock.text}
                 </div>
-                <div className={`mt-2 text-[11px] ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>
+                <div className={`mt-3 text-[11px] leading-relaxed ${darkMode ? 'text-gray-600' : 'text-gray-400'}`}>
                     暂无缓存译文。请先补齐全文缓存或翻译当前页；悬浮不会自动发起模型请求。
                 </div>
             </>
@@ -2451,7 +2456,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                         className={`px-4 py-3 border-b select-none ${darkMode ? 'border-white/10' : 'border-gray-100'} ${isTranslationPinned ? 'cursor-move' : ''}`}
                                         onMouseDown={startTranslationPanelDrag}
                                     >
-                                        <div className="flex items-center gap-2">
+                                        <div className="flex min-w-0 items-center gap-2">
                                             <div className="-ml-1 flex shrink-0 items-center gap-0.5">
                                                 <button
                                                     type="button"
@@ -2498,7 +2503,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                             </div>
                                         </div>
                                     </div>
-                                    <div className="px-4 py-3">
+                                    <div className="min-w-0 px-4 py-3">
                                         {renderTranslationPanelContent(hoverTranslationBodyMaxHeight, translationBodyRef)}
                                     </div>
                                     {isTranslationPinned && ['top-left', 'top-right', 'bottom-left', 'bottom-right'].map((corner) => {
@@ -2752,7 +2757,7 @@ const PDFViewer = React.memo(forwardRef(({ pdfUrl, onTextSelect, highlightInfo =
                                 <X className="h-4 w-4" />
                             </button>
                         </div>
-                        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+                        <div className="translation-dock-scroll min-h-0 min-w-0 flex-1 overflow-y-auto px-4 py-4">
                             {hoverTranslationBlock ? (
                                 renderTranslationPanelContent(9999)
                             ) : (

@@ -133,6 +133,24 @@ export const ALIYUN_MODELS: Model[] = [
         }
     },
     {
+        id: 'qwen3.7-text-embedding',
+        name: 'Qwen3.7 Text Embedding',
+        providerId: 'aliyun',
+        type: 'embedding',
+        metadata: {
+            dimension: 1024,
+            maxTokens: 131072,
+            description: '通义千问最新多语言文本向量模型，默认 1024 维，支持 256-2560 维自定义输出'
+        },
+        tags: ['latest'],
+        isSystem: true,
+        isUserAdded: false,
+        pricing: {
+            input: 0.07,
+            currency: 'USD'
+        }
+    },
+    {
         id: 'qwen3-rerank',
         name: 'qwen3-rerank',
         providerId: 'aliyun',
@@ -384,7 +402,7 @@ export const CHAT_MODELS: Model[] = [
         name: 'GPT-5.5',
         providerId: 'openai',
         type: 'chat',
-        metadata: { description: 'OpenAI 最新默认文本与推理模型，适合编码、工具调用和复杂任务' },
+        metadata: { description: 'OpenAI 上一代通用文本与推理模型，保留用于兼容已有配置' },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -481,11 +499,43 @@ export const CHAT_MODELS: Model[] = [
     },
     // ── 阿里云 通义千问 ──
     {
+        id: 'qwen3.8-max',
+        name: 'Qwen3.8-Max',
+        providerId: 'aliyun',
+        type: 'chat',
+        metadata: {
+            description: '通义千问最新旗舰模型，原生多模态与 1M 上下文，适合复杂 Agent 和长文档任务',
+            reasoningMode: 'openai_effort',
+            reasoningOptions: ['off', 'low', 'medium', 'xhigh'],
+            reasoningDefault: 'xhigh',
+            reasoningOffControl: 'enable_thinking_false',
+            reasoningOnControl: 'enable_thinking_true'
+        },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'qwen3.8-flash',
+        name: 'Qwen3.8-Flash',
+        providerId: 'aliyun',
+        type: 'chat',
+        metadata: {
+            description: '通义千问最新高速多模态模型，原生 1M 上下文，适合低延迟 Agent 和高吞吐任务',
+            reasoningMode: 'openai_effort',
+            reasoningOptions: ['off', 'low', 'medium', 'xhigh'],
+            reasoningDefault: 'xhigh',
+            reasoningOffControl: 'enable_thinking_false',
+            reasoningOnControl: 'enable_thinking_true'
+        },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
         id: 'qwen3.7-max',
         name: 'Qwen3.7-Max',
         providerId: 'aliyun',
         type: 'chat',
-        metadata: { description: '通义千问最新旗舰 Max 系列，适合复杂推理与多模态任务' },
+        metadata: { description: '通义千问上一代 Max 模型，兼容已有配置并支持多模态任务' },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -494,7 +544,7 @@ export const CHAT_MODELS: Model[] = [
         name: 'Qwen3.7-Flash',
         providerId: 'aliyun',
         type: 'chat',
-        metadata: { description: '通义千问最新高速多模态模型，适合低延迟 Agent 与高吞吐任务' },
+        metadata: { description: '通义千问上一代高速多模态模型，适合低延迟 Agent 与高吞吐任务' },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -574,11 +624,43 @@ export const CHAT_MODELS: Model[] = [
     },
     // ── 智谱 GLM ──
     {
+        id: 'glm-5.3',
+        name: 'GLM-5.3',
+        providerId: 'zhipu',
+        type: 'chat',
+        metadata: {
+            description: '智谱最新旗舰模型，文本 Agent 与复杂软件工程能力增强；始终启用思考，支持 1M 上下文',
+            reasoningMode: 'openai_effort',
+            reasoningOptions: ['low', 'high', 'max'],
+            reasoningDefault: 'max',
+            reasoningAlwaysEnabled: true,
+            reasoningOnControl: 'thinking_enabled'
+        },
+        tags: ['reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
+        id: 'glm-5.3-flash',
+        name: 'GLM-5.3-Flash',
+        providerId: 'zhipu',
+        type: 'chat',
+        metadata: {
+            description: '智谱最新原生多模态模型，支持图像、视频和文件理解；始终启用思考，适合视觉 Agent',
+            reasoningMode: 'openai_effort',
+            reasoningOptions: ['low', 'high', 'max'],
+            reasoningDefault: 'max',
+            reasoningAlwaysEnabled: true,
+            reasoningOnControl: 'thinking_enabled'
+        },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
         id: 'glm-5.2',
         name: 'GLM-5.2',
         providerId: 'zhipu',
         type: 'chat',
-        metadata: { description: '智谱最新旗舰 GLM-5.2，支持深度推理与 Agent 场景' },
+        metadata: { description: '智谱上一代旗舰，保留用于兼容已有配置与迁移' },
         tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -587,7 +669,7 @@ export const CHAT_MODELS: Model[] = [
         name: 'GLM-5.1',
         providerId: 'zhipu',
         type: 'chat',
-        metadata: { description: '智谱 GLM-5.1，复杂推理与代码能力增强' },
+        metadata: { description: '智谱上一代推理模型，保留用于兼容已有配置' },
         tags: ['reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -644,7 +726,7 @@ export const CHAT_MODELS: Model[] = [
         name: 'Claude Opus 4.8',
         providerId: 'anthropic',
         type: 'chat',
-        metadata: { description: 'Claude Opus 最新旗舰，复杂推理与编码能力强' },
+        metadata: { description: 'Claude Opus 上一代版本，保留用于兼容已有配置' },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -668,11 +750,26 @@ export const CHAT_MODELS: Model[] = [
     },
     // ── Google (Gemini) ──
     {
+        id: 'gemini-3.7-flash',
+        name: 'Gemini 3.7 Flash',
+        providerId: 'gemini',
+        type: 'chat',
+        metadata: {
+            description: 'Google 最新稳定 Flash 模型，原生多模态、1M 上下文，支持 Search grounding 与工具调用',
+            reasoningMode: 'gemini_level',
+            reasoningOptions: ['low', 'medium', 'high'],
+            reasoningDefault: 'high',
+            reasoningAlwaysEnabled: true
+        },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
         id: 'gemini-3.6-flash',
         name: 'Gemini 3.6 Flash',
         providerId: 'gemini',
         type: 'chat',
-        metadata: { description: 'Google 当前最新稳定模型，兼顾速度、智能水平与 Agent/多模态任务' },
+        metadata: { description: 'Google 上一代稳定 Flash 模型，保留用于兼容已有配置' },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -681,7 +778,7 @@ export const CHAT_MODELS: Model[] = [
         name: 'Gemini 3.5 Flash',
         providerId: 'gemini',
         type: 'chat',
-        metadata: { description: 'Google 最新稳定 Gemini 3.5 Flash，强调速度、多模态与思考能力' },
+        metadata: { description: 'Google 旧版 Flash 模型，建议迁移到 Gemini 3.7 Flash' },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -732,11 +829,26 @@ export const CHAT_MODELS: Model[] = [
     },
     // ── xAI (Grok) ──
     {
+        id: 'grok-4.6',
+        name: 'Grok 4.6',
+        providerId: 'grok',
+        type: 'chat',
+        metadata: {
+            description: 'xAI 最新旗舰模型，支持文本与图像输入、工具调用和可配置深度推理',
+            reasoningMode: 'openai_effort',
+            reasoningOptions: ['low', 'medium', 'high', 'xhigh'],
+            reasoningDefault: 'high',
+            reasoningAlwaysEnabled: true
+        },
+        tags: ['vision', 'reasoning'],
+        isSystem: true, isUserAdded: false
+    },
+    {
         id: 'grok-4.5',
         name: 'Grok 4.5',
         providerId: 'grok',
         type: 'chat',
-        metadata: { description: 'xAI 当前旗舰模型，适合通用对话、代码、工具调用与可配置推理' },
+        metadata: { description: 'xAI 上一代旗舰模型，保留用于兼容已有配置' },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
     },
@@ -915,30 +1027,34 @@ export const MINIMAX_MODELS: Model[] = [
 ]
 
 const LATEST_SYSTEM_MODEL_IDS = new Set([
+    'qwen3.7-text-embedding',
     'gpt-5.6',
     'gpt-5.6-sol',
     'gpt-5.6-terra',
     'gpt-5.6-luna',
-    'qwen3.7-max',
+    'qwen3.8-max',
+    'qwen3.8-flash',
     'qwen3.7-plus',
-    'qwen3.7-flash',
     'deepseek-v4-flash',
     'deepseek-v4-pro',
     'deepseek-v4-flash-vision-exp',
     'kimi-k3',
     'kimi-k2.7-code',
     'kimi-k2.6',
-    'glm-5.2',
+    'glm-5.3',
+    'glm-5.3-flash',
     'MiniMax-M3',
     'mimo-v2.5-pro',
     'mimo-v2.5',
     'claude-opus-5',
     'claude-fable-5',
     'claude-sonnet-5',
-    'gemini-3.6-flash',
-    'gemini-3.1-pro-preview',
-    'grok-4.5',
+    'claude-haiku-4-5-20251001',
+    'gemini-3.7-flash',
+    'grok-4.6',
     'doubao-seed-evolving',
+    'doubao-seed-2-1-pro-260628',
+    'doubao-seed-2-1-turbo-260628',
 ])
 
 /**
@@ -947,15 +1063,15 @@ const LATEST_SYSTEM_MODEL_IDS = new Set([
  */
 export const LATEST_PROVIDER_DEFAULTS: Record<string, string> = {
     openai: 'gpt-5.6',
-    aliyun: 'qwen3.7-max',
+    aliyun: 'qwen3.8-max',
     deepseek: 'deepseek-v4-pro',
     moonshot: 'kimi-k3',
-    zhipu: 'glm-5.2',
+    zhipu: 'glm-5.3',
     minimax: 'MiniMax-M3',
     xiaomi: 'mimo-v2.5-pro',
     anthropic: 'claude-opus-5',
-    gemini: 'gemini-3.6-flash',
-    grok: 'grok-4.5',
+    gemini: 'gemini-3.7-flash',
+    grok: 'grok-4.6',
     doubao: 'doubao-seed-evolving',
 }
 

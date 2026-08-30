@@ -152,11 +152,16 @@ class GeminiProvider(BaseProvider):
         parts = content.get("parts", [])
 
         text_content = ""
+        reasoning_content = ""
         tool_calls = []
 
         for part in parts:
             if "text" in part:
-                text_content += part["text"]
+                text = str(part.get("text") or "")
+                if part.get("thought") is True:
+                    reasoning_content += text
+                else:
+                    text_content += text
             elif "functionCall" in part:
                 # 将 Gemini functionCall 转换为 OpenAI tool_calls 格式
                 fc = part["functionCall"]
@@ -173,6 +178,8 @@ class GeminiProvider(BaseProvider):
             "role": "assistant",
             "content": text_content,
         }
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
         # 仅当存在 tool_calls 时才添加该字段
         if tool_calls:
             message["tool_calls"] = tool_calls
