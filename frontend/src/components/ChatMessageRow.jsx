@@ -5,6 +5,7 @@ import {
   ChevronDown,
   Copy,
   Database,
+  Files,
   Image as ImageIcon,
   Loader2,
   MessageCircle,
@@ -71,6 +72,73 @@ const MEMORY_KIND_LABELS = {
   episodic: '对话摘要',
   consolidated: '压缩事实',
   graph: '图谱',
+};
+
+/**
+ * 关联文档执行结果。
+ *
+ * 伴随文档检索失败在后端是 fail-open 的：照常出答案，只写诊断。没有这条
+ * 提示，用户无法区分"关联文档里确实没有相关内容"和"关联根本没生效"。
+ */
+const MultiDocFanoutNotice = ({ fanout }) => {
+  const [expanded, setExpanded] = useState(false);
+  if (!fanout || fanout.companionCount <= 0) return null;
+
+  const { usedDocs, skippedDocs, dedupedDocs, conflictCount, summaryDeferred } = fanout;
+  const hasIssue = skippedDocs.length > 0 || usedDocs.length === 0;
+  const headline = usedDocs.length > 0
+    ? `已参考 ${usedDocs.length} 篇关联文档`
+    : '关联文档未提供可用内容';
+
+  return (
+    <div className="mb-1">
+      <button
+        type="button"
+        onClick={() => setExpanded((open) => !open)}
+        className={`flex w-full items-center gap-1.5 rounded-[10px] px-2.5 py-2 text-left text-xs transition-colors ${
+          hasIssue
+            ? 'bg-amber-50/90 text-amber-800 hover:bg-amber-50 dark:bg-amber-300/[0.08] dark:text-amber-50'
+            : 'bg-[#F7F6F3] text-gray-600 hover:bg-[#F2F0EC] dark:bg-white/[0.06] dark:text-gray-300 dark:hover:bg-white/10'
+        }`}
+      >
+        <Files className="h-3.5 w-3.5 flex-shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{headline}</span>
+        {conflictCount > 0 && (
+          <span className="flex-shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 dark:bg-amber-300/20 dark:text-amber-50">
+            {conflictCount} 处数值待核
+          </span>
+        )}
+        <ChevronDown className={`h-3 w-3 flex-shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+      </button>
+      {expanded && (
+        <div className="mt-1 space-y-1 rounded-[10px] border border-gray-100 bg-white px-2.5 py-2 text-[11px] text-gray-600 dark:border-white/10 dark:bg-white/[0.04] dark:text-gray-300">
+          {usedDocs.map((item) => (
+            <div key={`used-${item.docId}`} className="flex items-center gap-1.5">
+              <Check className="h-3 w-3 flex-shrink-0 text-emerald-600" />
+              <span className="min-w-0 flex-1 truncate">{item.docName}</span>
+            </div>
+          ))}
+          {skippedDocs.map((item) => (
+            <div key={`skipped-${item.docId}`} className="flex items-center gap-1.5">
+              <X className="h-3 w-3 flex-shrink-0 text-amber-600" />
+              <span className="min-w-0 flex-1 truncate">{item.docName}</span>
+              <span className="flex-shrink-0 text-gray-400">{item.reason}</span>
+            </div>
+          ))}
+          {dedupedDocs.length > 0 && (
+            <div className="pt-0.5 text-gray-400">
+              {dedupedDocs.length} 篇被识别为同一论文的旧版本，已自动跳过
+            </div>
+          )}
+          {summaryDeferred && (
+            <div className="pt-0.5 text-gray-400">
+              因为选择了关联文档，本次未使用单篇全文大纲总结
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 };
 
 const MemoryHitsBadge = ({ hits, meta }) => {
@@ -415,7 +483,13 @@ function ChatMessageRowInner({
     && !hasCitationRisk(msg.answerCritic)
     && hasOverreachRisk(msg.answerCritic),
   );
-  const showProcessRail = shouldShowThinking || showLowRelevanceNotice || showCriticHallucination || showCriticCitation || showCriticOverreach;
+  const showMultiDocFanout = Boolean(
+    msg.type === 'assistant'
+    && !msg.isStreaming
+    && msg.multiDocFanout
+    && msg.multiDocFanout.companionCount > 0,
+  );
+  const showProcessRail = shouldShowThinking || showLowRelevanceNotice || showMultiDocFanout || showCriticHallucination || showCriticCitation || showCriticOverreach;
   const shouldStreamContent = isStreamingCurrentMessage;
   const isEmbeddingIdentityConflict = msg.type === 'assistant' && msg.embeddingIdentityConflict === true;
   const selectedEmbeddingConfig = isEmbeddingIdentityConflict
@@ -483,6 +557,7 @@ function ChatMessageRowInner({
                 } : null}
               />
             )}
+            {showMultiDocFanout && <MultiDocFanoutNotice fanout={msg.multiDocFanout} />}
             {showLowRelevanceNotice && (
               <div className="mb-1 px-2.5 py-2 rounded-[10px] bg-amber-50/90 border border-amber-200/80 text-amber-800 text-xs flex items-center gap-1.5 dark:bg-amber-300/[0.08] dark:border-amber-300/20 dark:text-amber-50">
                 <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" /></svg>

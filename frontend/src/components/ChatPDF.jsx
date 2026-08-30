@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  ArrowLeft,
   ArrowRight,
   ArrowUpDown,
   ArrowUpRight,
@@ -76,6 +77,8 @@ import ReadingAnalysisPanel from './ReadingAnalysisPanel';
 import ReadingSummaryPanel from './ReadingSummaryPanel';
 import SettingsSegmentedControl from './SettingsSegmentedControl';
 import SettingsRange from './SettingsRange';
+import FontSettingsPanel from './FontSettingsPanel';
+import WebSearchPanel from './WebSearchPanel';
 import ParseRouteSelect from './ParseRouteSelect';
 import LocalParserInstallDialog from './LocalParserInstallDialog';
 import SessionDeleteDialog from './SessionDeleteDialog';
@@ -93,6 +96,7 @@ import {
 } from '../utils/parseRouteUtils';
 import { getMinerUProgressPresentation } from '../utils/mineruProgressUtils';
 import { stabilizeLiveParseStatus } from '../utils/chatMessageRowMemo';
+import { buildCrossDocumentOptions } from '../utils/crossDocumentPicker';
 import { shouldStreamAssistantContent } from '../utils/messageRenderUtils';
 import {
   blockIndexMatchesParseContext,
@@ -1599,6 +1603,10 @@ const ChatPDF = () => {
   const [crossDocumentMenuOpen, setCrossDocumentMenuOpen] = useState(false);
   const [crossDocumentCandidates, setCrossDocumentCandidates] = useState([]);
   const [crossDocumentLoading, setCrossDocumentLoading] = useState(false);
+  const [crossDocumentQuery, setCrossDocumentQuery] = useState('');
+  // 跟随跨文档引用跳转后的回程入口。记录 toDocId 是为了让它自动失效：
+  // 用户一旦离开被跳转到的那篇文档，这条回程提示就不该继续挂着。
+  const [crossDocumentReturn, setCrossDocumentReturn] = useState(null);
   const historyDocumentCandidates = useMemo(() => (
     (history || [])
       .filter((item) => item?.docId && String(item.docId) !== String(docId || ''))
@@ -1609,21 +1617,25 @@ const ChatPDF = () => {
         upload_time: item.updatedAt || item.createdAt || 0,
       }))
   ), [docId, history]);
-  const crossDocumentOptions = useMemo(() => {
-    const byId = new Map();
-    [...crossDocumentCandidates, ...historyDocumentCandidates].forEach((candidate) => {
-      const candidateId = String(candidate?.doc_id || '').trim();
-      if (!candidateId || candidateId === String(docId || '')) return;
-      const existing = byId.get(candidateId);
-      if (!existing) byId.set(candidateId, { ...candidate, doc_id: candidateId });
-    });
-    return [...byId.values()].slice(0, 8);
-  }, [crossDocumentCandidates, docId, historyDocumentCandidates]);
-  const loadCrossDocumentCandidates = useCallback(async () => {
+  const crossDocumentOptions = useMemo(() => (
+    buildCrossDocumentOptions({
+      backendCandidates: crossDocumentCandidates,
+      historyCandidates: historyDocumentCandidates,
+      selectedIds: crossDocumentIds,
+      query: crossDocumentQuery,
+      primaryDocId: docId,
+    })
+  ), [crossDocumentCandidates, crossDocumentIds, crossDocumentQuery, docId, historyDocumentCandidates]);
+  const loadCrossDocumentCandidates = useCallback(async (query = '') => {
     if (!docId) return;
+    const normalizedQuery = String(query || '').trim();
     setCrossDocumentLoading(true);
     try {
-      const params = new URLSearchParams({ exclude_doc_id: String(docId), limit: '8' });
+      const params = new URLSearchParams({
+        exclude_doc_id: String(docId),
+        limit: normalizedQuery ? '20' : '8',
+      });
+      if (normalizedQuery) params.set('query', normalizedQuery);
       const response = await fetch(`${API_BASE_URL}/documents/recall?${params.toString()}`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = await response.json();
@@ -1646,13 +1658,36 @@ const ChatPDF = () => {
   }, [docId]);
   const toggleCrossDocumentMenu = useCallback(() => {
     setCrossDocumentMenuOpen((open) => {
-      if (!open) void loadCrossDocumentCandidates();
+      if (open) {
+        setCrossDocumentQuery('');
+      } else {
+        void loadCrossDocumentCandidates();
+      }
       return !open;
     });
   }, [loadCrossDocumentCandidates]);
+  // 打开状态下才跟着输入去检索。后端按标题排序返回，文档变多时这是唯一
+  // 能找到"最近 8 篇之外"那些文档的入口。
   useEffect(() => {
-    setCrossDocumentIds((previous) => previous.filter((item) => item !== String(docId || '')));
+    if (!crossDocumentMenuOpen) return undefined;
+    const timer = window.setTimeout(() => {
+      void loadCrossDocumentCandidates(crossDocumentQuery);
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [crossDocumentMenuOpen, crossDocumentQuery, loadCrossDocumentCandidates]);
+  // 关联选择属于"当前这篇文档的这轮阅读"，切换主文档后必须整体清空。
+  // 只剔除新主文档会让上一篇的勾选悄悄跟到下一个会话里，用户看不到来源
+  // 却多花一次跨文档检索。
+  useEffect(() => {
+    setCrossDocumentIds([]);
+    setCrossDocumentCandidates([]);
     setCrossDocumentMenuOpen(false);
+    setCrossDocumentQuery('');
+    // 回程入口只在跳转目标文档上有意义。用户另行切走后就丢弃，
+    // 否则以后偶然回到这篇文档会冒出一条早已过期的返回提示。
+    setCrossDocumentReturn((previous) => (
+      previous && String(previous.toDocId) === String(docId || '') ? previous : null
+    ));
   }, [docId]);
 
   const openUploadHome = useCallback(() => {
@@ -4986,15 +5021,49 @@ const ChatPDF = () => {
     if (!citation || typeof citation !== 'object') return;
     setActiveCitationRef(citation?.ref ?? null);
     const targetDocId = String(citation.doc_id || '').trim();
-    if (targetDocId && targetDocId !== String(docId || '')) {
+    const currentDocId = String(docId || '');
+    if (targetDocId && targetDocId !== currentDocId) {
+      // 跳转会把整个工作区换到伴随文档。先把当前会话落盘（保存是防抖的），
+      // 再记下来路，否则用户读完引用就没有回到多文档对话的入口了。
+      flushCurrentSession?.();
       const session = (history || []).find((item) => String(item?.docId || '') === targetDocId)
         || { id: targetDocId, docId: targetDocId, messages: [] };
+      setCrossDocumentReturn(currentDocId
+        ? {
+          fromDocId: currentDocId,
+          fromFilename: String(docInfo?.filename || '').trim() || '原文档',
+          toDocId: targetDocId,
+        }
+        : null);
       await loadSession(session);
       window.setTimeout(() => handleCitationClick(citation), 180);
       return;
     }
     handleCitationClick(citation);
-  }, [docId, handleCitationClick, history, loadSession, setActiveCitationRef]);
+  }, [
+    docId,
+    docInfo?.filename,
+    flushCurrentSession,
+    handleCitationClick,
+    history,
+    loadSession,
+    setActiveCitationRef,
+  ]);
+
+  const showCrossDocumentReturn = Boolean(
+    crossDocumentReturn?.fromDocId
+    && String(docId || '') === String(crossDocumentReturn.toDocId),
+  );
+
+  const handleCrossDocumentReturn = useCallback(async () => {
+    const target = crossDocumentReturn;
+    if (!target?.fromDocId) return;
+    flushCurrentSession?.();
+    const session = (history || []).find((item) => String(item?.docId || '') === target.fromDocId)
+      || { id: target.fromDocId, docId: target.fromDocId, messages: [] };
+    setCrossDocumentReturn(null);
+    await loadSession(session);
+  }, [crossDocumentReturn, flushCurrentSession, history, loadSession]);
 
   const messageRowRuntime = useMemo(() => ({
     darkMode,
@@ -6237,6 +6306,29 @@ const ChatPDF = () => {
                 />
               ) : (
                 <>
+                  {/* 跨文档引用跳转的回程入口。只在停留于被跳转到的那篇
+                      文档时显示；用户一旦另行切换文档就自动消失。 */}
+                  {showCrossDocumentReturn && (
+                    <div className="px-6 pt-4">
+                      <button
+                        type="button"
+                        onClick={handleCrossDocumentReturn}
+                        className={`flex w-full items-center gap-2 rounded-[10px] border px-3 py-2 text-left text-xs transition-colors ${
+                          darkMode
+                            ? 'border-white/10 bg-white/[0.06] text-gray-300 hover:bg-white/10'
+                            : 'border-[#E9E5DF] bg-[#F7F6F3] text-gray-600 hover:bg-[#F2F0EC]'
+                        }`}
+                      >
+                        <ArrowLeft size={14} className="flex-shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">
+                          返回 {crossDocumentReturn.fromFilename}
+                        </span>
+                        <span className={`flex-shrink-0 text-[10px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                          从引用跳转而来
+                        </span>
+                      </button>
+                    </div>
+                  )}
                   {/* 虚拟消息列表 - 替代原有的 messages.map 渲染（需求 3.1） */}
                   <VirtualMessageList
                     messages={messages}
@@ -6357,6 +6449,20 @@ const ChatPDF = () => {
                                 </button>
                               )}
                             </div>
+                            <div className="px-1.5 pb-1.5">
+                              <input
+                                type="text"
+                                value={crossDocumentQuery}
+                                onChange={(event) => setCrossDocumentQuery(event.target.value)}
+                                placeholder="搜索文档标题"
+                                aria-label="搜索可关联的文档"
+                                className={`w-full rounded-[8px] border px-2 py-1.5 text-[12px] outline-none transition-colors ${
+                                  darkMode
+                                    ? 'border-white/10 bg-white/[0.06] text-gray-100 placeholder:text-gray-500 focus:border-white/25'
+                                    : 'border-[#E9E5DF] bg-[#F7F6F3] text-gray-800 placeholder:text-gray-400 focus:border-[#DF6A45]/50'
+                                }`}
+                              />
+                            </div>
                             <div className="max-h-[224px] space-y-0.5 overflow-y-auto px-0.5 pb-0.5">
                               {crossDocumentOptions.map((candidate) => {
                                 const selected = crossDocumentIds.includes(candidate.doc_id);
@@ -6395,7 +6501,9 @@ const ChatPDF = () => {
                                 );
                               })}
                               {!crossDocumentLoading && crossDocumentOptions.length === 0 && (
-                                <div className={`px-2.5 py-4 text-center text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>暂无可关联文档</div>
+                                <div className={`px-2.5 py-4 text-center text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                                  {crossDocumentQuery.trim() ? '没有匹配的文档' : '暂无可关联文档'}
+                                </div>
                               )}
                               {crossDocumentLoading && (
                                 <div className={`px-2.5 py-4 text-center text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>正在载入文档</div>
@@ -6567,6 +6675,7 @@ const ChatPDF = () => {
                   >
                 
                 {settingsSection === 'common' && (
+                <>
                 <section className="px-1" aria-labelledby="current-models-heading">
                   <div className="mb-2.5 flex items-end justify-between gap-4 px-1">
                     <div>
@@ -6640,21 +6749,140 @@ const ChatPDF = () => {
                     </div>
                   </div>
                 </section>
+
+                <section className="px-1" aria-labelledby="visual-model-heading">
+                  <div className="mb-2.5 flex items-end justify-between gap-4 px-1">
+                    <div>
+                      <h3 id="visual-model-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>图表理解模型</h3>
+                      <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>解读图表、核验表格截图</p>
+                    </div>
+                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${visualPolicyReady ? 'bg-emerald-500/10 text-emerald-600' : 'bg-[#FBE9E2] text-[#B85F47]'}`}>
+                      {visualStrategy === 'privacy'
+                        ? (hasLocalVisualModel ? '仅本地' : '需本地模型')
+                        : (visualPolicyReady ? '可用' : '需选择')}
+                    </span>
+                  </div>
+                  <div className={`settings-card p-5 space-y-3 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
+                    <SettingsSegmentedControl
+                      ariaLabel="视觉增强策略"
+                      value={visualStrategy}
+                      onChange={setVisualStrategy}
+                      options={[
+                        { value: 'privacy', label: '隐私优先' },
+                        { value: 'balanced', label: '平衡' },
+                        { value: 'quality', label: '质量优先' },
+                      ]}
+                      className="mt-2.5 rounded-[12px]"
+                      buttonClassName="py-1.5 text-[11px] font-bold text-center rounded-[9px]"
+                      indicatorClassName="rounded-[9px]"
+                    />
+                    <div className="mt-3">
+                      <div className={`mb-1.5 text-[10px] font-semibold ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>强视觉模型</div>
+                      <CustomSelect
+                        value={visualModelKey}
+                        onChange={setVisualModelKey}
+                        options={visualModelOptions}
+                        unavailableLabel={visualModelKey && visualModelKey !== 'follow_chat'
+                          ? `已保存：${visualModelKey.replace(':', ' · ')}（当前不可用）`
+                          : undefined}
+                      />
+                    </div>
+                    <div className="mt-2.5">
+                      <div className={`mb-1.5 flex items-center justify-between text-[10px] font-semibold ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                        <span>本地视觉模型</span>
+                        {visualStrategy === 'privacy' && <span className="text-[#B85F47]">仅本地</span>}
+                      </div>
+                      <CustomSelect
+                        value={localVisualModelKey}
+                        onChange={setLocalVisualModelKey}
+                        options={localVisualModelOptions}
+                        unavailableLabel={localVisualModelKey && localVisualModelKey !== 'none'
+                          ? `已保存：${localVisualModelKey.replace(':', ' · ')}（当前不可用）`
+                          : undefined}
+                      />
+                    </div>
+                    <div className={`mt-3 rounded-[11px] border px-3 py-2.5 ${darkMode ? 'border-white/10 bg-black/15' : 'border-[#eadfd9] bg-[#fffaf7]'}`}>
+                      <div className={`text-[10px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>表格核验</div>
+                      <div className={`mt-1 text-[11px] leading-snug ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                        表格截图走上方视觉模型，不走检索辅助模型
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="px-1" aria-labelledby="more-settings-heading">
+                  <div className="mb-2.5 px-1">
+                    <h3 id="more-settings-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>详细设置</h3>
+                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>点击进入完整配置</p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3">
+                    {[
+                      {
+                        Icon: Type,
+                        label: '全局设置',
+                        desc: '字体、记忆和联网',
+                        meta: `${Math.round((globalScale || 1) * 100)}% 界面 · 记忆${enableMemory ? '开启' : '关闭'}`,
+                        onClick: () => { setShowSettings(false); setShowGlobalSettings(true); },
+                      },
+                      {
+                        Icon: SlidersHorizontal,
+                        label: '对话设置',
+                        desc: '发送、消息和公式',
+                        meta: `${sendShortcut === 'Ctrl+Enter' ? 'Ctrl + Enter' : 'Enter'} 发送 · ${streamOutput ? '流式' : '整段'} · ${messageStyle === 'bubble' ? '气泡' : '简洁'}`,
+                        onClick: () => { setShowSettings(false); setShowChatSettings(true); },
+                      },
+                      {
+                        Icon: ScanText,
+                        label: '解析设置',
+                        desc: '上传路线和 OCR',
+                        meta: selectedParseRoute === 'local' ? '本地全程 · 设备内处理' : 'MinerU 全程 · 结构化解析',
+                        onClick: () => { setShowSettings(false); setShowOCRSettings(true); },
+                      },
+                    ].map(({ Icon, label, desc, meta, onClick }) => (
+                      <button
+                        key={label}
+                        onClick={onClick}
+                        className={`settings-entry-row settings-card settings-card-interactive flex min-h-[128px] w-full flex-col p-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/25 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}
+                      >
+                        <div className="flex w-full items-start justify-between">
+                          <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] ${darkMode ? 'bg-white/[0.06] text-gray-400' : 'bg-gray-100/90 text-gray-500'}`}>
+                            <Icon size={16} strokeWidth={2.1} />
+                          </div>
+                          <span className="settings-entry-arrow" aria-hidden="true">
+                            <ChevronRight className="h-3.5 w-3.5" strokeWidth={2.2} />
+                          </span>
+                        </div>
+                        <div className="mt-3 min-w-0">
+                          <div className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{label}</div>
+                          <div className={`mt-1 text-[11px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>{desc}</div>
+                        </div>
+                        <div className={`mt-auto truncate pt-3 text-[10px] font-semibold ${darkMode ? 'text-[#e5a28d]' : 'text-[#A65B45]'}`} title={meta}>{meta}</div>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+                </>
                 )}
 
                 {/* 智能阅读 — 从「全局设置 > 阅读」上移为一级分区：
                     大纲/总结/预翻译/速览是产品核心能力，不应藏在三级深度 */}
                 {settingsSection === 'reading' && (
-                <div className={`settings-card p-5 border space-y-3 mt-2 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
-                  <SettingsCheckRow
-                    title="智能阅读"
-                    description="关闭后打开文档不调用模型"
-                    checked={aiAutoProcess}
-                    onChange={setAiAutoProcess}
-                    darkMode={darkMode}
-                  />
+                <>
+                  <section className="px-1" aria-labelledby="reading-auto-heading">
+                  <div className="mb-2.5 px-1">
+                    <h3 id="reading-auto-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>自动处理</h3>
+                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>打开文档后自动做哪些事</p>
+                  </div>
+                    <div className={`settings-card p-5 space-y-3 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
+                    <SettingsCheckRow
+                      title="智能阅读"
+                      description="关闭后打开文档不调用模型"
+                      checked={aiAutoProcess}
+                      onChange={setAiAutoProcess}
+                      darkMode={darkMode}
+                    />
 
-                  <div className={`space-y-3 pt-1 ${aiAutoProcess ? '' : 'opacity-50 pointer-events-none'}`}>
+                      <div className={`space-y-3 pt-1 ${aiAutoProcess ? '' : 'opacity-50 pointer-events-none'}`}>
                     <SettingsCheckRow
                       title="大纲与总结"
                       description="打开后生成左侧总结和大纲"
@@ -6678,26 +6906,16 @@ const ChatPDF = () => {
                       onChange={setBlockSummary}
                       darkMode={darkMode}
                     />
-
-                    <div className="settings-inset p-3.5 rounded-[14px]">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className={`text-[12px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>预翻译并发</div>
-                          <div className={`text-[11px] mt-0.5 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>限速模型用 3–6，高速模型可更高</div>
-                        </div>
-                        <span className="text-[12px] font-bold text-[#B85F47] tabular-nums">{pretranslateConcurrency}</span>
                       </div>
-                      <SettingsRange
-                        ariaLabel="预翻译并发"
-                        min="1"
-                        max="16"
-                        step="1"
-                        value={pretranslateConcurrency}
-                        onChange={setPretranslateConcurrency}
-                        className="mt-3"
-                      />
                     </div>
+                  </section>
 
+                  <section className="px-1" aria-labelledby="reading-generation-heading">
+                  <div className="mb-2.5 px-1">
+                    <h3 id="reading-generation-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>生成选项</h3>
+                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>速览深度与预翻译速度</p>
+                  </div>
+                    <div className={`settings-card p-5 space-y-3 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'} ${aiAutoProcess ? '' : 'opacity-50 pointer-events-none'}`}>
                     <div className="settings-inset p-3.5 rounded-[14px]">
                       <div className={`text-[12px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>速览默认详细度</div>
                       <SettingsSegmentedControl
@@ -6717,116 +6935,26 @@ const ChatPDF = () => {
                     </div>
 
                     <div className="settings-inset p-3.5 rounded-[14px]">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className={`text-[12px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>图表理解模型</div>
-                          <p className={`mt-0.5 text-[11px] leading-snug ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                            解读图表、核验表格
-                          </p>
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className={`text-[12px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-700'}`}>预翻译并发</div>
+                          <div className={`text-[11px] mt-0.5 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>限速模型用 3–6，高速模型可更高</div>
                         </div>
-                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${visualPolicyReady ? 'bg-emerald-500/10 text-emerald-600' : 'bg-[#FBE9E2] text-[#B85F47]'}`}>
-                          {visualStrategy === 'privacy'
-                            ? (hasLocalVisualModel ? '仅本地' : '需本地模型')
-                            : (visualPolicyReady ? '可用' : '需选择')}
-                        </span>
+                        <span className="text-[12px] font-bold text-[#B85F47] tabular-nums">{pretranslateConcurrency}</span>
                       </div>
-                      <SettingsSegmentedControl
-                        ariaLabel="视觉增强策略"
-                        value={visualStrategy}
-                        onChange={setVisualStrategy}
-                        options={[
-                          { value: 'privacy', label: '隐私优先' },
-                          { value: 'balanced', label: '平衡' },
-                          { value: 'quality', label: '质量优先' },
-                        ]}
-                        className="mt-2.5 rounded-[12px]"
-                        buttonClassName="py-1.5 text-[11px] font-bold text-center rounded-[9px]"
-                        indicatorClassName="rounded-[9px]"
-                      />
-                      <div className="mt-3">
-                        <div className={`mb-1.5 text-[10px] font-semibold ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>强视觉模型</div>
-                        <CustomSelect
-                          value={visualModelKey}
-                          onChange={setVisualModelKey}
-                          options={visualModelOptions}
-                          unavailableLabel={visualModelKey && visualModelKey !== 'follow_chat'
-                            ? `已保存：${visualModelKey.replace(':', ' · ')}（当前不可用）`
-                            : undefined}
-                        />
-                      </div>
-                      <div className="mt-2.5">
-                        <div className={`mb-1.5 flex items-center justify-between text-[10px] font-semibold ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                          <span>本地视觉模型</span>
-                          {visualStrategy === 'privacy' && <span className="text-[#B85F47]">仅本地</span>}
-                        </div>
-                        <CustomSelect
-                          value={localVisualModelKey}
-                          onChange={setLocalVisualModelKey}
-                          options={localVisualModelOptions}
-                          unavailableLabel={localVisualModelKey && localVisualModelKey !== 'none'
-                            ? `已保存：${localVisualModelKey.replace(':', ' · ')}（当前不可用）`
-                            : undefined}
-                        />
-                      </div>
-                      <div className={`mt-3 rounded-[11px] border px-3 py-2.5 ${darkMode ? 'border-white/10 bg-black/15' : 'border-[#eadfd9] bg-[#fffaf7]'}`}>
-                        <div className={`text-[10px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>表格核验</div>
-                        <div className={`mt-1 text-[11px] leading-snug ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                          表格截图走上方视觉模型，不走检索辅助模型
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-                )}
-
-                {settingsSection === 'interface' && (
-                <section className="px-1" aria-labelledby="display-font-size-heading">
-                  <div className="mb-2.5 px-1">
-                    <h3 id="display-font-size-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>显示与字号</h3>
-                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>内容和界面分开调</p>
-                  </div>
-                  <div className={`settings-card divide-y overflow-hidden ${darkMode ? 'settings-card-dark divide-[#373b44] bg-[#24272e] border-[#373b44]' : 'divide-gray-100 bg-white border-gray-200/90'}`}>
-                    <div className="grid grid-cols-[1fr_300px] items-center gap-5 px-5 py-[18px]">
-                      <div className="min-w-0">
-                        <div className={`text-[13px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>内容字号</div>
-                        <p className={`mt-1 text-[11px] leading-snug ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>回答、总结、大纲、翻译等正文</p>
-                      </div>
-                      <SettingsSegmentedControl
-                        ariaLabel="内容字号"
-                        value={messageFontSize <= 13 ? 13 : messageFontSize >= 18 ? 18 : messageFontSize >= 16 ? 16 : 14}
-                        onChange={setMessageFontSize}
-                        options={[
-                          { value: 13, label: '小' },
-                          { value: 14, label: '标准' },
-                          { value: 16, label: '大' },
-                          { value: 18, label: '特大' },
-                        ]}
-                        className="rounded-[12px]"
-                        buttonClassName="py-1.5 text-[11px] font-bold text-center rounded-[9px]"
-                        indicatorClassName="rounded-[9px]"
+                      <SettingsRange
+                        ariaLabel="预翻译并发"
+                        min="1"
+                        max="16"
+                        step="1"
+                        value={pretranslateConcurrency}
+                        onChange={setPretranslateConcurrency}
+                        className="mt-3"
                       />
                     </div>
-                    <div className="grid grid-cols-[1fr_300px] items-center gap-5 px-5 py-[18px]">
-                      <div className="min-w-0">
-                        <div className={`text-[13px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>界面字号</div>
-                        <p className={`mt-1 text-[11px] leading-snug ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>侧栏、按钮和设置</p>
-                      </div>
-                      <SettingsSegmentedControl
-                        ariaLabel="界面字号"
-                        value={globalScale < 0.95 ? 0.9 : globalScale > 1.05 ? 1.1 : 1}
-                        onChange={setGlobalScale}
-                        options={[
-                          { value: 0.9, label: '紧凑' },
-                          { value: 1, label: '标准' },
-                          { value: 1.1, label: '放大' },
-                        ]}
-                        className="rounded-[12px]"
-                        buttonClassName="py-1.5 text-[11px] font-bold text-center rounded-[9px]"
-                        indicatorClassName="rounded-[9px]"
-                      />
                     </div>
-                  </div>
-                </section>
+                  </section>
+                </>
                 )}
 
                 {settingsSection === 'retrieval' && (
@@ -6981,6 +7109,41 @@ const ChatPDF = () => {
                     </div>
                   </section>
 
+                  {/* 联网搜索是一条检索来源，与上面的向量/图谱/代理同层；
+                      原先藏在「全局设置 > 服务」里，与检索分区割裂 */}
+                  <section className="px-1" aria-labelledby="web-search-heading">
+                    <div className="mb-2.5 px-1">
+                      <h3 id="web-search-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>联网搜索</h3>
+                      <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>文档之外再补一路网络证据</p>
+                    </div>
+                    <WebSearchPanel darkMode={darkMode} />
+                  </section>
+
+                  <section className="px-1" aria-labelledby="retrieval-param-heading">
+                  <div className="mb-2.5 px-1">
+                    <h3 id="retrieval-param-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>检索参数</h3>
+                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>命中段前后带上多少上下文</p>
+                  </div>
+                  <div className={`settings-card p-5 border space-y-4 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
+                    <div className="space-y-3">
+                      <div className="flex flex-col gap-1.5">
+                        <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>邻居上下文扩展</label>
+                        <CustomSelect
+                          value={numExpandContextChunk}
+                          onChange={setNumExpandContextChunk}
+                          options={[
+                            { value: 0, label: '关闭' },
+                            { value: 1, label: '±1 块' },
+                            { value: 2, label: '±2 块' },
+                            { value: 3, label: '±3 块' },
+                          ]}
+                        />
+                        <p className="text-[11px] text-gray-500 mt-0.5">命中段前后各带上几块</p>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
                   <section className="px-1" aria-labelledby="retrieval-tuning-heading">
                     <div className={`settings-card overflow-hidden ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
                       <button
@@ -7075,10 +7238,118 @@ const ChatPDF = () => {
                       </AnimatePresence>
                     </div>
                   </section>
+
+                  {/* 运行诊断，不是设置项：没有调用记录时整块不渲染，避免留一个空标题 */}
+                  {lastCallInfo && (
+                    <section className="px-1" aria-labelledby="retrieval-diagnostic-heading">
+                      <div className="mb-2.5 px-1">
+                        <h3 id="retrieval-diagnostic-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>最近一次调用</h3>
+                        <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>本次问答实际使用的模型与用量</p>
+                      </div>
+                      <div className={`settings-card p-3.5 text-[12px] ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
+                        <div className="flex justify-between items-center mb-1.5">
+                          <span className="text-gray-500">调用来源</span>
+                          <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>{lastCallInfo.provider || '未知'}</strong>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-gray-500">模型</span>
+                          <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>{lastCallInfo.model || '未返回'}</strong>
+                        </div>
+                        {(() => {
+                          const usage = getUsageTokenSummary(lastCallInfo.usage);
+                          if (!usage) return null;
+                          return (
+                            <>
+                            <div className="mt-1.5 flex justify-between items-center">
+                              <span className="text-gray-500">Token</span>
+                              <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>
+                                {Number.isFinite(usage.total) ? usage.total : '-'}
+                                <span className="ml-1 font-normal text-gray-400">
+                                  ({Number.isFinite(usage.prompt) ? usage.prompt : '-'} / {Number.isFinite(usage.completion) ? usage.completion : '-'})
+                                </span>
+                                {usage.estimated && <span className="ml-1 font-normal text-gray-400">估</span>}
+                              </strong>
+                            </div>
+                            {usage.cost && Number.isFinite(usage.cost.amount) && (
+                              <div className="mt-1.5 flex justify-between items-center">
+                                <span className="text-gray-500">费用</span>
+                                <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>
+                                  {usage.cost.currency} {usage.cost.amount}
+                                  {usage.cost.estimated && <span className="ml-1 font-normal text-gray-400">估</span>}
+                                </strong>
+                              </div>
+                            )}
+                            </>
+                          );
+                        })()}
+                        {lastCallInfo.fallback && (
+                          <div className="mt-2 pt-2 border-t border-gray-200/50 text-amber-600 font-medium flex items-center justify-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                            已切换备用模型
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                  )}
                 </>
                 )}
 
                 {settingsSection === 'interface' && (
+                <>
+                {/* 字体与字号是同一件事，原先字体在「全局设置 > 显示」、字号在这里，分裂两处。
+                    预设有二十多个，折叠卡自带标题行，这里不再另起分区标题 */}
+                <section className="px-1" aria-label="界面字体">
+                  <FontSettingsPanel darkMode={darkMode} />
+                </section>
+
+                <section className="px-1" aria-labelledby="display-font-size-heading">
+                  <div className="mb-2.5 px-1">
+                    <h3 id="display-font-size-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>显示与字号</h3>
+                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>内容和界面分开调</p>
+                  </div>
+                  <div className={`settings-card divide-y overflow-hidden ${darkMode ? 'settings-card-dark divide-[#373b44] bg-[#24272e] border-[#373b44]' : 'divide-gray-100 bg-white border-gray-200/90'}`}>
+                    <div className="grid grid-cols-[1fr_300px] items-center gap-5 px-5 py-[18px]">
+                      <div className="min-w-0">
+                        <div className={`text-[13px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>内容字号</div>
+                        <p className={`mt-1 text-[11px] leading-snug ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>回答、总结、大纲、翻译等正文</p>
+                      </div>
+                      <SettingsSegmentedControl
+                        ariaLabel="内容字号"
+                        value={messageFontSize <= 13 ? 13 : messageFontSize >= 18 ? 18 : messageFontSize >= 16 ? 16 : 14}
+                        onChange={setMessageFontSize}
+                        options={[
+                          { value: 13, label: '小' },
+                          { value: 14, label: '标准' },
+                          { value: 16, label: '大' },
+                          { value: 18, label: '特大' },
+                        ]}
+                        className="rounded-[12px]"
+                        buttonClassName="py-1.5 text-[11px] font-bold text-center rounded-[9px]"
+                        indicatorClassName="rounded-[9px]"
+                      />
+                    </div>
+                    <div className="grid grid-cols-[1fr_300px] items-center gap-5 px-5 py-[18px]">
+                      <div className="min-w-0">
+                        <div className={`text-[13px] font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>界面字号</div>
+                        <p className={`mt-1 text-[11px] leading-snug ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>侧栏、按钮和设置</p>
+                      </div>
+                      <SettingsSegmentedControl
+                        ariaLabel="界面字号"
+                        value={globalScale < 0.95 ? 0.9 : globalScale > 1.05 ? 1.1 : 1}
+                        onChange={setGlobalScale}
+                        options={[
+                          { value: 0.9, label: '紧凑' },
+                          { value: 1, label: '标准' },
+                          { value: 1.1, label: '放大' },
+                        ]}
+                        className="rounded-[12px]"
+                        buttonClassName="py-1.5 text-[11px] font-bold text-center rounded-[9px]"
+                        indicatorClassName="rounded-[9px]"
+                      />
+                    </div>
+                  </div>
+                </section>
+
                 <section className="px-1" aria-labelledby="reading-toolbar-heading">
                   <div className="mb-2.5 px-1">
                     <h3 id="reading-toolbar-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>阅读工具栏</h3>
@@ -7131,9 +7402,7 @@ const ChatPDF = () => {
                     </div>
                   </div>
                 </section>
-                )}
 
-                {settingsSection === 'interface' && (
                 <section className="px-1" aria-labelledby="answer-presentation-heading">
                   <div className="mb-2.5 px-1">
                     <h3 id="answer-presentation-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>回答呈现</h3>
@@ -7182,12 +7451,16 @@ const ChatPDF = () => {
                     </div>
                   </div>
                 </section>
+                </>
                 )}
 
                 {settingsSection === 'storage' && (
-                <div className={`settings-card p-5 border space-y-4 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
-                  <div>
-                    <h3 className={`text-[13px] font-bold tracking-wider uppercase mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>存储信息</h3>
+                <section className="px-1" aria-labelledby="storage-location-heading">
+                  <div className="mb-2.5 px-1">
+                    <h3 id="storage-location-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>存储信息</h3>
+                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>文件位置与当前文档缓存</p>
+                  </div>
+                  <div className={`settings-card p-5 space-y-4 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
                     {storageInfo ? (
                       <div className="space-y-2">
                         <div className={`p-3 rounded-[14px] border transition-colors ${darkMode ? 'bg-[#1d2026] border-[#353941] hover:bg-[#20242b]' : 'bg-gray-50 border-gray-200 hover:bg-gray-100'}`}>
@@ -7248,132 +7521,6 @@ const ChatPDF = () => {
                     ) : (
                       <div className="text-[12px] text-gray-500 py-2">加载中...</div>
                     )}
-                  </div>
-                </div>
-                )}
-
-                {settingsSection === 'retrieval' && (
-                <div className={`settings-card p-5 border space-y-4 mt-4 mx-1 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}>
-                  <h3 className={`text-[13px] font-bold tracking-wider uppercase mb-1 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                    检索参数
-                  </h3>
-                  
-                  <div className="space-y-3">
-                    <div className="flex flex-col gap-1.5">
-                      <label className={`text-[12px] font-semibold ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>邻居上下文扩展</label>
-                      <CustomSelect
-                        value={numExpandContextChunk}
-                        onChange={setNumExpandContextChunk}
-                        options={[
-                          { value: 0, label: '关闭' },
-                          { value: 1, label: '±1 块' },
-                          { value: 2, label: '±2 块' },
-                          { value: 3, label: '±3 块' },
-                        ]}
-                      />
-                      <p className="text-[11px] text-gray-500 mt-0.5">命中段前后各带上几块</p>
-                    </div>
-                  </div>
-
-                  {lastCallInfo && (
-                    <div className={`mt-4 p-3.5 rounded-[14px] border text-[12px] ${darkMode ? 'bg-[#1d2026] border-[#353941]' : 'bg-gray-50 border-gray-200'}`}>
-                      <div className="flex justify-between items-center mb-1.5">
-                        <span className="text-gray-500">调用来源</span>
-                        <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>{lastCallInfo.provider || '未知'}</strong>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-gray-500">模型</span>
-                        <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>{lastCallInfo.model || '未返回'}</strong>
-                      </div>
-                      {(() => {
-                        const usage = getUsageTokenSummary(lastCallInfo.usage);
-                        if (!usage) return null;
-                        return (
-                          <>
-                          <div className="mt-1.5 flex justify-between items-center">
-                            <span className="text-gray-500">Token</span>
-                            <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>
-                              {Number.isFinite(usage.total) ? usage.total : '-'}
-                              <span className="ml-1 font-normal text-gray-400">
-                                ({Number.isFinite(usage.prompt) ? usage.prompt : '-'} / {Number.isFinite(usage.completion) ? usage.completion : '-'})
-                              </span>
-                              {usage.estimated && <span className="ml-1 font-normal text-gray-400">估</span>}
-                            </strong>
-                          </div>
-                          {usage.cost && Number.isFinite(usage.cost.amount) && (
-                            <div className="mt-1.5 flex justify-between items-center">
-                              <span className="text-gray-500">费用</span>
-                              <strong className={darkMode ? 'text-gray-300' : 'text-gray-700'}>
-                                {usage.cost.currency} {usage.cost.amount}
-                                {usage.cost.estimated && <span className="ml-1 font-normal text-gray-400">估</span>}
-                              </strong>
-                            </div>
-                          )}
-                          </>
-                        );
-                      })()}
-                      {lastCallInfo.fallback && (
-                        <div className="mt-2 pt-2 border-t border-gray-200/50 text-amber-600 font-medium flex items-center justify-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                          已切换备用模型
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-                )}
-
-                {/* Other Settings Access：展示当前关键值，并进入对应的完整设置页 */}
-                {settingsSection === 'common' && (
-                <section className="px-1" aria-labelledby="more-settings-heading">
-                  <div className="mb-2.5 px-1">
-                    <h3 id="more-settings-heading" className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>详细设置</h3>
-                    <p className={`mt-0.5 text-[11px] ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>点击进入完整配置</p>
-                  </div>
-                  <div className="grid grid-cols-3 gap-3">
-                    {[
-                      {
-                        Icon: Type,
-                        label: '全局设置',
-                        desc: '字体、记忆和联网',
-                        meta: `${Math.round((globalScale || 1) * 100)}% 界面 · 记忆${enableMemory ? '开启' : '关闭'}`,
-                        onClick: () => { setShowSettings(false); setShowGlobalSettings(true); },
-                      },
-                      {
-                        Icon: SlidersHorizontal,
-                        label: '对话设置',
-                        desc: '发送、消息和公式',
-                        meta: `${sendShortcut === 'Ctrl+Enter' ? 'Ctrl + Enter' : 'Enter'} 发送 · ${streamOutput ? '流式' : '整段'} · ${messageStyle === 'bubble' ? '气泡' : '简洁'}`,
-                        onClick: () => { setShowSettings(false); setShowChatSettings(true); },
-                      },
-                      {
-                        Icon: ScanText,
-                        label: '解析设置',
-                        desc: '上传路线和 OCR',
-                        meta: selectedParseRoute === 'local' ? '本地全程 · 设备内处理' : 'MinerU 全程 · 结构化解析',
-                        onClick: () => { setShowSettings(false); setShowOCRSettings(true); },
-                      },
-                    ].map(({ Icon, label, desc, meta, onClick }) => (
-                      <button
-                        key={label}
-                        onClick={onClick}
-                        className={`settings-entry-row settings-card settings-card-interactive flex min-h-[128px] w-full flex-col p-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/25 ${darkMode ? 'settings-card-dark bg-[#24272e] border-[#373b44]' : 'bg-white border-gray-200/90'}`}
-                      >
-                        <div className="flex w-full items-start justify-between">
-                          <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[12px] ${darkMode ? 'bg-white/[0.06] text-gray-400' : 'bg-gray-100/90 text-gray-500'}`}>
-                            <Icon size={16} strokeWidth={2.1} />
-                          </div>
-                          <span className="settings-entry-arrow" aria-hidden="true">
-                            <ChevronRight className="h-3.5 w-3.5" strokeWidth={2.2} />
-                          </span>
-                        </div>
-                        <div className="mt-3 min-w-0">
-                          <div className={`text-[13px] font-bold ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{label}</div>
-                          <div className={`mt-1 text-[11px] leading-relaxed ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>{desc}</div>
-                        </div>
-                        <div className={`mt-auto truncate pt-3 text-[10px] font-semibold ${darkMode ? 'text-[#e5a28d]' : 'text-[#A65B45]'}`} title={meta}>{meta}</div>
-                      </button>
-                    ))}
                   </div>
                 </section>
                 )}

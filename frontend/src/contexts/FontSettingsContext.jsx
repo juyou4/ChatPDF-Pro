@@ -84,7 +84,7 @@ export const PRESET_FONTS = [
         value: `"ChatPDF 975 Yuan", "LXGW 975 Yuan SC", "975MaruSC", "975圆体", "975 圆体", ${CJK_SANS_FALLBACK}`,
         description: '已内置 · 中文界面与阅读圆润柔和',
     },
-    { id: 'inter', name: 'Inter', value: 'Inter, sans-serif', googleFont: 'Inter:wght@300;400;500;600;700' },
+    { id: 'inter', name: 'Inter', value: 'Inter, sans-serif', googleFont: 'Inter:wght@300;400;500;600;700', description: 'Google Font · 严谨几何感的无衬线体' },
     {
         id: 'outfit-plus',
         name: 'Outfit + Plus',
@@ -112,12 +112,12 @@ export const PRESET_FONTS = [
         googleFont: 'Fraunces:wght@400;700&family=Karla:wght@400;700',
         description: 'Fraunces 标题 · Karla 正文',
     },
-    { id: 'roboto', name: 'Roboto', value: 'Roboto, sans-serif', googleFont: 'Roboto:wght@300;400;500;700' },
-    { id: 'noto-sans-sc', name: 'Noto Sans SC', value: '"Noto Sans SC", sans-serif', googleFont: 'Noto+Sans+SC:wght@300;400;500;700' },
-    { id: 'poppins', name: 'Poppins', value: 'Poppins, sans-serif', googleFont: 'Poppins:wght@300;400;500;600;700' },
-    { id: 'open-sans', name: 'Open Sans', value: '"Open Sans", sans-serif', googleFont: 'Open+Sans:wght@300;400;500;600;700' },
-    { id: 'lato', name: 'Lato', value: 'Lato, sans-serif', googleFont: 'Lato:wght@300;400;700' },
-    { id: 'montserrat', name: 'Montserrat', value: 'Montserrat, sans-serif', googleFont: 'Montserrat:wght@300;400;500;600;700' },
+    { id: 'roboto', name: 'Roboto', value: 'Roboto, sans-serif', googleFont: 'Roboto:wght@300;400;500;700', description: 'Google Font · 中性稳妥的界面字体' },
+    { id: 'noto-sans-sc', name: 'Noto Sans SC', value: '"Noto Sans SC", sans-serif', googleFont: 'Noto+Sans+SC:wght@300;400;500;700', description: 'Google Font · CJK 多语言字重协调' },
+    { id: 'poppins', name: 'Poppins', value: 'Poppins, sans-serif', googleFont: 'Poppins:wght@300;400;500;600;700', description: 'Google Font · 圆润几何感的标题字体' },
+    { id: 'open-sans', name: 'Open Sans', value: '"Open Sans", sans-serif', googleFont: 'Open+Sans:wght@300;400;500;600;700', description: 'Google Font · 开口大、正文易读' },
+    { id: 'lato', name: 'Lato', value: 'Lato, sans-serif', googleFont: 'Lato:wght@300;400;700', description: 'Google Font · 清爽干净的阅读体验' },
+    { id: 'montserrat', name: 'Montserrat', value: 'Montserrat, sans-serif', googleFont: 'Montserrat:wght@300;400;500;600;700', description: 'Google Font · 宽阔有力的标题字体' },
 ];
 
 // 字体相关默认设置

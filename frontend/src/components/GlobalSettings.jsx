@@ -1,20 +1,19 @@
 import React, { useState } from 'react';
-import { ChevronLeft, Type, RotateCcw, Download, Upload, Check, Brain, Globe, ExternalLink, Eye, EyeOff, CheckCircle2, Search, Key, Library } from 'lucide-react';
+import { ChevronLeft, Type, RotateCcw, Download, Upload, Brain, CheckCircle2, Library } from 'lucide-react';
 import MemoryPanel from './MemoryPanel';
 import PaperLibraryPanel from './PaperLibraryPanel';
-import { useFontSettings, PRESET_FONTS } from '../contexts/FontSettingsContext';
+import { useFontSettings } from '../contexts/FontSettingsContext';
 import { useChatParams } from '../contexts/ChatParamsContext';
 import { useGlobalSettings } from '../contexts/GlobalSettingsContext';
-import { useWebSearch, WEB_SEARCH_PROVIDERS } from '../contexts/WebSearchContext';
+import { useWebSearch } from '../contexts/WebSearchContext';
 import { useReadingSettings } from '../contexts/ReadingSettingsContext';
 import { motion, AnimatePresence } from 'framer-motion';
 import SettingsSegmentedControl from './SettingsSegmentedControl';
 import SettingsRange from './SettingsRange';
 
 const GlobalSettings = ({ isOpen, onClose }) => {
-    const {
-        fontFamily, customFont, setFontFamily, setCustomFont, resetFontSettings
-    } = useFontSettings();
+    // 字体选择已上移到设置中心一级「界面」tab；此处仅保留重置能力
+    const { resetFontSettings } = useFontSettings();
     // 检索增强调优已上移到设置中心一级「检索」tab；此处仅保留重置能力
     const {
         enableMemory, setEnableMemory,
@@ -23,30 +22,20 @@ const GlobalSettings = ({ isOpen, onClose }) => {
         memoryPrivacyMode, setMemoryPrivacyMode,
         resetChatParams,
     } = useChatParams();
-    const [activeSection, setActiveSection] = useState('display');
+    const [activeSection, setActiveSection] = useState('services');
     const { exportSettings, importSettings } = useGlobalSettings();
     // 阅读相关设置已上移到设置中心一级「阅读」tab；此处仅保留重置能力
     const { resetReadingSettings } = useReadingSettings();
 
     const resetSettings = () => { resetFontSettings(); resetChatParams(); resetWebSearch(); resetReadingSettings(); };
 
-    const [customFontInput, setCustomFontInput] = useState(customFont);
     const [showMemoryPanel, setShowMemoryPanel] = useState(false);
     const [showPaperLibraryPanel, setShowPaperLibraryPanel] = useState(false);
     const [showImportDialog, setShowImportDialog] = useState(false);
     const [importText, setImportText] = useState('');
-    const [showApiKey, setShowApiKey] = useState(false);
-    const [showBlacklist, setShowBlacklist] = useState(false);
 
-    const {
-        webSearchMode, enableWebSearch, webSearchProvider, webSearchApiKey, webSearchBlacklist, webSearchIncludeDocumentContext,
-        setWebSearchMode, setWebSearchProvider, setWebSearchApiKey, setWebSearchBlacklist, setWebSearchIncludeDocumentContext,
-        resetWebSearch,
-    } = useWebSearch();
-    const currentSearchProvider = WEB_SEARCH_PROVIDERS.find(p => p.id === webSearchProvider) || WEB_SEARCH_PROVIDERS[0];
-    const needsApiKey = currentSearchProvider.requiresApiKey;
-    const blacklistText = (webSearchBlacklist || []).join('\n');
-    const handleBlacklistChange = (e) => setWebSearchBlacklist(e.target.value.split('\n').map(l => l.trim()).filter(Boolean));
+    // 联网搜索已上移到设置中心一级「检索」tab；此处仅保留重置能力
+    const { resetWebSearch } = useWebSearch();
 
     const handleExport = () => {
         const json = exportSettings();
@@ -73,13 +62,6 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                 else alert('❌ 导入失败，请检查文件格式');
             };
             reader.readAsText(file);
-        }
-    };
-
-    const applyCustomFont = () => {
-        if (customFontInput.trim()) {
-            setCustomFont(customFontInput.trim());
-            setFontFamily('custom');
         }
     };
 
@@ -113,18 +95,18 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                             </div>
                         </div>
 
-                        {/* 「阅读」分区已上移到设置中心一级 tab，避免同一设置出现在两处 */}
-                        <div className="settings-segment relative grid grid-cols-3 mx-7 mb-4 p-1 rounded-[20px] flex-shrink-0" role="tablist" aria-label="全局设置分类">
+                        {/* 「阅读」「字体」「联网搜索」均已上移到设置中心一级 tab，
+                            避免同一设置出现在两处；这里只剩服务与高级两个分区 */}
+                        <div className="settings-segment relative grid grid-cols-2 mx-7 mb-4 p-1 rounded-[20px] flex-shrink-0" role="tablist" aria-label="全局设置分类">
                             <span
                                 aria-hidden="true"
                                 className="settings-segment-indicator absolute left-1 top-1 bottom-1 rounded-[16px] transition-transform duration-[320ms] ease-[cubic-bezier(0.4,0,0.2,1)] motion-reduce:transition-none"
                                 style={{
-                                    width: 'calc((100% - 0.5rem) / 3)',
-                                    transform: `translateX(${['display', 'services', 'advanced'].indexOf(activeSection) * 100}%)`,
+                                    width: 'calc((100% - 0.5rem) / 2)',
+                                    transform: `translateX(${['services', 'advanced'].indexOf(activeSection) * 100}%)`,
                                 }}
                             />
                             {[
-                                { id: 'display', label: '显示' },
                                 { id: 'services', label: '服务' },
                                 { id: 'advanced', label: '高级' },
                             ].map((section) => (
@@ -152,77 +134,6 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                             transition={{ duration: 0.18, ease: 'easeOut' }}
                             className="flex-1 overflow-y-auto px-7 pb-[100px] pt-1 space-y-6 custom-scrollbar"
                         >
-                            {activeSection === 'display' && (
-                            <>
-                            {/* Font Settings - Cards Grid */}
-                            <div className="space-y-4">
-                                <div>
-                                    <h3 className="text-[17px] font-bold text-gray-900">全局字体设置</h3>
-                                    <p className="text-[13px] text-gray-500 mt-1">界面和助手的标题、正文字体</p>
-                                </div>
-
-                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                                    {PRESET_FONTS.map((font) => (
-                                        <button
-                                            key={font.id} onClick={() => setFontFamily(font.id)}
-                                            aria-pressed={fontFamily === font.id}
-                                            className={`settings-card settings-card-interactive relative p-4 rounded-[20px] text-left ${
-                                                fontFamily === font.id
-                                                    ? 'accent-surface'
-                                                    : 'bg-white'
-                                            }`}
-                                        >
-                                            {/* 选择圆点指示器 */}
-                                            <div className="mb-3 flex items-center justify-between">
-                                                <div className={`w-4 h-4 rounded-full flex items-center justify-center transition-colors flex-shrink-0 ${fontFamily === font.id ? 'accent-control' : 'bg-gray-200'}`}>
-                                                    {fontFamily === font.id && <Check className="w-2.5 h-2.5 text-[#B85F47]" strokeWidth={3} />}
-                                                </div>
-                                                {fontFamily === font.id && <span className="accent-surface text-[10px] uppercase font-bold px-2 py-0.5 rounded-full whitespace-nowrap flex-shrink-0">Default</span>}
-                                            </div>
-                                            <div
-                                                className="font-bold text-[15px] leading-tight min-h-[36px] mb-1 text-gray-900 line-clamp-2"
-                                                style={{ fontFamily: font.headingValue || font.value }}
-                                            >
-                                                {font.name}
-                                            </div>
-                                            <div className="text-[11px] text-gray-500 leading-tight pr-2 min-h-[28px] line-clamp-2" style={{ fontFamily: font.bodyValue || font.value }}>
-                                                {font.description}
-                                                {!font.description && font.id === 'inter' && '严谨、几何感的无衬线体。'}
-                                                {!font.description && font.id === 'noto-sans-sc' && '完美的 CJK 多语言字重协调。'}
-                                                {!font.description && font.id === 'outfit' && '现代科技感的规整骨架。'}
-                                                {!font.description && font.id === 'lato' && '清爽干净的高级阅读体验。'}
-                                                {!font.description && font.id === 'lora' && '古典、优雅的衬线字体。'}
-                                            </div>
-                                        </button>
-                                    ))}
-                                </div>
-
-                                {/* 自定义 Google 字体 Input */}
-                                <div className="settings-card bg-white rounded-[20px] p-2 pl-4 mt-2 flex items-center justify-between gap-3">
-                                    <div className="flex-1 min-w-0">
-                                        <div className="text-[13px] font-bold text-gray-800 truncate">自定义 Google 字体</div>
-                                        <div className="text-[11px] text-gray-500 truncate">输入 Google Font 名称即可加载</div>
-                                    </div>
-                                    <div className="flex items-center gap-1.5 bg-white pl-3 pr-1.5 py-1.5 rounded-2xl border border-gray-200/70 w-[200px] sm:w-[240px] flex-shrink-0">
-                                        <ExternalLink className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
-                                        <input
-                                            type="text" value={customFontInput} onChange={(e) => setCustomFontInput(e.target.value)}
-                                            placeholder="输入字体名称，例如 Inter"
-                                            className="flex-1 min-w-0 text-[13px] border-none outline-none bg-transparent placeholder-gray-400 font-medium"
-                                        />
-                                        <button
-                                            onClick={applyCustomFont}
-                                            className="accent-surface px-3 py-1 rounded-[12px] text-[12px] font-bold transition-all flex-shrink-0"
-                                        >
-                                            应用
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-
-                            </>
-                            )}
-
                             {activeSection === 'services' && (
                             <>
                             {/* Memory Settings */}
@@ -298,110 +209,6 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                                     </div>
                                 )}
                             </div>
-
-                            {/* Web Search Settings */}
-                            <div className="settings-card bg-white p-5 border border-gray-200/90 space-y-4">
-                                <div className="flex items-center justify-between">
-                                    <div className="flex items-center gap-3">
-                                        <div className="w-8 h-8 rounded-full bg-emerald-50 text-emerald-500 flex items-center justify-center">
-                                            <Globe className="w-4 h-4" />
-                                        </div>
-                                        <div>
-                                            <h3 className="text-[14px] font-bold text-gray-900">联网搜索</h3>
-                                            <p className="text-[12px] text-gray-500">
-                                                {webSearchMode === 'force' ? '每次提问都搜索网络' : webSearchMode === 'auto' ? '仅在需要时自动搜索网络' : '仅使用文档与对话上下文'}
-                                            </p>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <SettingsSegmentedControl
-                                    ariaLabel="联网搜索模式"
-                                    value={webSearchMode}
-                                    onChange={setWebSearchMode}
-                                    options={[
-                                        { value: 'off', label: '关闭' },
-                                        { value: 'auto', label: '自动' },
-                                        { value: 'force', label: '强制' },
-                                    ]}
-                                    buttonClassName="py-1.5 text-[12px] font-semibold text-center rounded-[12px]"
-                                    indicatorClassName="rounded-[12px]"
-                                />
-
-                                {enableWebSearch && (
-                                    <div className="pt-3 border-t border-gray-100/50 space-y-4">
-                                        <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                                            {WEB_SEARCH_PROVIDERS.map((provider) => (
-                                                <button
-                                                    key={provider.id} onClick={() => setWebSearchProvider(provider.id)}
-                                                    className={`flex-1 p-2 rounded-xl flex items-center justify-center gap-2 transition-all border ${
-                                                        webSearchProvider === provider.id
-                                                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800 shadow-sm'
-                                                            : 'bg-gray-50 border-gray-100 text-gray-600 hover:bg-gray-100'
-                                                    }`}
-                                                >
-                                                    <Search className="w-4 h-4 opacity-70" />
-                                                    <span className="text-[13px] font-bold">{provider.name}</span>
-                                                </button>
-                                            ))}
-                                        </div>
-
-                                        {needsApiKey && (
-                                            <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80 space-y-2">
-                                                <div className="flex items-center justify-between px-1">
-                                                    <span className="text-[12px] font-bold text-gray-700">API 密钥</span>
-                                                    {currentSearchProvider.url && (
-                                                        <a href={currentSearchProvider.url} target="_blank" rel="noreferrer" className="text-[11px] text-emerald-600 group flex items-center gap-1 hover:text-emerald-700">
-                                                            获取 Key <ExternalLink className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
-                                                        </a>
-                                                    )}
-                                                </div>
-                                                <div className="relative">
-                                                    <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                                                    <input
-                                                        type={showApiKey ? 'text' : 'password'} value={webSearchApiKey} onChange={(e) => setWebSearchApiKey(e.target.value)}
-                                                        placeholder={`${currentSearchProvider.name} API Key`}
-                                                        className="w-full flex-1 text-[13px] font-mono border-none outline-none bg-white py-2 pl-9 pr-10 rounded-[12px] shadow-sm focus:ring-2 focus:ring-emerald-500/20"
-                                                    />
-                                                    <button onClick={() => setShowApiKey(!showApiKey)} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                                                        {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        )}
-
-                                        <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80 flex items-center justify-between gap-3">
-                                            <div className="min-w-0 px-1">
-                                                <div className="text-[12px] font-bold text-gray-700">附加文档上下文</div>
-                                                <div className="text-[11px] text-gray-500 mt-0.5">搜索时带上文件名和选中文本</div>
-                                            </div>
-                                            <ToggleSwitch
-                                                checked={webSearchIncludeDocumentContext}
-                                                onChange={setWebSearchIncludeDocumentContext}
-                                                color="#10b981"
-                                            />
-                                        </div>
-
-                                        <div className="bg-gray-50/80 p-3 rounded-[16px] border border-gray-100/80">
-                                            <button onClick={() => setShowBlacklist(!showBlacklist)} className="w-full flex items-center justify-between text-left">
-                                                <div className="flex items-center gap-2 px-1">
-                                                    <span className="text-[12px] font-bold text-gray-700">域名黑名单配置</span>
-                                                    {webSearchBlacklist?.length > 0 && <span className="bg-gray-200 text-gray-600 text-[10px] px-1.5 py-0.5 rounded-md font-bold">{webSearchBlacklist.length}</span>}
-                                                </div>
-                                                <div className={`transform transition-transform text-gray-400 ${showBlacklist ? 'rotate-180' : ''}`}>▼</div>
-                                            </button>
-                                            {showBlacklist && (
-                                                <div className="mt-3">
-                                                    <textarea
-                                                        value={blacklistText} onChange={handleBlacklistChange} placeholder="twitter.com\ninstagram.com" rows={3}
-                                                        className="w-full text-[12px] font-mono bg-white border border-gray-200 rounded-[12px] px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500/20 resize-none shadow-sm"
-                                                    />
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
                             </>
                             )}
 
@@ -410,7 +217,7 @@ const GlobalSettings = ({ isOpen, onClose }) => {
                             <>
                             <div className="grid grid-cols-4 gap-3 pt-2">
                                 {[
-                                    { icon: RotateCcw, label: '恢复默认', onClick: () => { if(confirm('确定?')) { resetSettings(); setCustomFontInput(''); } }, color: 'text-red-500 hover:bg-red-50 hover:border-red-200' },
+                                    { icon: RotateCcw, label: '恢复默认', onClick: () => { if(confirm('确定?')) resetSettings(); }, color: 'text-red-500 hover:bg-red-50 hover:border-red-200' },
                                     { icon: Download, label: '导出配置', onClick: handleExport, color: 'text-gray-600 hover:bg-gray-100' },
                                     { icon: Upload, label: '导入文件', action: 'file', color: 'text-gray-600 hover:bg-gray-100' },
                                     { icon: Type, label: '导入文本', onClick: () => setShowImportDialog(true), color: 'text-gray-600 hover:bg-gray-100' },

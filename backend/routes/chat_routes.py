@@ -13136,6 +13136,46 @@ def _is_full_document_summary_turn(turn_context: ChatTurnContext | None) -> bool
     )
 
 
+def _requested_companion_doc_ids(request) -> list[str]:
+    """Return companion doc ids explicitly attached to this turn."""
+    from services.multi_doc_fanout_service import normalize_request_doc_ids
+
+    primary = str(getattr(request, "doc_id", "") or "").strip()
+    doc_ids = normalize_request_doc_ids(
+        primary,
+        list(getattr(request, "doc_ids", None) or []),
+        max_docs=5,
+    )
+    return [doc_id for doc_id in doc_ids if doc_id != primary]
+
+
+def _resolve_full_document_summary_route(
+    turn_context: ChatTurnContext | None,
+    *,
+    request,
+    retrieval_meta: dict | None = None,
+) -> bool:
+    """Decide whether this turn may answer from the parse-bound reading outline.
+
+    The outline route renders one document's own sections and has no way to
+    represent a companion document.  An explicit attachment is a stronger
+    signal than the summary-intent heuristic, so companions defer the turn to
+    normal retrieval — which fans out across every attached document — rather
+    than silently answering about the primary document alone.
+    """
+    if not _is_full_document_summary_turn(turn_context):
+        return False
+    companions = _requested_companion_doc_ids(request)
+    if not companions:
+        return True
+    if isinstance(retrieval_meta, dict):
+        retrieval_meta["full_document_summary_deferred"] = {
+            "reason": "companion_documents_selected",
+            "companion_doc_count": len(companions),
+        }
+    return False
+
+
 def _full_document_summary_unavailable(reason: str) -> dict:
     return {
         "answer": (
@@ -17350,7 +17390,11 @@ async def _chat_with_pdf_impl(request: ChatRequest):
                     **clarification_extra,
                     **_chat_terminal_fields(_CHAT_TURN_STATUS_COMPLETED, chat_parse_identity),
                 }
-        if _is_full_document_summary_turn(turn_context):
+        if _resolve_full_document_summary_route(
+            turn_context,
+            request=request,
+            retrieval_meta=retrieval_meta,
+        ):
             # Do not let a broad "overview" whitelist turn this into a
             # sampled Agent answer.  The renderer below is assembled from the
             # current parse-bound reading outline and its persisted evidence.
@@ -18766,7 +18810,11 @@ async def chat_with_pdf_stream(request: ChatRequest):
                         })
                         yield "data: [DONE]\n\n"
                         return
-                if _is_full_document_summary_turn(turn_context):
+                if _resolve_full_document_summary_route(
+                    turn_context,
+                    request=request,
+                    retrieval_meta=retrieval_meta,
+                ):
                     # A complete-document summary has a deterministic source:
                     # the parse-bound reading outline.  Do not silently turn it
                     # back into a sampled retrieval/Agent answer in streaming
