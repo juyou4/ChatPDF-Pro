@@ -454,7 +454,7 @@ Switch between KaTeX and MathJax in Settings Center. KaTeX is faster; MathJax ha
 ## Recent Work
 
 ### v3.3.0
-- Paper-repo code walkthrough, reading-outline degrade recovery, generating UI ends when the answer is done, and hover-translation panels stay on screen.
+- Paper-repo code walkthrough, reading-outline degrade recovery, multi-document retrieval with citation return navigation, settings-center restructuring, generating UI ends when the answer is done, and hover-translation panels stay on screen.
 
 ### v3.2.0
 - Streaming thinking and formula rendering, original-figure attachments when asking about a figure, screenshot questions, and settings polish.

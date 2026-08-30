@@ -1,7 +1,7 @@
 {
     "version": "3.3.0",
-    "changelog": "论文仓库对照讲解 · 精读降级修复 · 回答结束不再卡住 · 悬浮译文防裁切",
-    "releaseDate": "2026-08-27",
+    "changelog": "论文仓库对照讲解 · 精读降级修复 · 多文档检索与引用回程 · 设置中心重整 · 回答结束不再卡住",
+    "releaseDate": "2026-08-30",
     "githubOwner": "juyou4",
     "githubRepo": "ChatPDF-Pro"
 }
