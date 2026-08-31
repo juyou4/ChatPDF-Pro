@@ -505,9 +505,9 @@ export const CHAT_MODELS: Model[] = [
         type: 'chat',
         metadata: {
             description: '通义千问最新旗舰模型，原生多模态与 1M 上下文，适合复杂 Agent 和长文档任务',
-            reasoningMode: 'openai_effort',
-            reasoningOptions: ['off', 'low', 'medium', 'xhigh'],
-            reasoningDefault: 'xhigh',
+            reasoningMode: 'qwen_budget',
+            reasoningOptions: ['off', 'low', 'medium', 'high', 'max'],
+            reasoningDefault: 'high',
             reasoningOffControl: 'enable_thinking_false',
             reasoningOnControl: 'enable_thinking_true'
         },
@@ -521,9 +521,9 @@ export const CHAT_MODELS: Model[] = [
         type: 'chat',
         metadata: {
             description: '通义千问最新高速多模态模型，原生 1M 上下文，适合低延迟 Agent 和高吞吐任务',
-            reasoningMode: 'openai_effort',
-            reasoningOptions: ['off', 'low', 'medium', 'xhigh'],
-            reasoningDefault: 'xhigh',
+            reasoningMode: 'qwen_budget',
+            reasoningOptions: ['off', 'low', 'medium', 'high', 'max'],
+            reasoningDefault: 'high',
             reasoningOffControl: 'enable_thinking_false',
             reasoningOnControl: 'enable_thinking_true'
         },
@@ -757,9 +757,9 @@ export const CHAT_MODELS: Model[] = [
         metadata: {
             description: 'Google 最新稳定 Flash 模型，原生多模态、1M 上下文，支持 Search grounding 与工具调用',
             reasoningMode: 'gemini_level',
-            reasoningOptions: ['low', 'medium', 'high'],
+            reasoningOptions: ['off', 'minimal', 'low', 'medium', 'high'],
             reasoningDefault: 'high',
-            reasoningAlwaysEnabled: true
+            reasoningOffControl: 'gemini_budget_zero'
         },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false
@@ -836,9 +836,9 @@ export const CHAT_MODELS: Model[] = [
         metadata: {
             description: 'xAI 最新旗舰模型，支持文本与图像输入、工具调用和可配置深度推理',
             reasoningMode: 'openai_effort',
-            reasoningOptions: ['low', 'medium', 'high', 'xhigh'],
+            reasoningOptions: ['off', 'low', 'medium', 'high', 'xhigh'],
             reasoningDefault: 'high',
-            reasoningAlwaysEnabled: true
+            reasoningOffControl: 'reasoning_effort_none'
         },
         tags: ['vision', 'reasoning'],
         isSystem: true, isUserAdded: false

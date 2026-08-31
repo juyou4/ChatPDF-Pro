@@ -141,6 +141,11 @@ def ensure_reasoning_output_budget(
     if not resolution.enabled:
         return max_tokens
     budget = int(resolution.budget_tokens or 0)
+    if budget <= 0 and resolution.mode == "anthropic_adaptive":
+        # Adaptive thinking has no explicit token budget, but thinking and the
+        # visible answer still share max_tokens. Reserve a practical floor so
+        # the default 1k chat cap cannot be consumed before text begins.
+        budget = 8_192
     if budget <= 0:
         return max_tokens
     try:
@@ -148,6 +153,40 @@ def ensure_reasoning_output_budget(
     except (TypeError, ValueError):
         configured = 0
     return max(configured, budget + max(0, int(margin)))
+
+
+def sanitize_reasoning_sampling_parameters(
+    provider: str,
+    model: str,
+    resolution: ReasoningResolution,
+    *,
+    temperature: Any = None,
+    top_p: Any = None,
+) -> tuple[Any, Any]:
+    """Drop sampling controls rejected by reasoning-model APIs.
+
+    OpenAI reasoning models use provider-managed sampling. Newer Claude
+    families require default sampling values on every request, while older
+    extended/adaptive families impose the restriction only when thinking is
+    enabled. Omitting both fields is the provider-version-neutral default.
+    """
+
+    pid = str(provider or "").strip().lower()
+    if pid == "openai" and resolution.mode == "openai_effort":
+        return None, None
+
+    if not str(resolution.mode or "").startswith("anthropic_"):
+        return temperature, top_p
+
+    value = str(model or "").strip().lower()
+    always_default_sampling = bool(
+        re.search(r"claude-(?:fable|mythos|opus|sonnet)-5(?:[.\-]|$)", value)
+        or re.search(r"claude-opus-4[-.]?[78](?:[.\-]|$)", value)
+        or "claude-mythos-preview" in value
+    )
+    if always_default_sampling or resolution.enabled:
+        return None, None
+    return temperature, top_p
 
 
 def normalize_reasoning_effort(value: Any, *, default: str = "off") -> str:
@@ -174,7 +213,8 @@ def requires_preserved_reasoning_history(provider: str, model: str) -> bool:
     value = str(model or "").strip().lower()
     return bool(
         re.search(
-            r"deepseek-v4|glm-5\.[23]|kimi-k3|qwen3\.8-(?:max|flash)|mimo-v2\.5",
+            r"deepseek-v4|glm-5\.[23]|kimi-k3|kimi-k2[.\-]?7-code|"
+            r"qwen3\.8-(?:max|flash)|mimo-v2\.5|(?:^|/)minimax-m[23](?:[.\-:]|$)",
             value,
         )
     )
@@ -290,16 +330,17 @@ def _looks_reasoning_model(model: str) -> bool:
 
 def _openai_options(model: str) -> tuple[str, ...]:
     value = str(model or "").strip().lower()
-    if re.search(r"gpt-5\.6(?:[-.]|$)", value):
-        # Ultra 不是 OpenAI-compatible 协议的通用能力；只有模型元数据
-        # 明确声明后才允许展示，避免把 Cursor 的会员档位误发给上游。
-        return ("off", "low", "medium", "high", "xhigh", "max")
-    if re.search(r"gpt-5\.5(?:[-.]|$)", value):
-        return ("off", "minimal", "low", "medium", "high", "xhigh", "max")
-    if re.search(r"gpt-5\.4(?:[-.]|$)", value):
-        return ("off", "minimal", "low", "medium", "high", "xhigh")
-    if re.search(r"gpt-5\.[1-3](?:[-.]|$)", value):
-        return ("off", "minimal", "low", "medium", "high")
+    if re.search(r"gpt-5(?:\.\d+)?-pro(?:[-.]|$)", value):
+        # Pro models intentionally expose only their quality-first setting.
+        return ("high",)
+    if re.search(r"gpt-5\.(?:2|4|5|6)(?:[-.]|$)", value):
+        # ``max``/``ultra`` are not part of the conservative Chat Completions
+        # reasoning_effort set. Custom gateways can add them explicitly.
+        return ("off", "low", "medium", "high", "xhigh")
+    if re.search(r"gpt-5\.(?:1|3)(?:[-.]|$)", value):
+        return ("off", "low", "medium", "high")
+    if re.search(r"gpt-5(?:[-.]|$)", value):
+        return ("minimal", "low", "medium", "high")
     if re.search(r"\bo[134](?:[-.]|$)", value):
         return ("low", "medium", "high")
     return ("off", "low", "medium", "high")
@@ -319,10 +360,31 @@ def _anthropic_uses_adaptive_thinking(model: str) -> bool:
     """Return whether the Claude family uses adaptive effort, not token budgets."""
 
     value = str(model or "").strip().lower()
-    family = r"(?:opus|sonnet|haiku|fable|mythos)"
     return bool(
-        re.search(rf"claude-(?:{family}-)?5(?:[.\-]|$)", value)
-        or re.search(rf"claude-(?:{family}-)?4[-.]?[6-9](?:[.\-]|$)", value)
+        re.search(r"claude-(?:fable|mythos|opus|sonnet)-5(?:[.\-]|$)", value)
+        or re.search(r"claude-(?:opus|sonnet)-4[-.]?6(?:[.\-]|$)", value)
+        or re.search(r"claude-opus-4[-.]?[78](?:[.\-]|$)", value)
+        or "claude-mythos-preview" in value
+    )
+
+
+def _anthropic_supports_extended_thinking(model: str) -> bool:
+    """Match legacy Claude families documented to accept budget_tokens."""
+
+    value = str(model or "").strip().lower()
+    return bool(
+        re.search(r"claude-(?:opus|sonnet|haiku)-4[-.]?[0-5](?:[.\-]|$)", value)
+        or re.search(r"claude-sonnet-3[-.]?7(?:[.\-]|$)", value)
+    )
+
+
+def _anthropic_thinking_is_mandatory(model: str) -> bool:
+    """Match Claude families whose API rejects ``thinking.type=disabled``."""
+
+    value = str(model or "").strip().lower()
+    return bool(
+        re.search(r"claude-(?:fable|mythos)-5(?:[.\-]|$)", value)
+        or "claude-mythos-preview" in value
     )
 
 
@@ -343,10 +405,10 @@ def _gemini_level_profile(model: str) -> ReasoningProfile | None:
     """Resolve Gemini 3 thinking levels at model granularity."""
 
     value = str(model or "").strip().lower()
+    can_disable = False
     if "gemini-3.7-flash" in value:
-        # Gemini 3.7 Flash rejects the minimal level; only these three
-        # values are documented by Google for the stable endpoint.
-        options, default = ("low", "medium", "high"), "high"
+        options, default = ("off", "minimal", "low", "medium", "high"), "high"
+        can_disable = True
     elif "gemini-3.6-flash" in value:
         options, default = ("minimal", "low", "medium", "high"), "medium"
     elif "gemini-3.5-flash-lite" in value:
@@ -354,9 +416,11 @@ def _gemini_level_profile(model: str) -> ReasoningProfile | None:
     elif "gemini-3.5-flash" in value:
         options, default = ("minimal", "low", "medium", "high"), "medium"
     elif "gemini-3.1-pro-preview" in value:
-        options, default = ("low", "medium", "high"), "high"
+        options, default = ("low", "high"), "high"
     elif "gemini-3.1-flash-lite-image" in value:
         options, default = ("minimal", "high"), "minimal"
+    elif "gemini-3.1-flash-lite" in value:
+        options, default = ("minimal", "low", "medium", "high"), "minimal"
     elif "gemini-3-flash-preview" in value:
         options, default = ("minimal", "low", "medium", "high"), "high"
     elif "gemini-3-pro-preview" in value:
@@ -369,8 +433,13 @@ def _gemini_level_profile(model: str) -> ReasoningProfile | None:
         "gemini_level",
         options,
         default=default,
-        always_enabled=True,
-        note="Gemini thinkingLevel（该型号不能完全关闭）",
+        always_enabled=not can_disable,
+        note=(
+            "Gemini thinkingLevel；off 使用兼容的 thinkingBudget=0"
+            if can_disable
+            else "Gemini thinkingLevel（该型号不能完全关闭）"
+        ),
+        off_control="gemini_budget_zero" if can_disable else None,
         native_levels=tuple((item, item.upper()) for item in options),
     )
 
@@ -617,6 +686,15 @@ def get_reasoning_profile(
                 "ollama_think": "ollama_think_false",
             }.get(mode)
 
+        # An Off entry without a native disable control is not actionable.
+        # Removing it prevents the UI from promising a state that omission of
+        # the field cannot guarantee on reasoning-first models.
+        if mode != "unsupported" and "off" in options and not off_control:
+            options = tuple(item for item in options if item != "off")
+            always_enabled = True
+        if "off" not in options:
+            off_control = None
+
         if mode == "thinking_toggle" and not on_control:
             on_control = "thinking_enabled"
 
@@ -660,6 +738,13 @@ def get_reasoning_profile(
         ))
 
     if pid in {"local", "ollama"} or protocol in {"ollama", "local"}:
+        if "gpt-oss" in mid:
+            return _finish(ReasoningProfile(
+                "ollama_think", ("low", "medium", "high"), default="medium",
+                always_enabled=True,
+                note="Ollama GPT-OSS 仅接受 low / medium / high，不能关闭思考",
+                native_levels=(("low", "low"), ("medium", "medium"), ("high", "high")),
+            ))
         if _looks_reasoning_model(mid) or explicit_support:
             return _finish(ReasoningProfile(
                 "ollama_think", ("off", "medium"),
@@ -700,14 +785,29 @@ def get_reasoning_profile(
         # Newer Claude models expose adaptive effort. Older gateways still
         # accept the same semantic ladder through an enabled budget.
         if _anthropic_uses_adaptive_thinking(mid):
+            mandatory = _anthropic_thinking_is_mandatory(mid)
+            options = _anthropic_adaptive_options(mid)
+            if mandatory:
+                options = tuple(item for item in options if item != "off")
             return _finish(ReasoningProfile(
-                "anthropic_adaptive", _anthropic_adaptive_options(mid), default="high",
-                note="Claude effort 与 adaptive thinking 独立控制",
-                off_control="thinking_disabled",
+                "anthropic_adaptive", options, default="high",
+                always_enabled=mandatory,
+                note=(
+                    "该 Claude 型号强制 adaptive thinking；关闭参数会返回 400"
+                    if mandatory
+                    else "Claude effort 与 adaptive thinking 独立控制"
+                ),
+                off_control=None if mandatory else "thinking_disabled",
+                on_control="provider_default" if mandatory else None,
+            ))
+        if _anthropic_supports_extended_thinking(mid):
+            return _finish(ReasoningProfile(
+                "anthropic_budget", ("off", "low", "medium", "high", "max"),
+                note="Anthropic extended thinking budget", off_control="thinking_disabled",
             ))
         return _finish(ReasoningProfile(
-            "anthropic_budget", ("off", "low", "medium", "high", "max"),
-            note="Anthropic extended thinking budget", off_control="thinking_disabled",
+            "unsupported", ("off",),
+            note="该 Claude 型号未声明 adaptive/extended thinking 能力",
         ))
 
     if pid == "gemini" or protocol == "gemini":
@@ -726,15 +826,15 @@ def get_reasoning_profile(
     if pid == "grok":
         if "grok-4.6" in mid:
             return _finish(ReasoningProfile(
-                "openai_effort", ("low", "medium", "high", "xhigh"), default="high",
-                always_enabled=True,
-                note="Grok 4.6 始终思考，支持 low / medium / high / xhigh",
+                "openai_effort", ("off", "low", "medium", "high", "xhigh"), default="high",
+                note="Grok 4.6 支持 none / low / medium / high / xhigh",
+                off_control="reasoning_effort_none",
             ))
         if "grok-4.5" in mid:
             return _finish(ReasoningProfile(
-                "openai_effort", ("low", "medium", "high"), default="high",
-                always_enabled=True,
-                note="Grok 4.5 始终思考，支持 low / medium / high",
+                "openai_effort", ("off", "low", "medium", "high"), default="high",
+                note="Grok 4.5 支持 none / low / medium / high",
+                off_control="reasoning_effort_none",
             ))
         if "grok-3-mini" in mid:
             return _finish(ReasoningProfile(
@@ -751,9 +851,9 @@ def get_reasoning_profile(
     if pid in {"aliyun", "qwen", "dashscope", "bailian", "tongyi"} or "qwen3" in mid or "qwq" in mid:
         if re.search(r"qwen3\.8-(?:max|flash)", mid):
             return _finish(ReasoningProfile(
-                "openai_effort", ("off", "low", "medium", "xhigh"),
-                default="xhigh",
-                note="Qwen3.8 使用 reasoning_effort（low / medium / xhigh）；不可与 thinking_budget 同时发送",
+                "qwen_budget", ("off", "low", "medium", "high", "max"),
+                default="high",
+                note="Qwen3.8 使用 enable_thinking + thinking_budget（应用档位映射）",
                 off_control="enable_thinking_false",
                 on_control="enable_thinking_true",
             ))
@@ -764,10 +864,20 @@ def get_reasoning_profile(
             ))
         return _finish(ReasoningProfile("unsupported", ("off",), note="当前 Qwen 模型未声明思考能力"))
 
-    if pid == "silicon" and "qwen" in mid:
+    if pid == "silicon" and re.search(r"deepseek-v4|glm-5\.2", mid):
+        return _finish(ReasoningProfile(
+            "openai_effort", ("off", "high", "max"), default="high",
+            note="SiliconFlow V4/GLM-5.2 使用 enable_thinking + reasoning_effort",
+            off_control="enable_thinking_false",
+            on_control="enable_thinking_true",
+        ))
+
+    if pid == "silicon" and _looks_reasoning_model(mid):
         return _finish(ReasoningProfile(
             "qwen_budget", ("off", "low", "medium", "high", "max"),
-            note="SiliconFlow Qwen thinking budget", off_control="enable_thinking_false",
+            note="SiliconFlow 使用 enable_thinking + thinking_budget",
+            off_control="enable_thinking_false",
+            on_control="enable_thinking_true",
         ))
 
     if pid == "deepseek" and "deepseek-v4" in mid:
@@ -798,7 +908,7 @@ def get_reasoning_profile(
             on_control="thinking_enabled",
         ))
 
-    if pid in {"deepseek", "zhipu", "xiaomi"} or (pid == "silicon" and _looks_reasoning_model(mid)):
+    if pid in {"deepseek", "zhipu", "xiaomi"}:
         if _looks_reasoning_model(mid) or explicit_support:
             return _finish(ReasoningProfile(
                 "thinking_toggle", ("off", "medium"), note="该接口只提供思考开关",
@@ -808,12 +918,26 @@ def get_reasoning_profile(
         return _finish(ReasoningProfile("unsupported", ("off",), note="当前模型未声明思考能力"))
 
     if pid == "minimax":
-        if _looks_reasoning_model(mid) or explicit_support:
+        if re.search(r"(?:^|/)minimax-m3(?:[.\-:]|$)", mid):
             return _finish(ReasoningProfile(
                 "thinking_toggle", ("off", "medium"), default="medium",
                 note="MiniMax M3 使用 adaptive/disabled；reasoning_split 仅分离输出",
                 off_control="thinking_disabled",
                 on_control="thinking_adaptive",
+                split_reasoning_output=True,
+            ))
+        if re.search(r"(?:^|/)minimax-m2(?:[.\-:]|$)", mid):
+            return _finish(ReasoningProfile(
+                "fixed", ("medium",), default="medium", always_enabled=True,
+                note="MiniMax M2.x 始终思考；thinking.type=disabled 不会关闭思考",
+                on_control="provider_default",
+                split_reasoning_output=True,
+            ))
+        if explicit_support:
+            return _finish(ReasoningProfile(
+                "fixed", ("medium",), default="medium", always_enabled=True,
+                note="该 MiniMax 模型未声明可调档位，使用模型默认思考",
+                on_control="provider_default",
                 split_reasoning_output=True,
             ))
         return _finish(ReasoningProfile("unsupported", ("off",), note="当前 MiniMax 模型未声明思考能力"))
@@ -891,15 +1015,18 @@ def resolve_reasoning_request(
         enabled = True
 
     native_level_map = dict(profile.native_levels)
-    native_effort = (
-        native_level_map.get(
+    if profile.mode in {"openai_effort", "anthropic_adaptive", "gemini_level"}:
+        native_effort = native_level_map.get(
             effective,
             effective.upper() if profile.mode == "gemini_level" else effective,
         )
-        if profile.mode in {"openai_effort", "anthropic_adaptive", "gemini_level"}
-        else None
-    )
+    elif profile.mode == "ollama_think" and native_level_map:
+        native_effort = native_level_map.get(effective, effective)
+    else:
+        native_effort = None
     budget = THINKING_BUDGET_TOKENS.get(effective) if profile.mode in {"anthropic_budget", "gemini_budget", "qwen_budget"} else None
+    if profile.mode == "gemini_budget" and "gemini-2.5-flash" in str(model or "").lower() and budget:
+        budget = min(budget, 24_576)
     return ReasoningResolution(
         requested, effective, enabled, profile.mode, native_effort, budget, profile,
         native_control=profile.on_control or "enable",
@@ -919,31 +1046,6 @@ _REASONING_BODY_KEYS = {
     "think",
     "incremental_output",
 }
-
-_INCREMENTAL_OUTPUT_PROVIDERS = frozenset({
-    "aliyun",
-    "qwen",
-    "dashscope",
-    "bailian",
-    "tongyi",
-})
-
-
-def _wants_incremental_output(provider: str, model: str = "") -> bool:
-    """DashScope 兼容网关默认攒完思考再吐；开增量后才能流式展示。"""
-    pid = str(provider or "").strip().lower()
-    mid = str(model or "").strip().lower()
-    if pid == "deepseek":
-        return False
-    if pid in _INCREMENTAL_OUTPUT_PROVIDERS:
-        return True
-    if any(token in pid for token in ("dashscope", "aliyun", "bailian", "tongyi")):
-        return True
-    # 第三方 OpenAI 兼容口上的 DeepSeek 也常把思考攒完再一次性吐出。
-    if "deepseek" in mid:
-        return True
-    return False
-
 
 def _clear_reasoning_controls(body: dict[str, Any]) -> None:
     """Remove stale top-level and nested reasoning controls before applying one profile."""
@@ -1030,7 +1132,8 @@ def apply_reasoning_to_payload(
         body["reasoning_effort"] = resolution.native_effort
         _apply_native_enable(body, resolution)
     elif mode == "anthropic_adaptive":
-        body["thinking"] = {"type": "adaptive", "display": "summarized"}
+        if resolution.native_control != "provider_default":
+            body["thinking"] = {"type": "adaptive", "display": "summarized"}
         body["output_config"] = {"effort": resolution.native_effort}
     elif mode == "anthropic_budget":
         body["thinking"] = {"type": "enabled", "budget_tokens": resolution.budget_tokens}
@@ -1052,7 +1155,7 @@ def apply_reasoning_to_payload(
     elif mode == "thinking_toggle":
         _apply_native_enable(body, resolution)
     elif mode == "ollama_think":
-        body["think"] = True
+        body["think"] = resolution.native_effort or True
     if resolution.profile.split_reasoning_output:
         body["reasoning_split"] = True
     # Qwen3.8 accepts historical reasoning_content only when this explicit
@@ -1063,8 +1166,6 @@ def apply_reasoning_to_payload(
         r"qwen3\.8-(?:max|flash)", str(model or "").strip().lower()
     ):
         body["preserve_thinking"] = True
-    if _wants_incremental_output(provider, model):
-        body["incremental_output"] = True
     return resolution
 
 

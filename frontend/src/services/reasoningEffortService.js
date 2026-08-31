@@ -21,31 +21,36 @@ export const getReasoningEffortOption = (value) => (
 
 export const normalizeReasoningProfile = (payload, fallback = null) => {
   const source = payload && typeof payload === 'object' ? payload : fallback
+  const mode = String(source?.mode || 'unsupported')
   const rawOptions = Array.isArray(source?.options) ? source.options : ['off']
-  const options = [...new Set(rawOptions.map((value) => String(value || '').trim().toLowerCase()))]
+  let options = [...new Set(rawOptions.map((value) => String(value || '').trim().toLowerCase()))]
     .filter((value) => EFFORT_RANK[value] !== undefined)
     .sort((a, b) => EFFORT_RANK[a] - EFFORT_RANK[b])
-  const safeOptions = options.length > 0 ? options : ['off']
+  if (mode !== 'unsupported' && options.includes('off') && !source?.off_control) {
+    options = options.filter((value) => value !== 'off')
+  }
+  const safeOptions = options.length > 0 ? options : mode === 'unsupported' ? ['off'] : ['medium']
   const requestedDefault = String(source?.default || '').trim().toLowerCase()
   const defaultValue = safeOptions.includes(requestedDefault)
     ? requestedDefault
     : safeOptions.find((value) => value !== 'off') || 'off'
+  const offControl = safeOptions.includes('off') ? source?.off_control || null : null
   // 档位是跨 Provider 的协议值，不允许旧版本后端或缓存把它重新本地化。
   // 中文说明仍由菜单的 description/note 提供；这里始终输出 low/high/max
   // 等 canonical 名称，避免前端在服务重启前继续显示旧的“轻量/最大”标签。
   return {
-    mode: String(source?.mode || 'unsupported'),
+    mode,
     options: safeOptions,
     default: defaultValue,
     always_enabled: source?.always_enabled === true,
     note: String(source?.note || '').trim(),
     source: String(source?.source || 'fallback'),
     cost_warning_from: source?.cost_warning_from || null,
-    off_control: source?.off_control || null,
+    off_control: offControl,
     on_control: source?.on_control || null,
     split_reasoning_output: source?.split_reasoning_output === true,
-    can_disable: source?.can_disable === true,
-    off_is_guaranteed: source?.off_is_guaranteed === true,
+    can_disable: safeOptions.includes('off') && source?.can_disable === true,
+    off_is_guaranteed: safeOptions.includes('off') && source?.off_is_guaranteed === true,
     labels: Object.fromEntries(safeOptions.map((value) => [value, value])),
   }
 }
@@ -81,6 +86,15 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
   }
   const isReasoning = tags.includes('reasoning') || /reason|reasoner|thinking|think|qwen3|qwq|gpt-5|^o[134]|deepseek-v4|grok-[34]|grok-build|seed|(?:^|\/)minimax-m[23](?:[.\-:]|$)|(?:^|\/)mimo-v2\.5(?:-pro)?(?:[.\-:]|$)/.test(mid)
   if (pid === 'local' || pid === 'ollama') {
+    if (mid.includes('gpt-oss')) {
+      return normalizeReasoningProfile({
+        mode: 'ollama_think',
+        options: ['low', 'medium', 'high'],
+        default: 'medium',
+        always_enabled: true,
+        note: 'Ollama GPT-OSS 仅接受 low / medium / high，不能关闭思考',
+      })
+    }
     return normalizeReasoningProfile(isReasoning
       ? { mode: 'ollama_think', options: ['off', 'medium'], note: 'Ollama think 开关', off_control: 'ollama_think_false', off_is_guaranteed: true }
       : { mode: 'unsupported', options: ['off'], note: '当前本地模型未声明思考能力' })
@@ -120,10 +134,11 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
   if (pid === 'gemini' && /gemini-3/.test(mid)) {
     let options = ['low', 'medium', 'high']
     let defaultValue = 'high'
+    let canDisable = false
     if (/gemini-3\.7-flash/.test(mid)) {
-      // 官方文档明确只接受 low / medium / high；minimal 会返回参数错误。
-      options = ['low', 'medium', 'high']
+      options = ['off', 'minimal', 'low', 'medium', 'high']
       defaultValue = 'high'
+      canDisable = true
     } else if (/gemini-3\.6-flash/.test(mid)) {
       options = ['minimal', 'low', 'medium', 'high']
       defaultValue = 'medium'
@@ -134,10 +149,13 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
       options = ['minimal', 'low', 'medium', 'high']
       defaultValue = 'medium'
     } else if (/gemini-3\.1-pro-preview/.test(mid)) {
-      options = ['low', 'medium', 'high']
+      options = ['low', 'high']
       defaultValue = 'high'
     } else if (/gemini-3\.1-flash-lite-image/.test(mid)) {
       options = ['minimal', 'high']
+      defaultValue = 'minimal'
+    } else if (/gemini-3\.1-flash-lite/.test(mid)) {
+      options = ['minimal', 'low', 'medium', 'high']
       defaultValue = 'minimal'
     } else if (/gemini-3-flash-preview/.test(mid)) {
       options = ['minimal', 'low', 'medium', 'high']
@@ -146,7 +164,15 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
       options = ['low', 'high']
       defaultValue = 'high'
     }
-    return normalizeReasoningProfile({ mode: 'gemini_level', options, default: defaultValue, always_enabled: true, note: 'Gemini thinkingLevel 按具体型号裁剪' })
+    return normalizeReasoningProfile({
+      mode: 'gemini_level',
+      options,
+      default: defaultValue,
+      always_enabled: !canDisable,
+      note: canDisable ? 'Gemini thinkingLevel；off 使用兼容的 thinkingBudget=0' : 'Gemini thinkingLevel 按具体型号裁剪',
+      off_control: canDisable ? 'gemini_budget_zero' : null,
+      can_disable: canDisable,
+    })
   }
   if (pid === 'gemini' && /gemini-2\.5-pro/.test(mid)) {
     return normalizeReasoningProfile({ mode: 'gemini_budget', options: ['low', 'medium', 'high', 'max'], default: 'medium', always_enabled: true, note: 'Gemini Pro 保留最小思考预算' })
@@ -156,10 +182,10 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
   }
   if (pid === 'grok') {
     if (mid.includes('grok-4.6')) {
-      return normalizeReasoningProfile({ mode: 'openai_effort', options: ['low', 'medium', 'high', 'xhigh'], default: 'high', always_enabled: true, note: 'Grok 4.6 始终思考，支持 low / medium / high / xhigh' })
+      return normalizeReasoningProfile({ mode: 'openai_effort', options: ['off', 'low', 'medium', 'high', 'xhigh'], default: 'high', note: 'Grok 4.6 支持 none / low / medium / high / xhigh', off_control: 'reasoning_effort_none', can_disable: true })
     }
     if (mid.includes('grok-4.5')) {
-      return normalizeReasoningProfile({ mode: 'openai_effort', options: ['low', 'medium', 'high'], default: 'high', always_enabled: true, note: 'Grok 4.5 始终思考' })
+      return normalizeReasoningProfile({ mode: 'openai_effort', options: ['off', 'low', 'medium', 'high'], default: 'high', note: 'Grok 4.5 支持 none / low / medium / high', off_control: 'reasoning_effort_none', can_disable: true })
     }
     if (mid.includes('grok-3-mini')) {
       return normalizeReasoningProfile({ mode: 'openai_effort', options: ['low', 'medium', 'high'], default: 'medium', always_enabled: true, note: 'Grok 3 Mini reasoning effort' })
@@ -169,26 +195,37 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
       : { mode: 'unsupported', options: ['off'], note: '当前 Grok 模型未声明思考能力' })
   }
   if (pid === 'anthropic') {
-    const adaptive = /claude-(?:(?:opus|sonnet|haiku|fable|mythos)-)?5(?:[.-]|$)|claude-(?:(?:opus|sonnet|haiku|fable|mythos)-)?4[-.]?[6-9](?:[.-]|$)/.test(mid)
+    const adaptive = /claude-(?:fable|mythos|opus|sonnet)-5(?:[.-]|$)|claude-(?:opus|sonnet)-4[-.]?6(?:[.-]|$)|claude-opus-4[-.]?[78](?:[.-]|$)/.test(mid)
+      || mid.includes('claude-mythos-preview')
+    const extended = /claude-(?:opus|sonnet|haiku)-4[-.]?[0-5](?:[.-]|$)|claude-sonnet-3[-.]?7(?:[.-]|$)/.test(mid)
     const supportsXhigh = /claude-(?:(?:fable|mythos|opus|sonnet)-)?5(?:[.-]|$)|claude-opus-?4[.-]?[78](?:[.-]|$)/.test(mid)
+    const mandatory = /claude-(?:fable|mythos)-5(?:[.-]|$)/.test(mid) || mid.includes('claude-mythos-preview')
+    const adaptiveOptions = supportsXhigh
+      ? ['off', 'low', 'medium', 'high', 'xhigh', 'max']
+      : ['off', 'low', 'medium', 'high', 'max']
+    if (!adaptive && !extended) {
+      return normalizeReasoningProfile({ mode: 'unsupported', options: ['off'], note: '该 Claude 型号未声明 adaptive/extended thinking 能力' })
+    }
     return normalizeReasoningProfile({
       mode: adaptive ? 'anthropic_adaptive' : 'anthropic_budget',
-      options: adaptive && supportsXhigh
-        ? ['off', 'low', 'medium', 'high', 'xhigh', 'max']
-        : ['off', 'low', 'medium', 'high', 'max'],
+      options: mandatory ? adaptiveOptions.filter((item) => item !== 'off') : adaptiveOptions,
       default: adaptive ? 'high' : 'medium',
-      note: adaptive ? 'Claude effort 与 adaptive thinking 独立控制' : 'Anthropic extended thinking',
-      off_control: 'thinking_disabled',
-      can_disable: true,
+      always_enabled: mandatory,
+      note: mandatory
+        ? '该 Claude 型号强制 adaptive thinking；关闭参数会返回 400'
+        : adaptive ? 'Claude effort 与 adaptive thinking 独立控制' : 'Anthropic extended thinking',
+      off_control: mandatory ? null : 'thinking_disabled',
+      on_control: mandatory ? 'provider_default' : null,
+      can_disable: !mandatory,
     })
   }
   if (pid === 'aliyun' || pid === 'qwen' || /qwen3|qwq/.test(mid)) {
     if (/qwen3\.8-(?:max|flash)/.test(mid)) {
       return normalizeReasoningProfile({
-        mode: 'openai_effort',
-        options: ['off', 'low', 'medium', 'xhigh'],
-        default: 'xhigh',
-        note: 'Qwen3.8 使用 reasoning_effort，不能与 thinking_budget 同时发送',
+        mode: 'qwen_budget',
+        options: ['off', 'low', 'medium', 'high', 'max'],
+        default: 'high',
+        note: 'Qwen3.8 使用 enable_thinking + thinking_budget（应用档位映射）',
         off_control: 'enable_thinking_false',
         on_control: 'enable_thinking_true',
         can_disable: true,
@@ -196,6 +233,22 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
     }
     return normalizeReasoningProfile(isReasoning || provider?.apiConfig?.supportsReasoning === true
       ? { mode: 'qwen_budget', options: ['off', 'low', 'medium', 'high', 'max'], default: 'medium', note: 'Qwen thinking budget', off_control: 'enable_thinking_false', can_disable: true }
+      : { mode: 'unsupported', options: ['off'], note: '当前模型未声明思考能力' })
+  }
+  if (pid === 'silicon') {
+    if (/deepseek-v4|glm-5\.2/.test(mid)) {
+      return normalizeReasoningProfile({
+        mode: 'openai_effort',
+        options: ['off', 'high', 'max'],
+        default: 'high',
+        note: 'SiliconFlow V4/GLM-5.2 使用 enable_thinking + reasoning_effort',
+        off_control: 'enable_thinking_false',
+        on_control: 'enable_thinking_true',
+        can_disable: true,
+      })
+    }
+    return normalizeReasoningProfile(isReasoning
+      ? { mode: 'qwen_budget', options: ['off', 'low', 'medium', 'high', 'max'], default: 'medium', note: 'SiliconFlow 使用 enable_thinking + thinking_budget', off_control: 'enable_thinking_false', on_control: 'enable_thinking_true', can_disable: true }
       : { mode: 'unsupported', options: ['off'], note: '当前模型未声明思考能力' })
   }
   if (pid === 'deepseek') {
@@ -246,13 +299,26 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
       : { mode: 'unsupported', options: ['off'], note: '当前模型未声明思考能力' })
   }
   if (pid === 'minimax') {
-    return normalizeReasoningProfile(isReasoning
-      ? { mode: 'thinking_toggle', options: ['off', 'medium'], default: 'medium', note: 'MiniMax M3 使用 adaptive / disabled；reasoning_split 只分离输出', off_control: 'thinking_disabled', on_control: 'thinking_adaptive', split_reasoning_output: true, can_disable: true }
-      : { mode: 'unsupported', options: ['off'], note: '当前模型未声明思考能力' })
+    if (/(?:^|\/)minimax-m3(?:[.\-:]|$)/.test(mid)) {
+      return normalizeReasoningProfile({ mode: 'thinking_toggle', options: ['off', 'medium'], default: 'medium', note: 'MiniMax M3 使用 adaptive / disabled；reasoning_split 只分离输出', off_control: 'thinking_disabled', on_control: 'thinking_adaptive', split_reasoning_output: true, can_disable: true })
+    }
+    if (/(?:^|\/)minimax-m2(?:[.\-:]|$)/.test(mid)) {
+      return normalizeReasoningProfile({ mode: 'fixed', options: ['medium'], default: 'medium', always_enabled: true, note: 'MiniMax M2.x 始终思考；thinking.type=disabled 不会关闭思考', on_control: 'provider_default', split_reasoning_output: true })
+    }
+    return normalizeReasoningProfile({ mode: 'unsupported', options: ['off'], note: '当前模型未声明思考能力' })
   }
   if (isReasoning || provider?.apiConfig?.supportsReasoning === true) {
-    if (/gpt-5\.6/.test(mid)) {
-      return normalizeReasoningProfile({ mode: 'openai_effort', options: ['off', 'low', 'medium', 'high', 'xhigh', 'max'], default: 'medium', note: 'OpenAI reasoning_effort', off_control: 'reasoning_effort_none', can_disable: true })
+    if (/gpt-5(?:\.\d+)?-pro(?:[-.]|$)/.test(mid)) {
+      return normalizeReasoningProfile({ mode: 'openai_effort', options: ['high'], default: 'high', always_enabled: true, note: 'OpenAI Pro 使用固定 high 档位' })
+    }
+    if (/gpt-5\.(?:2|4|5|6)(?:[-.]|$)/.test(mid)) {
+      return normalizeReasoningProfile({ mode: 'openai_effort', options: ['off', 'low', 'medium', 'high', 'xhigh'], default: 'medium', note: 'OpenAI reasoning_effort（保守兼容集）', off_control: 'reasoning_effort_none', can_disable: true })
+    }
+    if (/gpt-5\.(?:1|3)(?:[-.]|$)/.test(mid)) {
+      return normalizeReasoningProfile({ mode: 'openai_effort', options: ['off', 'low', 'medium', 'high'], default: 'medium', note: 'OpenAI reasoning_effort（保守兼容集）', off_control: 'reasoning_effort_none', can_disable: true })
+    }
+    if (/gpt-5(?:[-.]|$)/.test(mid)) {
+      return normalizeReasoningProfile({ mode: 'openai_effort', options: ['minimal', 'low', 'medium', 'high'], default: 'medium', always_enabled: true, note: 'OpenAI reasoning_effort（保守兼容集）' })
     }
     if (/^o[134](?:[-.]|$)/.test(mid)) {
       return normalizeReasoningProfile({ mode: 'openai_effort', options: ['low', 'medium', 'high'], default: 'medium', always_enabled: true, note: 'OpenAI reasoning model' })
@@ -266,7 +332,7 @@ export const inferReasoningProfile = ({ providerId, modelId, model, provider }) 
 // 只按明确的模型族启用，避免普通 OpenAI 兼容接口拒绝未知消息字段。
 export const requiresPreservedReasoning = ({ modelId } = {}) => {
   const mid = String(modelId || '').trim().toLowerCase()
-  return /deepseek-v4|glm-5\.[23]|kimi-k3|qwen3\.8-(?:max|flash)|mimo-v2\.5/.test(mid)
+  return /deepseek-v4|glm-5\.[23]|kimi-k3|kimi-k2[.-]?7-code|qwen3\.8-(?:max|flash)|mimo-v2\.5|(?:^|\/)minimax-m[23](?:[.\-:]|$)/.test(mid)
 }
 
 export const getStoredReasoningEffort = (modelKey) => {

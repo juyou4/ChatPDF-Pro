@@ -27,6 +27,7 @@ from services.reasoning_effort_service import (
     ensure_reasoning_output_budget,
     merge_request_body,
     prepare_reasoning_history_messages,
+    sanitize_reasoning_sampling_parameters,
 )
 from services.think_tag_stream import (
     StreamingThinkSplitter,
@@ -496,6 +497,17 @@ async def call_ai_api(
             )
             native_reasoning_effort = reasoning_body.pop("reasoning_effort", None)
             effective_custom_params = reasoning_body
+            effective_temperature, effective_top_p = sanitize_reasoning_sampling_parameters(
+                payload["provider"],
+                payload["model"],
+                reasoning_resolution,
+                temperature=effective_custom_params.get("temperature", temperature),
+                top_p=effective_custom_params.get("top_p", top_p),
+            )
+            if effective_temperature is None:
+                effective_custom_params.pop("temperature", None)
+            if effective_top_p is None:
+                effective_custom_params.pop("top_p", None)
             effective_max_tokens = ensure_reasoning_output_budget(
                 max_tokens,
                 reasoning_resolution,
@@ -512,8 +524,8 @@ async def call_ai_api(
                 timeout=timeout,
                 stream=stream,
                 max_tokens=effective_max_tokens,
-                temperature=temperature,
-                top_p=top_p,
+                temperature=effective_temperature,
+                top_p=effective_top_p,
                 custom_params=effective_custom_params,
                 reasoning_effort=native_reasoning_effort,
                 tools=tools,
@@ -642,6 +654,21 @@ async def call_ai_api_stream(
             enable_thinking=enable_thinking,
             requested_effort=reasoning_effort,
         )
+        effective_temperature, effective_top_p = sanitize_reasoning_sampling_parameters(
+            provider,
+            model,
+            reasoning_resolution,
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+        )
+        if effective_temperature is None:
+            body.pop("temperature", None)
+        else:
+            body["temperature"] = effective_temperature
+        if effective_top_p is None:
+            body.pop("top_p", None)
+        else:
+            body["top_p"] = effective_top_p
         think_splitter = StreamingThinkSplitter()
         if reasoning_resolution.enabled:
             # DeepSeek 的 reasoning 与正文共享 completion 预算。标准回答默认的
@@ -911,6 +938,21 @@ async def call_ai_api_stream(
             enable_thinking=enable_thinking,
             requested_effort=reasoning_effort,
         )
+        effective_temperature, effective_top_p = sanitize_reasoning_sampling_parameters(
+            provider,
+            model,
+            reasoning_resolution,
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+        )
+        if effective_temperature is None:
+            body.pop("temperature", None)
+        else:
+            body["temperature"] = effective_temperature
+        if effective_top_p is None:
+            body.pop("top_p", None)
+        else:
+            body["top_p"] = effective_top_p
         # Anthropic requires the total output cap to exceed the thinking
         # budget. A normal 1k chat cap would otherwise fail before an answer.
         if reasoning_resolution.enabled:

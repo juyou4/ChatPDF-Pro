@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest'
 import fc from 'fast-check'
 import { migrateProviders } from '../contexts/ProviderContext'
 import { migrateUserModels } from '../contexts/ModelContext'
-import { migrateDefaults } from '../contexts/DefaultsContext'
+import { migrateDefaults, normalizeAssistantKey } from '../contexts/DefaultsContext'
 
 // ---- Property 5: Provider 配置迁移保留 apiKey ----
 
@@ -162,7 +162,9 @@ describe('Property 7: 默认模型迁移保留用户选择', () => {
                     expect(result.embeddingModel).toBeTruthy()
                 }
                 if (oldDefaults.assistantModel) {
-                    expect(result.assistantModel).toBe(oldDefaults.assistantModel)
+                    // 迁移会把已下线的模型别名映射到当前可用 ID；
+                    // 对仍有效的 ID 则保持原值。
+                    expect(result.assistantModel).toBe(normalizeAssistantKey(oldDefaults.assistantModel))
                 }
                 if (oldDefaults.rerankModel) {
                     expect(result.rerankModel).toBe(oldDefaults.rerankModel)
@@ -188,7 +190,7 @@ describe('Property 7: 默认模型迁移保留用户选择', () => {
         })
         const result2 = migrateDefaults(oldData2)
         expect(result2).not.toBeNull()
-        expect(result2?.embeddingModel).toBe('minimax:minimax-embedding-v2')
+        expect(result2?.embeddingModel).toBe('minimax:embo-01')
         expect(result2?.assistantModel).toBe('deepseek:deepseek-v4-flash')
     })
 })
