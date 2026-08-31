@@ -27,6 +27,7 @@ from services.provider_auth import (
     normalize_api_key_header,
     normalize_api_key_prefix,
 )
+from services.embedding_service import describe_embedding_error
 
 
 router = APIRouter()
@@ -1462,7 +1463,22 @@ async def test_model(request: ModelTestRequest):
             async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
                 resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code < 200 or resp.status_code >= 300:
-                raise HTTPException(status_code=resp.status_code, detail=f"Embedding接口返回错误: {resp.text[:500]}")
+                failure = describe_embedding_error(
+                    ValueError(f"Embedding API 返回 HTTP {resp.status_code}: {resp.text[:500]}"),
+                    provider=request.providerId,
+                    model=request.modelId,
+                    operation="Embedding 连接测试",
+                )
+                raise HTTPException(
+                    status_code=int(failure.get("http_status") or resp.status_code),
+                    detail={
+                        "message": failure.get("message") or "Embedding 连接测试失败",
+                        "code": failure.get("code") or "embedding_failed",
+                        "provider": request.providerId,
+                        "model": request.modelId,
+                        "retryable": bool(failure.get("retryable", True)),
+                    },
+                )
             try:
                 data = resp.json()
             except ValueError as exc:

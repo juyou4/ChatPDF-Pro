@@ -41,6 +41,13 @@ const clampPercent = (value) => {
   return Math.max(0, Math.min(100, Math.round(numeric)));
 };
 
+const isLiveTaskStatusItem = (item) => (
+  item?.id === 'mineru_parse'
+  || item?.id === 'rag_index'
+  || String(item?.title || '').includes('MinerU')
+  || String(item?.title || '').includes('问答索引')
+);
+
 const isMinerUStatusItem = (item) => (
   item?.id === 'mineru_parse' || String(item?.title || '').includes('MinerU')
 );
@@ -122,9 +129,10 @@ export default function DocumentUploadNotice({ notice, liveParseStatus = null })
   const items = Array.isArray(notice?.items) ? notice.items : [];
 
   const effectiveItems = items.map((item) => {
+    const isLiveItem = isLiveTaskStatusItem(item);
     const isMinerUItem = isMinerUStatusItem(item);
-    const merged = isMinerUItem && liveParseStatus ? { ...item, ...liveParseStatus } : item;
-    return { item, merged, isMinerUItem };
+    const merged = isLiveItem && liveParseStatus ? { ...item, ...liveParseStatus } : item;
+    return { item, merged, isLiveItem, isMinerUItem };
   });
 
   // 全部成功后这张卡会永久留在聊天记录里，展开形态等于反复说一遍"成功了"。
@@ -238,7 +246,10 @@ export default function DocumentUploadNotice({ notice, liveParseStatus = null })
                 ? (progress?.stageLabel || effectiveItem?.description)
                 : effectiveItem?.description;
               const diagnostic = ['failed', 'warning'].includes(effectiveItem?.status)
-                ? splitDiagnosticMessage(description)
+                ? {
+                  ...splitDiagnosticMessage(description),
+                  code: effectiveItem?.errorCode || splitDiagnosticMessage(description).code,
+                }
                 : { message: description, code: '' };
               const statusSurfaceClass = effectiveItem?.status === 'failed'
                 ? 'rounded-[14px] border border-[#F0DDD6] bg-[#FBF4F1] px-3 py-2.5 dark:border-[#D97A5D]/20 dark:bg-[#D97A5D]/10'

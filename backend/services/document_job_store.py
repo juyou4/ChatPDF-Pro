@@ -50,7 +50,17 @@ def recover_interrupted_document_job(
             "error": "服务重启导致任务中断，请重新执行",
             "updated_at": updated_at,
             "recovered_after_restart": True,
+            "remote_state": "failed",
         })
+        for key in (
+            "remote_progress_percent",
+            "remote_progress_source",
+            "remote_pages_completed",
+            "remote_pages_total",
+            "poll_attempt",
+            "poll_total",
+        ):
+            recovered.pop(key, None)
         persist_document_job(data_dir, job_type, doc_id, recovered)
     return recovered
 

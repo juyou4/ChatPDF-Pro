@@ -62,15 +62,6 @@ vi.mock('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({
   default: 'mock-worker-url',
 }));
 
-// Mock lucide-react 图标
-vi.mock('lucide-react', () => ({
-  ChevronLeft: () => <span>←</span>,
-  ChevronRight: () => <span>→</span>,
-  ZoomIn: () => <span>+</span>,
-  ZoomOut: () => <span>-</span>,
-  FileText: () => <span>file</span>,
-}));
-
 // Mock framer-motion
 vi.mock('framer-motion', () => ({
   motion: {

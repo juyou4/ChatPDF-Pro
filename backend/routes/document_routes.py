@@ -15,9 +15,9 @@ import tempfile
 import threading
 import uuid
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlsplit
 
 import PyPDF2
@@ -108,6 +108,8 @@ from services.embedding_service import (
     _index_cache,
     get_document_publication_lock as _shared_document_publication_lock,
     get_embedding_function,
+    describe_embedding_error,
+    _embedding_provider_label,
 )
 from services.semantic_group_store import (
     deactivate_generation,
@@ -233,6 +235,8 @@ LEGACY_PROJECT_UPLOAD_DIR = PROJECT_ROOT / "uploads"
 documents_store = {}
 _INDEX_STATUS_LOCK = threading.Lock()
 _DOCUMENT_INDEX_STATUS: dict[str, dict] = {}
+_DOCUMENT_INDEX_JOB_TYPE = "document_rag_index"
+_DOCUMENT_INDEX_WORKER_INSTANCE_ID = uuid.uuid4().hex
 try:
     _DOCUMENT_INDEX_MAX_PENDING = max(1, min(32, int(os.getenv("CHATPDF_DOCUMENT_INDEX_MAX_PENDING", "6"))))
 except ValueError:
@@ -245,6 +249,208 @@ _PAPER_METADATA_HYDRATION_STATUS: dict[str, dict] = {}
 _DEEP_PARSE_CANCEL_EVENTS: dict[str, threading.Event] = {}
 _DEEP_PARSE_JOB_TYPE = "mineru_deep_parse"
 _DEEP_PARSE_TERMINAL_STATUSES = {"ready", "partial_ready", "failed", "cancelled"}
+
+
+class _RagIndexBuildFailure(RuntimeError):
+    """A recoverable failure after MinerU has already published its artifacts."""
+
+    def __init__(self, details: dict[str, Any], *, original_error: str = ""):
+        self.details = dict(details or {})
+        self.original_error = str(original_error or "").strip()
+        # Keep the original text in the private exception chain for local
+        # diagnostics/tests. API responses use ``details.message`` instead and
+        # never serialize this value.
+        super().__init__(self.original_error or str(self.details.get("message") or "问答索引构建失败"))
+
+
+def _safe_rag_index_failure_details(details: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep persisted/index-status failure metadata short and credential-free."""
+    source = details if isinstance(details, dict) else {}
+    result: dict[str, Any] = {}
+    for key in (
+        "code",
+        "kind",
+        "stage",
+        "message",
+        "provider",
+        "model",
+    ):
+        value = str(source.get(key) or "").strip()
+        if value:
+            # Provider/model IDs are useful for choosing a replacement, while
+            # arbitrary exception text is intentionally never persisted here.
+            result[key] = value[:240]
+    for key in ("http_status", "status"):
+        value = source.get(key)
+        try:
+            if value is not None:
+                result[key] = max(100, min(599, int(value)))
+        except (TypeError, ValueError):
+            continue
+    for key in ("retryable", "requires_user_action", "preserve_parse"):
+        if key in source:
+            result[key] = bool(source.get(key))
+    return result
+
+
+def _describe_rag_index_failure(
+    exc: Exception,
+    *,
+    provider: str = "",
+    model: str = "",
+    operation: str = "问答索引构建",
+) -> dict[str, Any]:
+    """Normalize every post-parse index failure into an actionable outcome."""
+    if isinstance(exc, _RagIndexBuildFailure):
+        return _safe_rag_index_failure_details(exc.details)
+
+    embedding = describe_embedding_error(
+        exc,
+        provider=provider,
+        model=model,
+        operation=operation,
+    )
+    embedding_text = str(embedding.get("message") or "")
+    raw_text = str(exc or "").casefold()
+    is_embedding_failure = (
+        embedding.get("code") != "embedding_failed"
+        or "embedding" in raw_text
+        or "嵌入" in raw_text
+    )
+    if is_embedding_failure:
+        result = dict(embedding)
+        result["stage"] = "embedding"
+    else:
+        classified = classify_error_code(exc)
+        if classified in {"timeout", "network_error"}:
+            code = "rag_index_network_error"
+            message = f"{operation}连接 Embedding/索引服务超时或中断，请检查网络后重试。"
+        elif "quality" in raw_text or "校验" in raw_text or "验证" in raw_text:
+            code = "rag_index_quality_failed"
+            message = f"{operation}质量校验未通过，未发布不完整索引；修正后可重试。"
+        elif "faiss" in raw_text or "落盘" in raw_text or "写入" in raw_text or "索引" in raw_text:
+            code = "rag_index_storage_failed"
+            message = f"{operation}写入或校验失败，未覆盖已有索引；检查磁盘后可重试。"
+        else:
+            code = "rag_index_failed"
+            message = f"{operation}失败，未发布不完整索引；修正配置后可重试。"
+        result = {
+            "code": code,
+            "kind": "rag_index",
+            "stage": "index",
+            "message": message,
+            "http_status": 502,
+            "retryable": True,
+            "requires_user_action": True,
+            "provider": str(provider or "").strip()[:80],
+            "model": str(model or "").strip()[:160],
+        }
+
+    # Once MinerU raw/block artifacts exist, this failure is recoverable from
+    # cache. Explicitly tell both the UI and restart reconciliation to retain
+    # that parse generation instead of forcing a second PDF upload.
+    result["kind"] = "rag_index"
+    result["retryable"] = True
+    result["preserve_parse"] = True
+    result.setdefault("requires_user_action", True)
+    if not embedding_text and not result.get("message"):
+        result["message"] = f"{operation}失败，修正后可重试。"
+    if "MinerU" in operation:
+        if "已保留 MinerU 解析结果" not in str(result.get("message") or ""):
+            result["message"] = f"{str(result.get('message') or '').rstrip('。')} 已保留 MinerU 解析结果，无需重新上传。"
+    elif "原有索引未被覆盖" not in str(result.get("message") or ""):
+        result["message"] = f"{str(result.get('message') or '').rstrip('。')} 原有索引未被覆盖，可修正后重试。"
+    return _safe_rag_index_failure_details(result)
+
+
+def _rag_index_failure_http_exception(details: dict[str, Any]) -> HTTPException:
+    """Expose a stable structured error while keeping raw provider text private."""
+    safe = _safe_rag_index_failure_details(details)
+    status = safe.get("http_status")
+    if not isinstance(status, int) or status < 400 or status > 599:
+        status = 502
+    return HTTPException(status_code=status, detail={
+        "message": safe.get("message") or "问答索引构建失败，已保留可恢复的解析结果",
+        "code": safe.get("code") or "rag_index_failed",
+        "stage": safe.get("stage") or "index",
+        "retryable": bool(safe.get("retryable", True)),
+        "preserve_parse": bool(safe.get("preserve_parse", True)),
+        "provider": safe.get("provider", ""),
+        "model": safe.get("model", ""),
+        "rag_index": safe,
+    })
+
+
+def _describe_mineru_failure(exc: Exception) -> dict[str, Any]:
+    """Return a safe public reason for parser transport/remote-state errors."""
+    raw = str(exc or "").casefold()
+    status_match = re.search(r"(?:http\s*(?:status|code)?|status(?:_code)?|code)\s*[:=]?\s*(\d{3})", raw)
+    status_code = int(status_match.group(1)) if status_match else None
+    if status_code == 402 or any(token in raw for token in ("insufficient balance", "quota exceeded", "余额不足", "额度不足", "欠费")):
+        code = "mineru_quota_exhausted"
+        message = "MinerU 服务余额或额度不足，请充值或更换可用账号后重试。"
+        retryable = True
+    elif status_code == 429 or any(token in raw for token in ("rate limit", "too many requests", "请求过于频繁")):
+        code = "mineru_rate_limited"
+        message = "MinerU 请求过于频繁，已停止等待；请稍后重试或降低并发。"
+        retryable = True
+    elif status_code in {401, 403} or any(token in raw for token in ("unauthorized", "forbidden", "token 无效", "token失效", "鉴权")):
+        code = "mineru_auth_failed"
+        message = "MinerU 凭证无效或无权访问，请检查 Token/Worker 密钥后重试。"
+        retryable = True
+    elif any(token in raw for token in ("路由不存在", "url 已被拒绝", "url 被拒绝", "私网地址", "地址不允许", "ocr worker url")):
+        code = "mineru_endpoint_invalid"
+        message = "MinerU 服务地址不可用或被安全策略拒绝，请检查 Worker/直连地址后重试。"
+        retryable = True
+    elif status_code in {413, 415, 422} or any(token in raw for token in ("文件过大", "超过大小", "unsupported media", "invalid pdf", "pdf 无效", "格式不支持")):
+        code = "mineru_file_rejected"
+        message = "MinerU 拒绝了当前 PDF（文件过大、格式或内容不符合要求），请检查文件后重试。"
+        retryable = True
+    elif any(token in raw for token in ("缺少 batch_id", "未返回 batch_id", "未返回 full_zip_url", "返回格式", "json")):
+        code = "mineru_response_invalid"
+        message = "MinerU 返回结果格式异常，未发布文档内容；请稍后重试。"
+        retryable = True
+    elif any(token in raw for token in ("download", "下载", "result file", "结果文件", "zip")):
+        code = "mineru_download_failed"
+        message = "MinerU 已完成或接近完成，但解析结果下载失败；可重试下载，不会重复上传 PDF。"
+        retryable = True
+    elif any(token in raw for token in ("timeout", "timed out", "连接超时", "connecterror", "connection refused", "network is unreachable")):
+        code = "mineru_network_error"
+        message = "MinerU 连接超时或中断，请检查直连网络和服务地址后重试。"
+        retryable = True
+    elif status_code is not None and status_code >= 500:
+        code = "mineru_service_unavailable"
+        message = "MinerU 服务暂时不可用，已停止等待；请稍后重试。"
+        retryable = True
+    elif any(token in raw for token in ("quality", "质量", "empty", "为空", "missing page", "缺页")):
+        code = "mineru_quality_failed"
+        message = "MinerU 结果未通过完整性校验，未发布不完整内容；请重试解析。"
+        retryable = True
+    elif any(token in raw for token in ("expired", "过期", "签名失效", "结果已失效")):
+        code = "mineru_result_expired"
+        message = "MinerU 远端结果已过期，请重新提交解析。"
+        retryable = True
+    elif any(token in raw for token in ("failed", "失败", "remote state")):
+        code = "mineru_remote_failed"
+        message = "MinerU 远端任务未完成或已失效，请重新提交解析。"
+        retryable = True
+    else:
+        code = "mineru_failed"
+        message = "MinerU 解析失败，请检查解析设置后重试。"
+        retryable = True
+    return {
+        "code": code,
+        "kind": "mineru",
+        "stage": "mineru",
+        "message": message,
+        "http_status": 502,
+        "retryable": retryable,
+        "requires_user_action": True,
+        "preserve_parse": code == "mineru_download_failed",
+        "next_action": "retry_download" if code == "mineru_download_failed" else "retry_parse",
+    }
+
+
 try:
     _DEEP_PARSE_CONCURRENCY = max(1, min(8, int(os.getenv("CHATPDF_MINERU_DEEP_PARSE_CONCURRENCY", "2"))))
 except ValueError:
@@ -268,6 +474,67 @@ def _bounded_env_int(name: str, default: int, maximum: int) -> int:
         return max(1, min(int(os.getenv(name, str(default))), maximum))
     except (TypeError, ValueError):
         return default
+
+
+_DEEP_PARSE_REMOTE_STALL_SECONDS = _bounded_env_int(
+    "CHATPDF_MINERU_REMOTE_STALL_SECONDS",
+    20 * 60,
+    24 * 60 * 60,
+)
+_DEEP_PARSE_INDEX_STALL_SECONDS = _bounded_env_int(
+    "CHATPDF_MINERU_INDEX_STALL_SECONDS",
+    30 * 60,
+    24 * 60 * 60,
+)
+try:
+    _EMBEDDING_PREFLIGHT_TIMEOUT_SECONDS = max(
+        3.0,
+        min(60.0, float(os.getenv("CHATPDF_EMBEDDING_PREFLIGHT_TIMEOUT_SECONDS", "20"))),
+    )
+except (TypeError, ValueError):
+    _EMBEDDING_PREFLIGHT_TIMEOUT_SECONDS = 20.0
+_DEEP_PARSE_INDEX_STAGES = {
+    "building_index",
+    "building_rag_index",
+    "rebuilding_rag_index",
+    "building_vector_index",
+    "validating_vector_index",
+    "preparing_semantic_index",
+    "building_semantic_index",
+    "validating_semantic_index",
+    "publishing_rag_index",
+}
+
+_DEEP_PARSE_STAGE_LABELS = {
+    "queued": "等待开始解析",
+    "waiting_for_slot": "等待 MinerU 处理名额",
+    "waiting_for_document_lock": "等待当前文档任务结束",
+    "requesting_upload": "申请上传链接",
+    "uploading": "上传 PDF 到 MinerU",
+    "resuming": "恢复 MinerU 任务",
+    "resuming_result_download": "重新获取解析结果",
+    "polling": "MinerU 正在解析",
+    "mineru_parsing": "MinerU 正在解析",
+    "downloading": "下载解析结果",
+    "retrying_download": "重试结果下载",
+    "building_index": "构建阅读结构",
+    "building_rag_index": "构建问答索引",
+    "building_vector_index": "生成向量索引",
+    "building_semantic_index": "生成语义索引",
+    "publishing_rag_index": "发布问答索引",
+    "awaiting_rag_index": "等待问答索引发布",
+    "download_failed": "解析结果下载失败",
+    "rag_index_failed": "问答索引发布失败",
+    "status_sync_failed": "解析状态同步失败",
+    "restart_recovery": "服务重启后任务中断",
+    "queue_full": "任务排队已满",
+    "stalled": "任务长时间无进展",
+    "partial_ready": "部分页面已就绪",
+    "ready": "全部能力已就绪",
+    "failed": "解析失败",
+    "cancelled": "解析已取消",
+    "not_started": "尚未开始",
+}
 
 
 _MAX_UPLOAD_BYTES = _bounded_env_int("CHATPDF_MAX_UPLOAD_BYTES", 100 * 1024 * 1024, 512 * 1024 * 1024)
@@ -582,6 +849,188 @@ def _require_explicit_rag_embedding_identity_or_400(
         "api_host": str(identity.get("api_host") or "").strip(),
         "api_key": requested_key or None,
     }
+
+
+def _probe_embedding_configuration(
+    identity: dict[str, Any],
+    *,
+    operation: str = "Embedding 预检",
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Run one tiny remote embedding probe before an expensive document job.
+
+    Presence/format validation cannot detect an exhausted SiliconFlow account,
+    a revoked key, or a model that was removed after the settings page was last
+    opened.  A one-item probe makes those failures explicit before the PDF is
+    uploaded.  Local models are deliberately left to the normal build path so
+    startup does not load a large SentenceTransformer twice.
+    """
+    config = identity if isinstance(identity, dict) else {}
+    provider = str(config.get("provider") or "").strip()
+    if provider == "local":
+        return {"probed": False, "reason": "local_model"}
+    if str(os.environ.get("CHATPDF_SKIP_EMBEDDING_PREFLIGHT", "")).strip().lower() in {"1", "true", "yes", "on"}:
+        logger.info("[Upload] embedding preflight skipped by CHATPDF_SKIP_EMBEDDING_PREFLIGHT")
+        return {"probed": False, "reason": "disabled"}
+
+    model = str(config.get("model") or "").strip()
+    api_key = str(config.get("api_key") or "").strip() or None
+    api_host = str(config.get("api_host") or "").strip()
+    scoped_model = _compose_provider_scoped_embedding_model(model, provider)
+    try:
+        embedding_kwargs: dict[str, Any] = {}
+        if timeout_seconds is not None:
+            embedding_kwargs["request_timeout"] = timeout_seconds
+        embed_fn = get_embedding_function(
+            scoped_model,
+            api_key,
+            api_host,
+            False,
+            **embedding_kwargs,
+        )
+        vectors = embed_fn(["ChatPDF embedding preflight"])
+        if vectors is None or len(vectors) != 1:
+            raise ValueError("Embedding 预检未返回有效向量")
+        return {"probed": True, "provider": provider, "model": model}
+    except Exception as exc:
+        failure = describe_embedding_error(
+            exc,
+            provider=provider,
+            model=model,
+            operation=operation,
+        )
+        safe = _safe_rag_index_failure_details(failure)
+        safe["stage"] = "embedding_preflight"
+        safe["preserve_parse"] = False
+        safe["message"] = str(failure.get("message") or "Embedding 预检失败")
+        logger.warning(
+            "[Embedding] preflight failed provider=%s model=%s code=%s status=%s",
+            provider,
+            model,
+            safe.get("code"),
+            safe.get("status"),
+        )
+        raise HTTPException(
+            status_code=int(safe.get("http_status") or 502),
+            detail={
+                "message": safe["message"],
+                "code": safe.get("code") or "embedding_failed",
+                "stage": "embedding_preflight",
+                "retryable": bool(safe.get("retryable", True)),
+                "preserve_parse": False,
+                "provider": safe.get("provider", provider),
+                "model": safe.get("model", model),
+            },
+        ) from exc
+
+
+async def _probe_embedding_configuration_async(
+    identity: dict[str, Any],
+    *,
+    operation: str = "Embedding 预检",
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    """Run the synchronous provider probe off the event loop with a hard cap.
+
+    Upload and retry endpoints are async.  A provider that accepts a TCP
+    connection but never returns a response must not occupy the request loop
+    (or leave the UI looking like the document is still uploading).  The
+    embedding client receives the same timeout so the worker also exits soon
+    after the coroutine's guard fires.
+    """
+    try:
+        timeout = float(
+            timeout_seconds
+            if timeout_seconds is not None
+            else _EMBEDDING_PREFLIGHT_TIMEOUT_SECONDS
+        )
+    except (TypeError, ValueError):
+        timeout = _EMBEDDING_PREFLIGHT_TIMEOUT_SECONDS
+    timeout = max(3.0, min(60.0, timeout))
+    try:
+        # Keep a small margin for thread scheduling and exception propagation;
+        # the HTTP client itself is capped at ``timeout`` below.
+        return await asyncio.wait_for(
+            asyncio.to_thread(
+                _probe_embedding_configuration,
+                identity,
+                operation=operation,
+                timeout_seconds=timeout,
+            ),
+            timeout=timeout + 1.0,
+        )
+    except asyncio.TimeoutError as exc:
+        provider = str((identity or {}).get("provider") or "Embedding").strip()
+        model = str((identity or {}).get("model") or "").strip()
+        details = {
+            "code": "embedding_network_error",
+            "kind": "embedding",
+            "stage": "embedding_preflight",
+            "message": f"{_embedding_provider_label(provider)} Embedding 预检超时（>{int(timeout)} 秒），请检查网络或 API 地址后重试。",
+            "http_status": 504,
+            "retryable": True,
+            "requires_user_action": False,
+            "preserve_parse": False,
+            "provider": provider[:80],
+            "model": model[:160],
+        }
+        logger.warning(
+            "[Embedding] preflight timed out provider=%s model=%s timeout=%ss",
+            provider,
+            model,
+            timeout,
+        )
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "message": details["message"],
+                "code": details["code"],
+                "stage": details["stage"],
+                "retryable": True,
+                "preserve_parse": False,
+                "provider": details["provider"],
+                "model": details["model"],
+            },
+        ) from exc
+
+
+def _record_embedding_preflight_failure(
+    doc_id: str,
+    exc: HTTPException,
+    *,
+    preserve_parse: bool,
+) -> None:
+    """Persist a failed retry probe so a status refresh cannot resurrect progress."""
+    detail = exc.detail if isinstance(exc.detail, dict) else {
+        "message": str(exc.detail or "Embedding 预检失败"),
+        "code": "embedding_failed",
+        "http_status": exc.status_code,
+    }
+    details = _safe_rag_index_failure_details(detail)
+    details["preserve_parse"] = bool(preserve_parse)
+    details.setdefault("retryable", True)
+    if preserve_parse:
+        manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+        _persist_mineru_rag_index_failure(
+            doc_id,
+            details,
+            parse_generation=str(manifest.get("generation") or ""),
+            document_source_hash=str(manifest.get("source_hash") or ""),
+        )
+    else:
+        manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+        _set_document_index_status(
+            doc_id,
+            "failed",
+            stage="embedding_preflight",
+            error=str(details.get("message") or "Embedding 预检失败"),
+            parse_generation=str(manifest.get("generation") or ""),
+            document_source_hash=str(manifest.get("source_hash") or ""),
+            error_code=str(details.get("code") or "embedding_failed"),
+            retryable=True,
+            preserve_parse=False,
+            failure_details=details,
+        )
 
 
 def _embedding_provider_from_model(embedding_model: Optional[str]) -> Optional[str]:
@@ -1148,7 +1597,11 @@ def _transition_document_parse_manifest(
     updated = transition_parse_manifest(current, status, stage=stage, error=error)
     if metadata:
         merged_metadata = dict(updated.get("metadata") or {})
-        merged_metadata.update(metadata)
+        for key, value in metadata.items():
+            if value is None:
+                merged_metadata.pop(key, None)
+            else:
+                merged_metadata[key] = value
         updated["metadata"] = merged_metadata
     return _write_document_parse_manifest(doc_id, updated, doc=target, persist=persist)
 
@@ -1573,10 +2026,53 @@ def _read_vector_index_meta(
     }
 
 
+def _manifest_rag_index_failure(manifest: dict | None) -> dict[str, Any]:
+    if not isinstance(manifest, dict):
+        return {}
+    metadata = manifest.get("metadata")
+    failure = metadata.get("rag_index_failure") if isinstance(metadata, dict) else None
+    return _safe_rag_index_failure_details(failure if isinstance(failure, dict) else None)
+
+
+def _decorate_rag_index_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Add explicit lifecycle/next-action fields to the RAG status contract."""
+    result = dict(status or {})
+    normalized = str(result.get("status") or "missing").strip().lower()
+    active = normalized in {"queued", "running"}
+    result["status"] = normalized
+    result["active"] = active
+    result["terminal"] = not active
+    stage = str(result.get("stage") or normalized).strip().lower()
+    result["stage"] = stage
+    result["stage_label"] = _DEEP_PARSE_STAGE_LABELS.get(stage, stage or "问答索引")
+    result["message"] = str(result.get("error") or "").strip()
+    if active:
+        result["next_action"] = "wait"
+    elif normalized in {"failed", "stale", "missing"}:
+        result["next_action"] = "rebuild"
+    else:
+        result["next_action"] = ""
+    if not active:
+        result["progress"] = None
+    if isinstance(result.get("failure_details"), dict):
+        result["failure_details"] = _safe_rag_index_failure_details(result["failure_details"])
+    return result
+
+
 def _get_rag_index_status(doc_id: str, artifact_validation: dict | None = None) -> dict:
     if artifact_validation is None:
         with _INDEX_STATUS_LOCK:
             active_lifecycle = dict(_DOCUMENT_INDEX_STATUS.get(doc_id) or {})
+        if not active_lifecycle:
+            persisted_lifecycle = load_document_job(DATA_DIR, _DOCUMENT_INDEX_JOB_TYPE, doc_id)
+            if persisted_lifecycle:
+                active_lifecycle = dict(persisted_lifecycle)
+                if str(active_lifecycle.get("status") or "").strip().lower() in {"queued", "running"}:
+                    owner = str(active_lifecycle.get("worker_instance_id") or "").strip()
+                    if not owner or owner != _DOCUMENT_INDEX_WORKER_INSTANCE_ID:
+                        active_lifecycle = _recover_document_index_status_record(active_lifecycle)
+                with _INDEX_STATUS_LOCK:
+                    _DOCUMENT_INDEX_STATUS[doc_id] = dict(active_lifecycle)
         active_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
         lifecycle_matches_parse = bool(active_lifecycle) and matches_parse_generation(
             active_manifest,
@@ -1610,8 +2106,43 @@ def _get_rag_index_status(doc_id: str, artifact_validation: dict | None = None) 
                 source_hash=str(active_lifecycle.get("document_source_hash") or ""),
             )
         if lifecycle_matches_parse and active_lifecycle.get("status") in {"queued", "running"}:
+            lifecycle_age = _deep_parse_age_seconds(
+                active_lifecycle.get("updated_at")
+                or active_lifecycle.get("stage_started_at")
+                or active_lifecycle.get("started_at")
+            )
+            if lifecycle_age is not None and lifecycle_age >= _DEEP_PARSE_INDEX_STALL_SECONDS:
+                stalled_message = "问答索引任务长时间没有进展，已停止等待；修正配置或检查磁盘后重试。"
+                preserve_parse = _is_full_mineru_parse_manifest(active_manifest)
+                _set_document_index_status(
+                    doc_id,
+                    "failed",
+                    stage="rag_index_stalled",
+                    error=stalled_message,
+                    parse_generation=str(active_lifecycle.get("parse_generation") or ""),
+                    document_source_hash=str(active_lifecycle.get("document_source_hash") or ""),
+                    error_code="rag_index_stalled",
+                    retryable=True,
+                    preserve_parse=preserve_parse,
+                    failure_details={
+                        "code": "rag_index_stalled",
+                        "kind": "rag_index",
+                        "stage": "stalled",
+                        "message": stalled_message,
+                        "retryable": True,
+                        "preserve_parse": preserve_parse,
+                    },
+                )
+                with _INDEX_STATUS_LOCK:
+                    active_lifecycle = dict(_DOCUMENT_INDEX_STATUS.get(doc_id) or {})
+                lifecycle_matches_parse = bool(active_lifecycle) and matches_parse_generation(
+                    active_manifest,
+                    generation=str(active_lifecycle.get("parse_generation") or ""),
+                    source_hash=str(active_lifecycle.get("document_source_hash") or ""),
+                )
+        if lifecycle_matches_parse and active_lifecycle.get("status") in {"queued", "running"}:
             index_path, chunks_path = _vector_index_paths(doc_id)
-            return {
+            return _decorate_rag_index_status({
                 "status": str(active_lifecycle.get("status") or "queued"),
                 "stage": str(active_lifecycle.get("stage") or "queued"),
                 "error": str(active_lifecycle.get("error") or ""),
@@ -1629,7 +2160,11 @@ def _get_rag_index_status(doc_id: str, artifact_validation: dict | None = None) 
                 "document_source_hash": str(active_lifecycle.get("document_source_hash") or ""),
                 "matches_active_parse": False,
                 "can_rollback": False,
-            }
+                "error_code": str(active_lifecycle.get("error_code") or ""),
+                "retryable": bool(active_lifecycle.get("retryable", False)),
+                "preserve_parse": bool(active_lifecycle.get("preserve_parse", False)),
+                "failure_details": active_lifecycle.get("failure_details") or {},
+            })
     artifact_validation = artifact_validation or _inspect_vector_index_artifacts(doc_id, VECTOR_STORE_DIR)
     ready = bool(artifact_validation.get("valid"))
     artifact_errors = list(artifact_validation.get("errors") or [])
@@ -1665,6 +2200,22 @@ def _get_rag_index_status(doc_id: str, artifact_validation: dict | None = None) 
     )
     if not lifecycle_matches_active_parse:
         lifecycle = {}
+    manifest_failure = _manifest_rag_index_failure(parse_manifest)
+    if (
+        not lifecycle
+        and manifest_failure
+        and str(manifest_failure.get("preserve_parse") or "").lower() in {"true", "1"}
+    ):
+        lifecycle = {
+            "status": "failed",
+            "stage": str(manifest_failure.get("stage") or "rag_index_failed"),
+            "error": str(manifest_failure.get("message") or "问答索引发布失败，已保留 MinerU 解析结果"),
+            "error_code": str(manifest_failure.get("code") or "rag_index_failed"),
+            "retryable": bool(manifest_failure.get("retryable", True)),
+            "preserve_parse": True,
+            "parse_generation": str(parse_manifest.get("generation") or ""),
+            "document_source_hash": str(parse_manifest.get("source_hash") or ""),
+        }
     # Artifact validity is authoritative over a stale in-memory lifecycle entry.
     # Without this override a previous "ready" status can mask an identityless
     # index until the process restarts.
@@ -1721,7 +2272,7 @@ def _get_rag_index_status(doc_id: str, artifact_validation: dict | None = None) 
             }
         else:
             lifecycle = {"status": "missing", "stage": "not_started", "error": ""}
-    return {
+    return _decorate_rag_index_status({
         "status": str(lifecycle.get("status") or "missing"),
         "stage": str(lifecycle.get("stage") or "not_started"),
         "error": str(lifecycle.get("error") or ""),
@@ -1760,7 +2311,43 @@ def _get_rag_index_status(doc_id: str, artifact_validation: dict | None = None) 
         "artifact_errors": meta.get("artifact_errors", artifact_errors),
         "table_chunk_count": meta.get("table_chunk_count", 0),
         "can_rollback": bool(_load_complete_rag_backup_manifest(doc_id, "pdf_native")),
-    }
+        "error_code": str(lifecycle.get("error_code") or manifest_failure.get("code") or ""),
+        "retryable": bool(lifecycle.get("retryable", manifest_failure.get("retryable", False))),
+        "preserve_parse": bool(lifecycle.get("preserve_parse", manifest_failure.get("preserve_parse", False))),
+        "failure_details": _safe_rag_index_failure_details(
+            lifecycle.get("failure_details") if isinstance(lifecycle.get("failure_details"), dict) else manifest_failure
+        ),
+    })
+
+
+def _recover_document_index_status_record(record: dict) -> dict:
+    """Turn a persisted active index job into an actionable restart failure."""
+    recovered = dict(record or {})
+    recovered.update({
+        "status": "failed",
+        "stage": "restart_recovery",
+        "error": "服务重启导致问答索引任务中断；已有索引未被覆盖，可重新发布",
+        "error_code": "worker_interrupted",
+        "retryable": True,
+        "preserve_parse": True,
+        "recovered_after_restart": True,
+        "updated_at": utc_now_iso_ms(),
+        "failure_details": {
+            "code": "worker_interrupted",
+            "kind": "rag_index",
+            "stage": "restart_recovery",
+            "message": "服务重启导致问答索引任务中断；已有索引未被覆盖，可重新发布",
+            "retryable": True,
+            "preserve_parse": True,
+        },
+    })
+    for key in ("progress", "remote_progress_percent", "remote_progress_source"):
+        recovered.pop(key, None)
+    try:
+        persist_document_job(DATA_DIR, _DOCUMENT_INDEX_JOB_TYPE, str(recovered.get("doc_id") or ""), recovered)
+    except Exception:
+        logger.debug("[RagIndex] failed to persist restart recovery", exc_info=True)
+    return recovered
 
 
 def _set_document_index_status(
@@ -1771,6 +2358,10 @@ def _set_document_index_status(
     error: str = "",
     parse_generation: str | None = None,
     document_source_hash: str | None = None,
+    error_code: str = "",
+    retryable: bool | None = None,
+    preserve_parse: bool | None = None,
+    failure_details: dict[str, Any] | None = None,
 ) -> None:
     manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
     timestamp = utc_now_iso_ms()
@@ -1785,9 +2376,11 @@ def _set_document_index_status(
             current = {}
         previous_stage = str(current.get("stage") or "").strip().lower()
         normalized_stage = str(stage or "").strip().lower()
-        _DOCUMENT_INDEX_STATUS[doc_id] = {
+        normalized_status = str(status or "").strip().lower() or "queued"
+        normalized_error_code = str(error_code or "").strip()[:80]
+        next_record = {
             "doc_id": doc_id,
-            "status": status,
+            "status": normalized_status,
             "stage": stage,
             "error": error,
             "parse_generation": next_parse_generation,
@@ -1804,11 +2397,49 @@ def _set_document_index_status(
             ),
             "updated_at": timestamp,
         }
+        if normalized_status in {"failed", "cancelled"}:
+            if normalized_error_code:
+                next_record["error_code"] = normalized_error_code
+            if retryable is not None:
+                next_record["retryable"] = bool(retryable)
+            if preserve_parse is not None:
+                next_record["preserve_parse"] = bool(preserve_parse)
+            if isinstance(failure_details, dict):
+                next_record["failure_details"] = _safe_rag_index_failure_details(failure_details)
+        else:
+            # A retry must not inherit the previous failure's explanation or
+            # make a newly running task look terminal to the UI.
+            next_record["error_code"] = ""
+            next_record["retryable"] = False
+            next_record["preserve_parse"] = False
+            next_record.pop("failure_details", None)
+        next_record["worker_instance_id"] = _DOCUMENT_INDEX_WORKER_INSTANCE_ID
+        _DOCUMENT_INDEX_STATUS[doc_id] = next_record
+    try:
+        # Index lifecycle state is deliberately credential-free. Persisting it
+        # lets a refresh distinguish "not started" from a task interrupted by
+        # a backend restart and prevents an old progress value being revived.
+        persist_document_job(DATA_DIR, _DOCUMENT_INDEX_JOB_TYPE, doc_id, next_record)
+    except Exception:
+        logger.debug("[RagIndex] failed to persist status for %s", doc_id, exc_info=True)
 
 
 def _get_document_index_status(doc_id: str) -> dict:
     with _INDEX_STATUS_LOCK:
         current = dict(_DOCUMENT_INDEX_STATUS.get(doc_id) or {})
+    if not current:
+        persisted = load_document_job(DATA_DIR, _DOCUMENT_INDEX_JOB_TYPE, doc_id)
+        if persisted:
+            current = dict(persisted)
+            if str(current.get("status") or "").strip().lower() in {"queued", "running"}:
+                owner = str(current.get("worker_instance_id") or "").strip()
+                # Missing owner means a record predates the ownership fence;
+                # treat it as an interrupted task rather than showing stale
+                # progress forever after an upgrade/restart.
+                if not owner or owner != _DOCUMENT_INDEX_WORKER_INSTANCE_ID:
+                    current = _recover_document_index_status_record(current)
+            with _INDEX_STATUS_LOCK:
+                _DOCUMENT_INDEX_STATUS[doc_id] = dict(current)
     parse_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
     current_matches_parse = bool(current) and matches_parse_generation(
         parse_manifest,
@@ -1842,6 +2473,35 @@ def _get_document_index_status(doc_id: str) -> dict:
         with _INDEX_STATUS_LOCK:
             current = dict(_DOCUMENT_INDEX_STATUS.get(doc_id) or {})
     if current.get("status") in {"queued", "running"}:
+        active_age = _deep_parse_age_seconds(
+            current.get("updated_at")
+            or current.get("stage_started_at")
+            or current.get("started_at")
+        )
+        if active_age is not None and active_age >= _DEEP_PARSE_INDEX_STALL_SECONDS:
+            stalled_message = "问答索引任务长时间没有进展，已停止等待；请检查模型服务或磁盘后重试。"
+            _set_document_index_status(
+                doc_id,
+                "failed",
+                stage="rag_index_stalled",
+                error=stalled_message,
+                parse_generation=str(current.get("parse_generation") or ""),
+                document_source_hash=str(current.get("document_source_hash") or ""),
+                error_code="rag_index_stalled",
+                retryable=True,
+                preserve_parse=True,
+                failure_details={
+                    "code": "rag_index_stalled",
+                    "kind": "rag_index",
+                    "stage": "stalled",
+                    "message": stalled_message,
+                    "retryable": True,
+                    "preserve_parse": True,
+                },
+            )
+            with _INDEX_STATUS_LOCK:
+                current = dict(_DOCUMENT_INDEX_STATUS.get(doc_id) or {})
+    if current.get("status") in {"queued", "running"}:
         index_path, chunks_path = _vector_index_paths(doc_id)
         artifact_present = index_path.exists() and chunks_path.exists()
         lifecycle = {
@@ -1860,6 +2520,13 @@ def _get_document_index_status(doc_id: str) -> dict:
         }
         return {
             **current,
+            "active": True,
+            "terminal": False,
+            "next_action": "wait",
+            "stage_label": _DEEP_PARSE_STAGE_LABELS.get(
+                str(current.get("stage") or "").strip().lower(),
+                str(current.get("stage") or "问答索引处理中"),
+            ),
             "vector_ready": False,
             "vector_artifact_ready": artifact_present,
             "parse_manifest": parse_manifest,
@@ -1906,6 +2573,18 @@ def _get_document_index_status(doc_id: str) -> dict:
     current["vector_artifact_ready"] = artifact_ready
     current["parse_manifest"] = parse_manifest
     current["rag_index"] = rag_index_status
+    normalized_status = str(current.get("status") or "missing").strip().lower()
+    current["active"] = normalized_status in {"queued", "running"}
+    current["terminal"] = normalized_status not in {"queued", "running"}
+    current["next_action"] = (
+        "rebuild"
+        if normalized_status in {"failed", "stale", "missing"}
+        else ""
+    )
+    current["stage_label"] = _DEEP_PARSE_STAGE_LABELS.get(
+        str(current.get("stage") or "").strip().lower(),
+        str(current.get("stage") or "问答索引"),
+    )
     return current
 
 
@@ -2147,13 +2826,24 @@ def _build_document_indexes(
         logger.info("[Upload] background index ready for %s", doc_id)
     except Exception as exc:
         logger.exception("[Upload] background index failed for %s: %s", doc_id, exc)
+        failure_details = _describe_rag_index_failure(
+            exc,
+            provider=embedding_provider or "",
+            model=embedding_model or "",
+            operation="问答索引构建",
+        )
+        failure_details["preserve_parse"] = False
         _set_document_index_status(
             doc_id,
             "failed",
             stage=failure_stage,
-            error=str(exc),
+            error=str(failure_details.get("message") or "问答索引构建失败"),
             parse_generation=str(parse_manifest.get("generation") or ""),
             document_source_hash=str(parse_manifest.get("source_hash") or ""),
+            error_code=str(failure_details.get("code") or "rag_index_failed"),
+            retryable=bool(failure_details.get("retryable", True)),
+            preserve_parse=False,
+            failure_details=failure_details,
         )
     finally:
         shutil.rmtree(vector_stage, ignore_errors=True)
@@ -2183,6 +2873,17 @@ def _queue_document_indexes(
             "failed",
             stage="queue_full",
             error="文档索引任务繁忙，请稍后重试",
+            error_code="queue_full",
+            retryable=True,
+            preserve_parse=True,
+            failure_details={
+                "code": "queue_full",
+                "kind": "rag_index",
+                "stage": "queue_full",
+                "message": "文档索引任务繁忙，请稍后重试",
+                "retryable": True,
+                "preserve_parse": True,
+            },
         )
         return _get_document_index_status(doc_id)
 
@@ -2216,6 +2917,9 @@ def _queue_document_indexes(
             "failed",
             stage="start_failed",
             error="文档索引后台任务启动失败",
+            error_code="task_start_failed",
+            retryable=True,
+            preserve_parse=True,
         )
     return _get_document_index_status(doc_id)
 
@@ -2383,6 +3087,10 @@ def _mark_full_mineru_index_unavailable(
     document_source_hash: str,
     stage: str,
     error: str,
+    error_code: str = "",
+    retryable: bool | None = None,
+    preserve_parse: bool | None = None,
+    failure_details: dict[str, Any] | None = None,
 ) -> None:
     """Keep the dependent RAG state terminal when its primary MinerU parse is terminal.
 
@@ -2408,7 +3116,95 @@ def _mark_full_mineru_index_unavailable(
         error=error,
         parse_generation=parse_generation or str(manifest.get("generation") or ""),
         document_source_hash=document_source_hash or str(manifest.get("source_hash") or ""),
+        error_code=error_code,
+        retryable=retryable,
+        preserve_parse=preserve_parse,
+        failure_details=failure_details,
     )
+
+
+def _persist_mineru_rag_index_failure(
+    doc_id: str,
+    details: dict[str, Any],
+    *,
+    parse_generation: str,
+    document_source_hash: str,
+    block_index: dict | None = None,
+) -> dict[str, Any]:
+    """Keep a successful MinerU parse retryable when dependent indexing fails."""
+    safe = _safe_rag_index_failure_details(details)
+    message = str(safe.get("message") or "问答索引发布失败，已保留 MinerU 解析结果，无需重新上传")
+    safe["message"] = message
+    safe["preserve_parse"] = True
+    safe.setdefault("retryable", True)
+    manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    if not _is_full_mineru_parse_manifest(manifest):
+        return safe
+    if parse_generation and not matches_parse_generation(
+        manifest,
+        generation=parse_generation,
+        source_hash=document_source_hash or None,
+    ):
+        return safe
+
+    # The raw MinerU result and block index are already committed at this point.
+    # Move only the primary manifest back to its explicit waiting state; do not
+    # delete those artifacts or force the user to pay for another upload.
+    _transition_current_full_mineru_manifest(
+        doc_id,
+        PARSE_STATUS_PENDING,
+        parse_generation=parse_generation,
+        document_source_hash=document_source_hash,
+        stage="awaiting_rag_index",
+        error=message,
+        expected_statuses={
+            PARSE_STATUS_PENDING,
+            PARSE_STATUS_QUEUED,
+            PARSE_STATUS_RUNNING,
+            PARSE_STATUS_FAILED,
+        },
+        metadata={"rag_index_failure": safe},
+    )
+    _mark_full_mineru_index_unavailable(
+        doc_id,
+        parse_generation=parse_generation,
+        document_source_hash=document_source_hash,
+        stage="rag_index_failed",
+        error=message,
+        error_code=str(safe.get("code") or "rag_index_failed"),
+        retryable=bool(safe.get("retryable", True)),
+        preserve_parse=True,
+        failure_details=safe,
+    )
+    return safe
+
+
+def _clear_mineru_rag_index_failure(
+    doc_id: str,
+    *,
+    parse_generation: str = "",
+    document_source_hash: str = "",
+) -> None:
+    """Remove a previous retry hint when a new index build actually starts."""
+    with _get_document_publication_lock(doc_id):
+        manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+        if not _is_full_mineru_parse_manifest(manifest):
+            return
+        if parse_generation and not matches_parse_generation(
+            manifest,
+            generation=parse_generation,
+            source_hash=document_source_hash or None,
+        ):
+            return
+        if not isinstance((manifest.get("metadata") or {}).get("rag_index_failure"), dict) and not manifest.get("error"):
+            return
+        _transition_document_parse_manifest(
+            doc_id,
+            str(manifest.get("status") or PARSE_STATUS_PENDING),
+            stage=str(manifest.get("stage") or "awaiting_rag_index"),
+            error="",
+            metadata={"rag_index_failure": None},
+        )
 
 
 def _clear_block_bound_reading_cache(doc_id: str) -> list[str]:
@@ -2853,6 +3649,27 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
                 "stage_started_at",
             ):
                 current.pop(key, None)
+        terminal_status = status in _DEEP_PARSE_TERMINAL_STATUSES
+        if terminal_status:
+            # A remote poll callback may have left ``remote_state=running`` in
+            # the latest record even though local normalization/indexing has
+            # already reached a terminal state. Never expose that stale state
+            # or its old percentage to the client.
+            remote_state = str(extra.get("remote_state") or "").strip().lower()
+            if not remote_state or remote_state in {"queued", "pending", "running", "processing"}:
+                extra["remote_state"] = (
+                    "completed" if status in {"ready", "partial_ready"} else status
+                )
+            for key in (
+                "remote_progress_percent",
+                "remote_progress_source",
+                "remote_pages_completed",
+                "remote_pages_total",
+                "poll_attempt",
+                "poll_total",
+            ):
+                current.pop(key, None)
+                extra.pop(key, None)
         timestamp = utc_now_iso_ms()
         normalized_stage = str(stage or "").strip().lower()
         if normalized_stage and normalized_stage != current_stage:
@@ -2864,6 +3681,8 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
         extra.pop("completed_at", None)
         extra.pop("progress", None)
         extra.pop("elapsed_seconds", None)
+        if isinstance(extra.get("failure_details"), dict):
+            extra["failure_details"] = _safe_rag_index_failure_details(extra["failure_details"])
         current.update({
             "doc_id": doc_id,
             "provider": "mineru",
@@ -2893,7 +3712,8 @@ def _set_deep_parse_status(doc_id: str, status: str, *, stage: str = "", error: 
         elif status in {"failed", "partial_ready"}:
             shortfall = {
                 "kind": "parse",
-                "code": classify_error_code(error) or ("partial_parse" if status == "partial_ready" else "parse_failed"),
+                "code": str(extra.get("error_code") or "").strip()
+                or ("partial_parse" if status == "partial_ready" else classify_error_code(error) or "parse_failed"),
                 "stage": stage or status,
                 "retryable": status == "failed",
                 "failed_pages": current.get("failed_pages") or [],
@@ -2945,6 +3765,286 @@ def _deep_parse_worker_owns_task(doc_id: str, cancel_event: threading.Event) -> 
     return active_event is None or active_event is cancel_event
 
 
+def _reconcile_terminal_deep_parse_record(doc_id: str, record: dict, manifest: dict | None = None) -> dict:
+    """Repair stale persisted remote fields left by older workers/restarts."""
+    if not isinstance(record, dict):
+        return {}
+    status = str(record.get("status") or "").strip().lower()
+    if status not in _DEEP_PARSE_TERMINAL_STATUSES:
+        return record
+    next_record = dict(record)
+    remote_state = str(next_record.get("remote_state") or "").strip().lower()
+    manifest_metadata = manifest.get("metadata") if isinstance(manifest, dict) else {}
+    recoverable_index_failure = isinstance(manifest_metadata, dict) and bool(
+        (manifest_metadata.get("rag_index_failure") or {}).get("preserve_parse")
+        if isinstance(manifest_metadata.get("rag_index_failure"), dict)
+        else False
+    )
+    expected_remote_state = (
+        "completed"
+        if status in {"ready", "partial_ready"} or recoverable_index_failure
+        else status
+    )
+    changed = remote_state != expected_remote_state
+    if changed:
+        next_record["remote_state"] = expected_remote_state
+    for key in (
+        "remote_progress_percent",
+        "remote_progress_source",
+        "remote_pages_completed",
+        "remote_pages_total",
+        "poll_attempt",
+        "poll_total",
+    ):
+        if key in next_record:
+            next_record.pop(key, None)
+            changed = True
+    if changed:
+        with _DEEP_PARSE_LOCK:
+            current = _DEEP_PARSE_TASKS.get(doc_id)
+            if current is None or str(current.get("job_id") or "") == str(next_record.get("job_id") or ""):
+                _DEEP_PARSE_TASKS[doc_id] = dict(next_record)
+        try:
+            persist_document_job(DATA_DIR, _DEEP_PARSE_JOB_TYPE, doc_id, next_record)
+        except Exception:
+            logger.debug("[DeepParse] failed to reconcile terminal task %s", doc_id, exc_info=True)
+    return next_record
+
+
+def _is_recoverable_rag_index_failure(
+    rag_index: dict | None,
+    manifest: dict | None = None,
+    *extra_errors: Any,
+) -> bool:
+    """Identify index-only failures whose MinerU artifacts remain reusable."""
+    status = str((rag_index or {}).get("status") or "").strip().lower()
+    if status != "failed":
+        return False
+    if bool((rag_index or {}).get("preserve_parse")):
+        return True
+    failure = _manifest_rag_index_failure(manifest)
+    if bool(failure.get("preserve_parse")):
+        return True
+    haystack = " ".join(
+        [
+            str((rag_index or {}).get("error") or ""),
+            str((rag_index or {}).get("error_code") or ""),
+            str((failure or {}).get("message") or ""),
+            *(str(item or "") for item in extra_errors),
+        ]
+    ).casefold()
+    return any(
+        marker in haystack
+        for marker in (
+            "embedding",
+            "嵌入",
+            "insufficient balance",
+            "insufficient_balance",
+            "余额不足",
+            "额度不足",
+            "http 402",
+            "http 401",
+            "http 403",
+            "http 429",
+            "rag_index",
+            "问答索引重建失败",
+        )
+    )
+
+
+def _deep_task_indicates_recoverable_rag_failure(record: dict, manifest: dict) -> bool:
+    """Recognize pre-fix records that lost their separate RAG status on restart."""
+    if not isinstance(record, dict) or str(record.get("status") or "").strip().lower() != "failed":
+        return False
+    stage = str(record.get("stage") or "").strip().lower()
+    manifest_stage = str(manifest.get("stage") or "").strip().lower() if isinstance(manifest, dict) else ""
+    if stage not in {
+        "failed",
+        "building_rag_index",
+        "rag_index_failed",
+        "rebuilding_rag_index",
+        "restart_recovery",
+    } and manifest_stage not in {
+        "failed",
+        "building_rag_index",
+        "rag_index_failed",
+        "rebuilding_rag_index",
+        "awaiting_rag_index",
+    }:
+        return False
+    haystack = " ".join(
+        str(record.get(key) or "")
+        for key in ("error", "message", "error_code")
+    ).casefold()
+    if stage in _DEEP_PARSE_INDEX_STAGES or manifest_stage in _DEEP_PARSE_INDEX_STAGES:
+        return True
+    return any(
+        marker in haystack
+        for marker in (
+            "embedding",
+            "嵌入",
+            "insufficient balance",
+            "insufficient_balance",
+            "余额不足",
+            "额度不足",
+            "http 402",
+            "http 401",
+            "http 403",
+            "http 429",
+        )
+    )
+
+
+def _deep_parse_age_seconds(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value).strip().replace("Z", "+00:00").replace(" ", "T")
+        try:
+            parsed = datetime.fromisoformat(text)
+        except (TypeError, ValueError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    return max(0.0, age)
+
+
+def _reconcile_stalled_deep_parse(
+    doc_id: str,
+    record: dict,
+    manifest: dict,
+    *,
+    active_mineru: bool,
+    block_index: dict | None,
+    rag_index: dict,
+) -> dict:
+    """Terminalize a worker that stopped emitting heartbeats indefinitely."""
+    if not isinstance(record, dict):
+        return record
+    status = str(record.get("status") or "").strip().lower()
+    if status not in {"queued", "running"}:
+        return record
+    stage = str(record.get("stage") or manifest.get("stage") or "").strip().lower()
+    age = _deep_parse_age_seconds(
+        record.get("updated_at")
+        or record.get("stage_started_at")
+        or record.get("started_at")
+        or manifest.get("updated_at")
+    )
+    if age is None:
+        return record
+    threshold = _DEEP_PARSE_INDEX_STALL_SECONDS if stage in _DEEP_PARSE_INDEX_STAGES else _DEEP_PARSE_REMOTE_STALL_SECONDS
+    if age < threshold:
+        return record
+
+    is_index_stage = active_mineru and stage in _DEEP_PARSE_INDEX_STAGES
+    if is_index_stage:
+        details = {
+            "code": "rag_index_stalled",
+            "kind": "rag_index",
+            "stage": "stalled",
+            "message": "问答索引任务长时间没有进展，已停止等待；MinerU 解析结果已保留，修正后可重试。",
+            "http_status": 504,
+            "retryable": True,
+            "requires_user_action": True,
+            "preserve_parse": True,
+        }
+        details = _persist_mineru_rag_index_failure(
+            doc_id,
+            details,
+            parse_generation=str(manifest.get("generation") or record.get("parse_generation") or ""),
+            document_source_hash=str(manifest.get("source_hash") or record.get("document_source_hash") or ""),
+            block_index=block_index,
+        )
+        next_record = dict(record)
+        next_record.update({
+            "status": _mineru_ready_status(block_index) if isinstance(block_index, dict) else "ready",
+            "stage": "awaiting_rag_index",
+            "error": details.get("message") or "问答索引任务已停止等待",
+            "remote_state": "completed",
+            "rag_index_failure": details,
+            "stalled": True,
+        })
+    else:
+        details = _describe_mineru_failure(TimeoutError("MinerU task heartbeat stalled"))
+        details["code"] = "mineru_stalled"
+        details["message"] = "MinerU 任务长时间没有进展，已停止等待；请检查网络/服务后重试。"
+        next_record = dict(record)
+        next_record.update({
+            "status": "failed",
+            "stage": "stalled",
+            "error": details["message"],
+            "remote_state": "failed",
+            "stalled": True,
+        })
+        generation = str(manifest.get("generation") or record.get("parse_generation") or "")
+        source_hash = str(manifest.get("source_hash") or record.get("document_source_hash") or "")
+        if _is_full_mineru_parse_manifest(manifest) and generation:
+            _transition_current_full_mineru_manifest(
+                doc_id,
+                PARSE_STATUS_FAILED,
+                parse_generation=generation,
+                document_source_hash=source_hash,
+                stage="stalled",
+                error=details["message"],
+                expected_statuses={PARSE_STATUS_PENDING, PARSE_STATUS_QUEUED, PARSE_STATUS_RUNNING},
+            )
+            _mark_full_mineru_index_unavailable(
+                doc_id,
+                parse_generation=generation,
+                document_source_hash=source_hash,
+                stage="mineru_stalled",
+                error=details["message"],
+                error_code="mineru_stalled",
+                retryable=True,
+            )
+
+    for key in (
+        "remote_progress_percent",
+        "remote_progress_source",
+        "remote_pages_completed",
+        "remote_pages_total",
+        "poll_attempt",
+        "poll_total",
+    ):
+        next_record.pop(key, None)
+    with _DEEP_PARSE_LOCK:
+        current = _DEEP_PARSE_TASKS.get(doc_id)
+        if current is None or str(current.get("job_id") or "") == str(next_record.get("job_id") or ""):
+            _DEEP_PARSE_TASKS[doc_id] = dict(next_record)
+    try:
+        persist_document_job(DATA_DIR, _DEEP_PARSE_JOB_TYPE, doc_id, next_record)
+    except Exception:
+        logger.debug("[DeepParse] failed to persist stalled task reconciliation for %s", doc_id, exc_info=True)
+    task_id = str(next_record.get("task_id") or next_record.get("job_id") or "").strip()
+    if task_id:
+        try:
+            append_task_event(
+                DATA_DIR,
+                task_id=task_id,
+                stage=str(next_record.get("stage") or "stalled"),
+                status="failed" if next_record.get("status") == "failed" else "partial",
+                identity={
+                    "route": "mineru",
+                    "generation": next_record.get("parse_generation") or "",
+                    "source_hash": next_record.get("document_source_hash") or "",
+                },
+                error_code=str(details.get("code") or "mineru_stalled"),
+                shortfall={
+                    "kind": "rag_index" if is_index_stage else "parse",
+                    "code": str(details.get("code") or "mineru_stalled"),
+                    "stage": str(next_record.get("stage") or "stalled"),
+                    "retryable": True,
+                },
+            )
+        except Exception:
+            logger.debug("[DeepParse] stalled task event append failed task=%s", task_id, exc_info=True)
+    return next_record
+
+
 def _retire_superseded_mineru_job(doc_id: str) -> None:
     """Stop a same-PDF MinerU job before replacing its parse manifest.
 
@@ -2971,15 +4071,26 @@ def _retire_superseded_mineru_job(doc_id: str) -> None:
 
 
 def _can_resume_direct_mineru_result_download(task: dict | None) -> bool:
-    """Return whether a failed direct job can resume without reuploading its PDF."""
+    """Return whether a failed remote download can resume without PDF upload.
+
+    Both official direct mode and the Worker protocol retain a batch id after
+    the remote parser has finished. Re-polling that batch is enough to obtain a
+    fresh download URL; limiting this recovery to direct mode made Worker users
+    pay for an unnecessary re-upload after an object-storage interruption.
+    """
     if not isinstance(task, dict):
         return False
     error = str(task.get("error") or "").casefold()
+    error_code = str(task.get("error_code") or "").strip().lower()
     return bool(
         str(task.get("status") or "").casefold() == "failed"
-        and str(task.get("access_mode") or "").casefold() == "direct"
+        and str(task.get("access_mode") or "").casefold() in {"direct", "worker"}
         and str(task.get("batch_id") or "").strip()
-        and "mineru zip 下载失败" in error
+        and (
+            error_code == "mineru_download_failed"
+            or "mineru zip 下载失败" in error
+            or "解析结果下载失败" in error
+        )
     )
 
 
@@ -3000,6 +4111,7 @@ def _get_deep_parse_status(doc_id: str) -> dict:
                 _DEEP_PARSE_TASKS[doc_id] = dict(current)
 
     parse_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+    current = _reconcile_terminal_deep_parse_record(doc_id, current, parse_manifest)
     legacy_parse = _is_legacy_parse_manifest(parse_manifest)
     if current and not legacy_parse:
         # Persisted job records are keyed by doc_id, while same-PDF uploads
@@ -3056,14 +4168,22 @@ def _get_deep_parse_status(doc_id: str) -> dict:
             PARSE_STATUS_FAILED,
             PARSE_STATUS_CANCELLED,
         }
-        waiting_for_full_route = active_mineru and is_full_mineru_route and not parse_ready
+        awaiting_rag_publish = (
+            active_mineru
+            and is_full_mineru_route
+            and not parse_ready
+            and str(parse_manifest.get("stage") or "").strip().lower() == "awaiting_rag_index"
+        )
+        waiting_for_full_route = active_mineru and is_full_mineru_route and not parse_ready and not awaiting_rag_publish
         status = (
             manifest_status
             if terminal_full_route
             else (
+                (_mineru_ready_status(block_index) if awaiting_rag_publish else (
                 "running"
                 if waiting_for_full_route
                 else (_mineru_ready_status(block_index) if active_mineru else "idle")
+                ))
             )
         )
         current = {
@@ -3075,15 +4195,20 @@ def _get_deep_parse_status(doc_id: str) -> dict:
                 if terminal_full_route
                 else (
                     str(parse_manifest.get("stage") or "building_rag_index")
-                    if waiting_for_full_route
+                    if waiting_for_full_route or awaiting_rag_publish
                     else (_mineru_ready_status(block_index) if active_mineru else "not_started")
                 )
             ),
             "error": (
                 str(parse_manifest.get("error") or "MinerU 全程解析未完成")
                 if terminal_full_route
-                else ""
+                else (
+                    str(parse_manifest.get("error") or "MinerU 版面解析已完成，等待问答索引发布")
+                    if awaiting_rag_publish
+                    else ""
+                )
             ),
+            "remote_state": "completed" if awaiting_rag_publish else "",
             "created_at": str(parse_manifest.get("created_at") or ""),
             "started_at": str(parse_manifest.get("started_at") or ""),
             "parse_generation": str(parse_manifest.get("generation") or ""),
@@ -3131,6 +4256,122 @@ def _get_deep_parse_status(doc_id: str) -> dict:
             "page_ledger": mineru_quality.get("page_ledger") or [],
         })
     rag_index = _get_rag_index_status(doc_id)
+    previous_task_status = str(current.get("status") or "").strip().lower()
+    current = _reconcile_stalled_deep_parse(
+        doc_id,
+        current,
+        parse_manifest,
+        active_mineru=active_mineru,
+        block_index=block_index,
+        rag_index=rag_index,
+    )
+    if previous_task_status in {"queued", "running"} and current.get("stalled"):
+        parse_manifest = _read_document_parse_manifest(doc_id, documents_store.get(doc_id))
+        parse_ready = is_parse_prepared(parse_manifest)
+        is_full_mineru_route = _is_full_mineru_parse_manifest(parse_manifest)
+        rag_index = _get_rag_index_status(doc_id)
+        active_source = (
+            str((block_index or {}).get("source") or "").strip()
+            if isinstance(block_index, dict)
+            else active_source
+        )
+    recoverable_rag_failure = (
+        is_full_mineru_route
+        and active_mineru
+        and (
+            _is_recoverable_rag_index_failure(
+                rag_index,
+                parse_manifest,
+                current.get("error"),
+                parse_manifest.get("error"),
+            )
+            or _deep_task_indicates_recoverable_rag_failure(current, parse_manifest)
+        )
+    )
+    if recoverable_rag_failure:
+        # Migrate records written by older workers that marked the whole parse
+        # failed after Embedding/index construction. The raw MinerU result and
+        # block tree are sufficient to retry publication without re-uploading.
+        failure_details = _manifest_rag_index_failure(parse_manifest)
+        if not failure_details:
+            failure_details = _describe_rag_index_failure(
+                RuntimeError(str(rag_index.get("error") or current.get("error") or "Embedding/问答索引构建失败")),
+                provider=str(rag_index.get("embedding_provider") or ""),
+                model=str(rag_index.get("embedding_model") or ""),
+                operation="MinerU 问答索引重建",
+            )
+            failure_details["code"] = str(
+                rag_index.get("error_code") or failure_details.get("code") or "rag_index_failed"
+            )
+            failure_details["preserve_parse"] = True
+        transitioned = _transition_current_full_mineru_manifest(
+            doc_id,
+            PARSE_STATUS_PENDING,
+            parse_generation=str(parse_manifest.get("generation") or ""),
+            document_source_hash=str(parse_manifest.get("source_hash") or ""),
+            stage="awaiting_rag_index",
+            error=str(failure_details.get("message") or "问答索引发布失败，已保留 MinerU 解析结果"),
+            expected_statuses={
+                PARSE_STATUS_FAILED,
+                PARSE_STATUS_PENDING,
+                PARSE_STATUS_QUEUED,
+                PARSE_STATUS_RUNNING,
+            },
+            metadata={"rag_index_failure": _safe_rag_index_failure_details(failure_details)},
+        )
+        if transitioned:
+            parse_manifest = transitioned
+            parse_ready = is_parse_prepared(parse_manifest)
+            current["parse_manifest"] = parse_manifest
+            rag_index = _get_rag_index_status(doc_id)
+        ready_status = _mineru_ready_status(block_index) if isinstance(block_index, dict) else "ready"
+        if str(current.get("status") or "").strip().lower() in {"queued", "running", "failed"}:
+            current.update({
+                "status": ready_status,
+                "stage": "awaiting_rag_index",
+                "error": str(failure_details.get("message") or "问答索引发布失败，已保留 MinerU 解析结果"),
+                "remote_state": "completed",
+                "rag_index_failure": _safe_rag_index_failure_details(failure_details),
+            })
+            for key in (
+                "remote_progress_percent",
+                "remote_progress_source",
+                "remote_pages_completed",
+                "remote_pages_total",
+                "poll_attempt",
+                "poll_total",
+            ):
+                current.pop(key, None)
+            try:
+                persist_document_job(DATA_DIR, _DEEP_PARSE_JOB_TYPE, doc_id, current)
+            except Exception:
+                logger.debug("[DeepParse] failed to persist recoverable index migration for %s", doc_id, exc_info=True)
+    # ``awaiting_rag_index`` is a waiting/repair state, not an active parse.
+    # Older workers left the task as ``running`` here, which made both the
+    # progress bar and the remote spinner continue forever after a refresh.
+    if (
+        is_full_mineru_route
+        and not parse_ready
+        and str(parse_manifest.get("stage") or "").strip().lower() == "awaiting_rag_index"
+        and str(rag_index.get("status") or "").strip().lower() not in {"queued", "running"}
+    ):
+        current["status"] = _mineru_ready_status(block_index) if isinstance(block_index, dict) else "failed"
+        current["stage"] = "awaiting_rag_index"
+        current["remote_state"] = "completed"
+        current["error"] = str(
+            current.get("error")
+            or parse_manifest.get("error")
+            or "MinerU 版面解析已完成，等待问答索引发布"
+        )
+        for key in (
+            "remote_progress_percent",
+            "remote_progress_source",
+            "remote_pages_completed",
+            "remote_pages_total",
+            "poll_attempt",
+            "poll_total",
+        ):
+            current.pop(key, None)
     current["rag_index"] = rag_index
     current["parse_manifest"] = parse_manifest
     current["parse_ready"] = parse_ready
@@ -3176,6 +4417,48 @@ def _get_deep_parse_status(doc_id: str) -> dict:
         current["stage"] = _mineru_ready_status(block_index)
 
     current["progress"] = derive_mineru_progress(current)
+    normalized_current_status = str(current.get("status") or "").strip().lower()
+    normalized_current_stage = str(current.get("stage") or normalized_current_status).strip().lower()
+    current["active"] = normalized_current_status in {"queued", "running"}
+    current["terminal"] = normalized_current_status in _DEEP_PARSE_TERMINAL_STATUSES
+    current["stage_label"] = _DEEP_PARSE_STAGE_LABELS.get(
+        normalized_current_stage,
+        normalized_current_stage or "MinerU 任务",
+    )
+    current["message"] = str(
+        current.get("error")
+        or current.get("message")
+        or current.get("stage_label")
+        or ""
+    ).strip()
+    if current["terminal"]:
+        current.setdefault("error_code", classify_error_code(current.get("error")))
+    if current["active"]:
+        current["next_action"] = "cancel"
+    elif str(current.get("stage") or "").strip().lower() == "awaiting_rag_index":
+        current["next_action"] = "publish_rag_index"
+    elif normalized_current_status == "cancelled":
+        current["next_action"] = "retry"
+    elif normalized_current_status == "failed":
+        current["next_action"] = (
+            "retry_download"
+            if current.get("error_code") == "mineru_download_failed"
+            else "retry"
+        )
+    else:
+        current["next_action"] = ""
+    if normalized_current_status in _DEEP_PARSE_TERMINAL_STATUSES:
+        if current.get("rag_index_failure") and isinstance(current.get("rag_index_failure"), dict):
+            current["failure_details"] = _safe_rag_index_failure_details(current["rag_index_failure"])
+        elif isinstance(current.get("failure_details"), dict):
+            current["failure_details"] = _safe_rag_index_failure_details(current["failure_details"])
+        current["progress"] = {
+            **(current.get("progress") or {}),
+            "percent": None,
+            "estimated": False,
+        }
+        if not current.get("next_action"):
+            current["next_action"] = "retry" if bool(current.get("retryable", True)) else ""
     current.update(_assess_deep_parse_recommendation(doc_id, active_mineru, block_index, rag_index=rag_index))
     task_id = str(current.get("task_id") or current.get("job_id") or "").strip()
     if task_id:
@@ -3771,6 +5054,56 @@ def _run_mineru_deep_parse(
     except _SupersededParseGeneration:
         logger.info("[DeepParse] MinerU worker superseded for %s generation=%s", doc_id, parse_generation)
         return
+    except _RagIndexBuildFailure as exc:
+        # MinerU itself succeeded; only the dependent vector/semantic index
+        # failed. Keep the parse generation reusable and make the task terminal
+        # instead of falling through to the generic "parse failed" path.
+        failure_details = _safe_rag_index_failure_details(exc.details)
+        preserve_parse = bool(failure_details.get("preserve_parse", True))
+        ready_status = _mineru_ready_status(block_index) if isinstance(block_index, dict) else "ready"
+        logger.warning(
+            "[DeepParse] MinerU artifacts ready but RAG index failed for %s: code=%s preserve_parse=%s",
+            doc_id,
+            failure_details.get("code"),
+            preserve_parse,
+        )
+        if full_mineru_route and _worker_matches_current_generation() and preserve_parse:
+            # The rebuild function normally records this before raising. The
+            # idempotent call also repairs older call sites that raised before
+            # the manifest metadata was written.
+            failure_details = _persist_mineru_rag_index_failure(
+                doc_id,
+                failure_details,
+                parse_generation=parse_generation,
+                document_source_hash=parse_source_hash,
+                block_index=block_index if isinstance(block_index, dict) else None,
+            )
+            _set_worker_status(
+                ready_status,
+                stage="awaiting_rag_index",
+                error=str(failure_details.get("message") or "问答索引发布失败，已保留 MinerU 解析结果"),
+                message=str(failure_details.get("message") or "问答索引发布失败，已保留 MinerU 解析结果"),
+                remote_state="completed",
+                rag_index_failure=failure_details,
+                active_source=MINERU_BLOCK_INDEX_SOURCE,
+                active_mineru=True,
+                access_mode=locals().get("access_mode", ""),
+                quality_status=mineru_quality.get("quality_status", "success"),
+                expected_page_count=mineru_quality.get("expected_page_count", 0),
+                coverage=mineru_quality.get("coverage", 0.0),
+                failed_pages=mineru_quality.get("failed_pages") or [],
+                page_ledger=mineru_quality.get("page_ledger") or [],
+            )
+        else:
+            _set_worker_status(
+                ready_status if full_mineru_route else "failed",
+                stage="ready" if full_mineru_route else "rag_index_failed",
+                error=str(failure_details.get("message") or "问答索引发布失败"),
+                message=str(failure_details.get("message") or "问答索引发布失败"),
+                remote_state="completed" if full_mineru_route else "failed",
+                rag_index_failure=failure_details,
+            )
+        return
     except MinerUQualityError as exc:
         if parser_attempted and not parser_outcome_recorded and not cancel_event.is_set():
             record_ocr_provider_use("mineru", outcome="failure", operation="document_parse")
@@ -3801,8 +5134,16 @@ def _run_mineru_deep_parse(
                 document_source_hash=parse_source_hash,
                 stage="mineru_quality_failed",
                 error=str(exc),
+                error_code="mineru_quality_failed",
+                retryable=True,
             )
-        _set_worker_status("failed", stage="failed", error=str(exc), **quality_meta)
+        _set_worker_status(
+            "failed",
+            stage="failed",
+            error=str(exc),
+            error_code="mineru_quality_failed",
+            **quality_meta,
+        )
     except Exception as exc:
         if parser_attempted and not parser_outcome_recorded and not cancel_event.is_set():
             record_ocr_provider_use("mineru", outcome="failure", operation="document_parse")
@@ -3831,6 +5172,8 @@ def _run_mineru_deep_parse(
             _set_worker_status("cancelled", stage="cancelled", message="MinerU 深度解析已取消", error="")
             return
         logger.exception("[DeepParse] MinerU deep parse failed for %s: %s", doc_id, exc)
+        failure_details = _describe_mineru_failure(exc)
+        public_error = str(failure_details.get("message") or "MinerU 解析失败，请检查解析设置后重试")
         if full_mineru_route and _worker_matches_current_generation():
             try:
                 _transition_current_full_mineru_manifest(
@@ -3839,7 +5182,7 @@ def _run_mineru_deep_parse(
                     parse_generation=parse_generation,
                     document_source_hash=parse_source_hash,
                     stage="failed",
-                    error=str(exc),
+                    error=public_error,
                     expected_statuses={
                         PARSE_STATUS_PENDING,
                         PARSE_STATUS_QUEUED,
@@ -3853,9 +5196,25 @@ def _run_mineru_deep_parse(
                 parse_generation=parse_generation,
                 document_source_hash=parse_source_hash,
                 stage="mineru_parse_failed",
-                error=str(exc),
+                error=public_error,
+                error_code=str(failure_details.get("code") or "mineru_failed"),
+                retryable=bool(failure_details.get("retryable", True)),
             )
-        _set_worker_status("failed", stage="failed", error=str(exc))
+        _set_worker_status(
+            "failed",
+            stage=(
+                "download_failed"
+                if failure_details.get("code") == "mineru_download_failed"
+                else "stalled"
+                if failure_details.get("code") == "mineru_stalled"
+                else "failed"
+            ),
+            error=public_error,
+            error_code=str(failure_details.get("code") or "mineru_failed"),
+            retryable=bool(failure_details.get("retryable", True)),
+            preserve_parse=bool(failure_details.get("preserve_parse", False)),
+            failure_details=failure_details,
+        )
     finally:
         if acquired_document_lock:
             document_lock.release()
@@ -3901,7 +5260,10 @@ def _queue_mineru_deep_parse(
     full_mineru_route = bool(
         full_route_options is not None or _is_full_mineru_parse_manifest(parse_manifest)
     )
-    if full_mineru_route and parse_manifest.get("status") == PARSE_STATUS_FAILED:
+    if full_mineru_route and parse_manifest.get("status") in {
+        PARSE_STATUS_FAILED,
+        PARSE_STATUS_CANCELLED,
+    }:
         requeued_manifest = _transition_current_full_mineru_manifest(
             doc_id,
             PARSE_STATUS_QUEUED,
@@ -3909,7 +5271,7 @@ def _queue_mineru_deep_parse(
             document_source_hash=parse_source_hash,
             stage="mineru_queued",
             error="",
-            expected_statuses={PARSE_STATUS_FAILED},
+            expected_statuses={PARSE_STATUS_FAILED, PARSE_STATUS_CANCELLED},
         )
         if requeued_manifest is None:
             # Another upload or retry won the publication lock. Do not start a
@@ -3936,7 +5298,6 @@ def _queue_mineru_deep_parse(
     }
     resume_existing_result = bool(
         force
-        and access_mode == "direct"
         and _can_resume_direct_mineru_result_download(current)
     )
     if resume_existing_result:
@@ -4121,6 +5482,8 @@ def _cancel_mineru_deep_parse(doc_id: str) -> dict:
         document_source_hash=document_source_hash,
         stage="mineru_parse_cancelled",
         error="MinerU 深度解析已取消，问答索引未发布",
+        error_code="cancelled",
+        retryable=True,
     )
     remote_cancel = {"attempted": False, "state": "not_requested"}
     batch_id = str(current.get("batch_id") or "")
@@ -4737,6 +6100,7 @@ def _mark_full_mineru_parse_ready(
             PARSE_STATUS_READY,
             stage="ready",
             doc=doc,
+            metadata={"rag_index_failure": None},
         )
     return manifest
 
@@ -5221,6 +6585,9 @@ def _rollback_local_rag_index_if_current(
     previous_source: str,
     replaced_current_index: bool,
     error: str,
+    error_code: str = "",
+    retryable: bool | None = None,
+    failure_details: dict[str, Any] | None = None,
 ) -> bool:
     """Restore a failed local RAG build only while it still owns the document."""
     with _get_document_publication_lock(doc_id):
@@ -5260,6 +6627,10 @@ def _rollback_local_rag_index_if_current(
             error=error,
             parse_generation=parse_generation,
             document_source_hash=document_source_hash,
+            error_code=error_code,
+            retryable=retryable,
+            preserve_parse=False,
+            failure_details=failure_details,
         )
         return True
 
@@ -5457,15 +6828,27 @@ def _rebuild_local_rag_index(
             },
         }
     except Exception as exc:
+        if isinstance(exc, _SupersededParseGeneration):
+            raise
+        failure_details = _describe_rag_index_failure(
+            exc,
+            provider=embedding_provider or "",
+            model=embedding_model or "",
+            operation="本地问答索引重建",
+        )
+        failure_details["preserve_parse"] = False
         _rollback_local_rag_index_if_current(
             doc_id,
             parse_generation=parse_generation,
             document_source_hash=document_source_hash,
             previous_source=previous_source,
             replaced_current_index=replaced_current_index,
-            error=str(exc),
+            error=str(failure_details.get("message") or "本地问答索引重建失败"),
+            error_code=str(failure_details.get("code") or "rag_index_failed"),
+            retryable=bool(failure_details.get("retryable", True)),
+            failure_details=failure_details,
         )
-        raise
+        raise _RagIndexBuildFailure(failure_details, original_error=str(exc)) from exc
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
         shutil.rmtree(temp_semantic_dir, ignore_errors=True)
@@ -5576,6 +6959,11 @@ def _rebuild_mineru_rag_index_unlocked(
 
     had_previous_rag = _active_rag_index_matches_current_parse(doc_id, parse_manifest)
     fresh_document_snapshot = deepcopy(doc) if not had_previous_rag else None
+    _clear_mineru_rag_index_failure(
+        doc_id,
+        parse_generation=expected_parse_generation,
+        document_source_hash=expected_document_source_hash,
+    )
 
     artifact = build_document_parse_artifact(
         doc_id=doc_id,
@@ -5847,6 +7235,19 @@ def _rebuild_mineru_rag_index_unlocked(
         logger.info("[RagIndex] discard superseded MinerU publication for %s", doc_id)
         raise
     except Exception as exc:
+        failure_details = _describe_rag_index_failure(
+            exc,
+            provider=embedding_provider or "",
+            model=embedding_model or "",
+            operation="MinerU 问答索引重建",
+        )
+        preserve_parse = bool(not had_previous_rag and not legacy_parse)
+        failure_details["preserve_parse"] = preserve_parse
+        if had_previous_rag:
+            base_message = str(failure_details.get("message") or "问答索引重建失败")
+            failure_details["message"] = (
+                f"{base_message.rstrip('。')} 当前已有问答索引已保留，可继续使用；修正配置后重试。"
+            )
         with _get_document_publication_lock(doc_id):
             still_owns_document = (
                 _is_legacy_parse_manifest(
@@ -5887,15 +7288,39 @@ def _rebuild_mineru_rag_index_unlocked(
                         doc_id,
                         fresh_cleanup,
                     )
-                failure_message = (
-                    "MinerU 问答索引重建失败，已清理未完成的首次发布"
-                    if not had_previous_rag and replaced_current_index
-                    else "MinerU 问答索引重建失败，已保留原索引"
+                failure_message = str(
+                    failure_details.get("message")
+                    or (
+                        "MinerU 问答索引重建失败，已清理未完成的首次发布"
+                        if not had_previous_rag and replaced_current_index
+                        else "MinerU 问答索引重建失败，已保留原索引"
+                    )
                 )
-                _set_document_index_status(doc_id, "failed", stage="rebuilding_rag_index_failed", error=failure_message)
+                _set_document_index_status(
+                    doc_id,
+                    "failed",
+                    stage="rag_index_failed",
+                    error=failure_message,
+                    error_code=str(failure_details.get("code") or "rag_index_failed"),
+                    retryable=bool(failure_details.get("retryable", True)),
+                    preserve_parse=preserve_parse,
+                    failure_details=failure_details,
+                    parse_generation=expected_parse_generation,
+                    document_source_hash=expected_document_source_hash,
+                )
             else:
                 logger.info("[RagIndex] skip rollback for superseded parse generation doc=%s", doc_id)
-        raise exc
+        if preserve_parse:
+            _persist_mineru_rag_index_failure(
+                doc_id,
+                failure_details,
+                parse_generation=expected_parse_generation,
+                document_source_hash=expected_document_source_hash,
+                block_index=block_index,
+            )
+        if isinstance(exc, _RagIndexBuildFailure):
+            raise
+        raise _RagIndexBuildFailure(failure_details, original_error=str(exc)) from exc
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
         shutil.rmtree(temp_semantic_dir, ignore_errors=True)
@@ -6023,7 +7448,7 @@ def _build_upload_parse_manifest(
     )
 
 
-def _start_mineru_full_route_upload(
+async def _start_mineru_full_route_upload(
     *,
     doc_id: str,
     filename: str,
@@ -6065,6 +7490,14 @@ def _start_mineru_full_route_upload(
         embedding_api_host=embedding_api_host,
         embedding_api_key=embedding_api_key,
         operation="MinerU 问答索引发布",
+    )
+    # Fail before the PDF reaches MinerU when a remote embedding account is
+    # already exhausted or the selected model/key is unusable.  The build path
+    # still performs its own guarded call because a balance can change while a
+    # long remote parse is running.
+    await _probe_embedding_configuration_async(
+        embedding_identity,
+        operation="MinerU 上传前 Embedding 预检",
     )
 
     pending_data = _build_pending_mineru_document_data(pdf_bytes)
@@ -7893,6 +9326,8 @@ async def upload_pdf(
                     "total_chars": len(extracted_data["full_text"]),
                     "source_type": extracted_data.get("source_type", "unknown"),
                     "indexing_status": index_status.get("status", "queued"),
+                    "indexing_error": index_status.get("error", ""),
+                    "indexing_error_code": index_status.get("error_code", ""),
                 }
             finally:
                 os.unlink(tmp_path)
@@ -7930,7 +9365,7 @@ async def upload_pdf(
             requested_parse_route == PARSE_ROUTE_MINERU
             or (requested_parse_route == PARSE_ROUTE_AUTO and _mineru_configured())
         ):
-            return _start_mineru_full_route_upload(
+            return await _start_mineru_full_route_upload(
                 doc_id=doc_id,
                 filename=filename,
                 pdf_bytes=content,
@@ -8161,6 +9596,8 @@ async def upload_pdf(
             "extraction_method": extracted_data.get("extraction_method", "unknown"),
             "parse_manifest": extracted_data.get("parse_manifest", {}),
             "indexing_status": index_status.get("status", "queued"),
+            "indexing_error": index_status.get("error", ""),
+            "indexing_error_code": index_status.get("error_code", ""),
         }
         if extracted_data.get("extraction_method") == "odl":
             response["odl_element_count"] = extracted_data.get("odl_element_count", 0)
@@ -8215,6 +9652,10 @@ async def import_url(
         embedding_provider = embedding_identity["provider"]
         embedding_api_key = embedding_identity["api_key"]
         embedding_api_host = embedding_identity["api_host"]
+        await _probe_embedding_configuration_async(
+            embedding_identity,
+            operation="URL 导入前 Embedding 预检",
+        )
 
         # 抓取网页内容
         result = await fetch_url_content(url)
@@ -8951,6 +10392,14 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
             embedding_api_host=body.get("embedding_api_host"),
             operation="本地问答索引重建",
         )
+        try:
+            await _probe_embedding_configuration_async(
+                embedding_identity,
+                operation="本地索引重建前 Embedding 预检",
+            )
+        except HTTPException as exc:
+            _record_embedding_preflight_failure(doc_id, exc, preserve_parse=False)
+            raise
         summary_api_key = (body.get("summary_api_key") or "").strip() or None
         summary_model = str(body.get("summary_model") or body.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
         summary_provider = str(body.get("summary_provider") or body.get("provider") or "openai").strip() or "openai"
@@ -8970,11 +10419,20 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
             )
         except _SupersededParseGeneration:
             raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新发起本地索引升级")
+        except _RagIndexBuildFailure as exc:
+            raise _rag_index_failure_http_exception(exc.details) from exc
         except HTTPException:
             raise
         except Exception as exc:
             logger.exception("[RagIndex] local rebuild failed for %s: %s", doc_id, exc)
-            raise HTTPException(status_code=500, detail=str(exc))
+            details = _describe_rag_index_failure(
+                exc,
+                provider=str(embedding_identity.get("provider") or ""),
+                model=str(embedding_identity.get("model") or ""),
+                operation="本地问答索引重建",
+            )
+            details["preserve_parse"] = False
+            raise _rag_index_failure_http_exception(details) from exc
 
     parse_manifest = _require_mineru_route_compatibility(doc_id, doc)
 
@@ -9024,6 +10482,14 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
         embedding_api_host=body.get("embedding_api_host"),
         operation="MinerU 问答索引重建",
     )
+    try:
+        await _probe_embedding_configuration_async(
+            embedding_identity,
+            operation="MinerU 索引重建前 Embedding 预检",
+        )
+    except HTTPException as exc:
+        _record_embedding_preflight_failure(doc_id, exc, preserve_parse=True)
+        raise
     summary_api_key = (body.get("summary_api_key") or "").strip() or None
     summary_model = str(body.get("summary_model") or body.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
     summary_provider = str(body.get("summary_provider") or body.get("provider") or "openai").strip() or "openai"
@@ -9046,11 +10512,20 @@ async def rebuild_document_rag_index_from_mineru(request: Request, doc_id: str):
         )
     except _SupersededParseGeneration:
         raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新发起 MinerU 索引重建")
+    except _RagIndexBuildFailure as exc:
+        raise _rag_index_failure_http_exception(exc.details) from exc
     except HTTPException:
         raise
     except Exception as exc:
         logger.exception("[RagIndex] MinerU rebuild failed for %s: %s", doc_id, exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        details = _describe_rag_index_failure(
+            exc,
+            provider=str(embedding_identity.get("provider") or ""),
+            model=str(embedding_identity.get("model") or ""),
+            operation="MinerU 问答索引重建",
+        )
+        details["preserve_parse"] = True
+        raise _rag_index_failure_http_exception(details) from exc
 
 
 @router.post("/documents/{doc_id}/rag-index/rollback")
@@ -9190,6 +10665,89 @@ def _start_downstream_outline_task(
     )
 
 
+_DOWNSTREAM_STAGE_LABELS = {
+    "queued": "等待开始",
+    "generating": "正在生成",
+    "cache_lookup": "检查缓存",
+    "parse_identity": "校验文档版本",
+    "result_publication": "保存结果",
+    "completed": "已完成",
+    "restart_recovery": "服务重启恢复",
+    "stalled": "长时间无进展",
+    "identity_changed": "文档版本已变化",
+}
+
+_DOWNSTREAM_ERROR_LABELS = {
+    "embedding_quota_exhausted": "Embedding 余额或额度不足，请充值或更换服务后重试",
+    "embedding_auth_failed": "Embedding 凭证无效或无权访问，请检查 API Key 后重试",
+    "embedding_model_unavailable": "Embedding 模型不可用，请切换模型后重试",
+    "embedding_rate_limited": "Embedding 请求被限流，请稍后重试",
+    "embedding_network_error": "Embedding 服务暂时不可达，请检查网络后重试",
+    "timeout": "模型请求超时，请稍后重试",
+    "network_error": "模型服务连接失败，请检查网络后重试",
+    "missing_credentials": "模型服务凭证未配置，请先完成配置",
+    "worker_interrupted": "服务重启导致任务中断，请重新生成",
+    "downstream_task_stalled": "任务长时间没有进展，已停止等待；请稍后重试",
+    "identity_mismatch": "文档内容已更新，请重新生成当前结果",
+}
+
+
+def _safe_downstream_error_message(error: Any, *, purpose: str = "") -> str:
+    """Keep persisted AI task errors useful without exposing provider payloads."""
+    text = str(error or "").strip()
+    if not text:
+        return ""
+    code = classify_error_code(text)
+    if code in _DOWNSTREAM_ERROR_LABELS:
+        return _DOWNSTREAM_ERROR_LABELS[code]
+    # Provider responses frequently echo URLs, request bodies or credential
+    # fragments. Do not place those in the durable status file or UI.
+    if any(token in text.lower() for token in ("api_key", "authorization", "bearer ", "secret", "password", "https://", "http://")):
+        label = "速览" if purpose == "overview" else "大纲"
+        return f"{label}生成失败，请检查模型服务配置后重试"
+    return text[:240]
+
+
+def _public_downstream_task_status(record: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a durable downstream task for UI consumers.
+
+    The public contract intentionally contains no worker id or credentials and
+    makes terminality explicit.  Clients can therefore stop rendering a
+    spinner even when an older producer used an unfamiliar status string.
+    """
+    result = dict(record or {})
+    result.pop("worker_instance_id", None)
+    status = str(result.get("status") or "failed").strip().lower()
+    active = status in {"queued", "running", "verifying", "publishing"}
+    terminal = not active
+    result["status"] = status
+    result["active"] = active
+    result["terminal"] = terminal
+    stage = str(result.get("stage") or status).strip().lower()
+    result["stage"] = stage
+    result["stage_label"] = _DOWNSTREAM_STAGE_LABELS.get(stage, stage or "处理任务")
+    result["error"] = _safe_downstream_error_message(
+        result.get("error"),
+        purpose=str(result.get("purpose") or ""),
+    )
+    result["message"] = str(
+        result.get("error")
+        or (_DOWNSTREAM_STAGE_LABELS.get(stage) if active else "任务已完成")
+        or ""
+    ).strip()
+    if terminal:
+        # A completed/failed task has no meaningful percentage.  Explicit null
+        # prevents old clients from reusing the last in-flight value.
+        result["progress"] = None
+    result["next_action"] = (
+        "retry"
+        if bool(result.get("retryable", status in {"failed", "cancelled", "degraded", "partial"}))
+        and status not in {"succeeded"}
+        else ""
+    )
+    return result
+
+
 def _request_bool(value, default: bool | None = None) -> bool | None:
     if value is None:
         return default
@@ -9315,7 +10873,8 @@ async def _prepare_reading_outline_visuals(
         )
         outcome["diagnostics"] = {
             "failed_open": True,
-            "error": str(exc)[:240] or type(exc).__name__,
+            "error": _safe_downstream_error_message(str(exc), purpose="reading_outline")
+            or type(exc).__name__,
         }
         outcome["publication"] = {
             "published": False,
@@ -9334,6 +10893,10 @@ def _finish_downstream_outline_task(
     if not task:
         return
     status = "failed"
+    safe_error = _safe_downstream_error_message(
+        error,
+        purpose=str(task.get("purpose") or ""),
+    ) if error else None
     if result is not None:
         meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
         source = str(result.get("source") or "").strip().lower()
@@ -9367,10 +10930,10 @@ def _finish_downstream_outline_task(
             "reasons": partial_issues,
             "retryable": True,
         }
-    elif error:
+    elif safe_error:
         shortfall = {
             "kind": "downstream_ai",
-            "code": classify_error_code(error) or "generation_failed",
+            "code": classify_error_code(safe_error) or "generation_failed",
             "stage": "downstream_ai",
             "retryable": True,
         }
@@ -9389,7 +10952,7 @@ def _finish_downstream_outline_task(
             task_id=str(task.get("task_id") or ""),
             status=status,
             stage="completed" if result is not None else "failed",
-            error=error,
+            error=safe_error,
             retryable=status not in {"succeeded", "cancelled"},
             result=result,
             shortfall=shortfall,
@@ -9453,7 +11016,7 @@ async def get_document_downstream_task_status(doc_id: str, purpose: str):
         record["events"] = ledger.get("events") or []
         if ledger.get("shortfall"):
             record["shortfall"] = ledger["shortfall"]
-    return record
+    return _public_downstream_task_status(record)
 
 
 @router.get("/documents/{doc_id}/reading-outline")
@@ -9615,8 +11178,16 @@ async def create_document_reading_outline(
         _finish_downstream_outline_task(task, error="文档解析路线已更新，请重新生成阅读总结")
         raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新生成阅读总结")
     except Exception as exc:
-        _finish_downstream_outline_task(task, error=str(exc))
-        raise
+        safe_error = _safe_downstream_error_message(str(exc), purpose="reading_outline")
+        _finish_downstream_outline_task(task, error=safe_error)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": safe_error or "阅读总结生成失败，请稍后重试",
+                "code": classify_error_code(safe_error) or "generation_failed",
+                "retryable": True,
+            },
+        ) from exc
 
 
 @router.get("/documents/{doc_id}/section-outline")
@@ -9748,8 +11319,16 @@ async def create_document_section_outline(
         _finish_downstream_outline_task(task, error="文档解析路线已更新，请重新生成章节大纲")
         raise HTTPException(status_code=409, detail="文档解析路线已更新，请重新生成章节大纲")
     except Exception as exc:
-        _finish_downstream_outline_task(task, error=str(exc))
-        raise
+        safe_error = _safe_downstream_error_message(str(exc), purpose="section_outline")
+        _finish_downstream_outline_task(task, error=safe_error)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": safe_error or "章节大纲生成失败，请稍后重试",
+                "code": classify_error_code(safe_error) or "generation_failed",
+                "retryable": True,
+            },
+        ) from exc
 
 
 @router.get("/document/{doc_id}/thumbnail/{page}")
@@ -12046,6 +13625,17 @@ async def get_overview_task_status(doc_id: str, task_id: str):
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     }
+    task_status = str(task.status or "failed").strip().lower()
+    task_active = task_status in {"pending", "processing"}
+    response.update({
+        "active": task_active,
+        "terminal": not task_active,
+        "stage": "processing" if task_active else task_status,
+        "progress": None,
+        "error_code": classify_error_code(task.error) if task.error else "",
+        "retryable": task_status not in {"completed"},
+        "next_action": "wait" if task_active else ("retry" if task_status not in {"completed"} else ""),
+    })
     task_ledger = get_downstream_task_events(DATA_DIR, task_id=task.task_id)
     if task_ledger:
         response["events"] = task_ledger.get("events") or []
@@ -12057,7 +13647,7 @@ async def get_overview_task_status(doc_id: str, task_id: str):
         if task.status != "completed":
             response["warning"] = task.error or "速览结果不完整，可重新生成"
     elif task.status in {"failed", "cancelled", "invalidated", "superseded"}:
-        response["error"] = task.error
+        response["error"] = _safe_downstream_error_message(task.error, purpose="overview")
     
     return response
 

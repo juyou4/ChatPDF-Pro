@@ -111,7 +111,7 @@ describe('useDocumentState', () => {
 
   // --- deleteSession ---
 
-  it('deleteSession 用户确认后删除会话并更新 localStorage', () => {
+  it('deleteSession 删除会话并更新 localStorage', async () => {
     vi.mocked(global.confirm).mockReturnValue(true);
     const historyData = [
       { id: 'doc1', docId: 'doc1', filename: 'a.pdf' },
@@ -120,6 +120,8 @@ describe('useDocumentState', () => {
     localStorage.setItem('chatHistory', JSON.stringify(historyData));
 
     const { result } = renderHook(() => useDocumentState(defaultOptions()));
+
+    await waitFor(() => expect(result.current.history).toEqual(historyData));
 
     act(() => {
       result.current.deleteSession('doc1');
@@ -134,19 +136,23 @@ describe('useDocumentState', () => {
     expect(stored).toEqual([{ id: 'doc2', docId: 'doc2', filename: 'b.pdf' }]);
   });
 
-  it('deleteSession 用户取消时不执行删除', () => {
+  it('deleteSession 由上层确认对话框授权后直接执行删除', async () => {
     vi.mocked(global.confirm).mockReturnValue(false);
     const historyData = [{ id: 'doc1', docId: 'doc1', filename: 'a.pdf' }];
     localStorage.setItem('chatHistory', JSON.stringify(historyData));
 
     const { result } = renderHook(() => useDocumentState(defaultOptions()));
 
+    await waitFor(() => expect(result.current.history).toEqual(historyData));
+
     act(() => {
       result.current.deleteSession('doc1');
     });
 
-    // 历史未变
-    expect(result.current.history).toEqual(historyData);
+    // 确认交互由 ChatPDF 的 SessionDeleteDialog 负责；hook 不再二次弹窗。
+    expect(result.current.history).toEqual([]);
+    expect(JSON.parse(localStorage.getItem('chatHistory'))).toEqual([]);
+    expect(global.confirm).not.toHaveBeenCalled();
   });
 
   it('deleteSession 删除当前文档时重置 docId 和 docInfo', () => {
@@ -183,6 +189,7 @@ describe('useDocumentState', () => {
     const messages = [{ type: 'user', content: 'hello' }];
     act(() => {
       result.current.saveCurrentSession(messages);
+      result.current.flushCurrentSession();
     });
 
     const stored = JSON.parse(localStorage.getItem('chatHistory'));
@@ -216,6 +223,7 @@ describe('useDocumentState', () => {
 
     act(() => {
       result.current.saveCurrentSession([{ type: 'user', content: 'updated' }]);
+      result.current.flushCurrentSession();
     });
 
     const stored = JSON.parse(localStorage.getItem('chatHistory'));
@@ -228,7 +236,7 @@ describe('useDocumentState', () => {
   // --- loadSession ---
 
   it('loadSession 加载会话并设置文档状态', async () => {
-    const docData = { filename: 'loaded.pdf', total_pages: 5 };
+    const docData = { filename: 'loaded.pdf', total_pages: 5, pdf_url: '/uploads/doc1.pdf' };
 
     const { result } = renderHook(() => useDocumentState(defaultOptions()));
 
@@ -317,7 +325,7 @@ describe('useDocumentState', () => {
     });
 
     const [url, options] = mockFetch.mock.calls.at(-1);
-    expect(url).toBe('/documents/doc-overview/overview?depth=standard&use_mineru_figures=true');
+    expect(url).toBe('/documents/doc-overview/overview?depth=standard');
     expect(options.headers).toMatchObject({
       'X-ChatPDF-Provider': 'deepseek',
       'X-ChatPDF-Model': 'deepseek-chat',
@@ -327,7 +335,7 @@ describe('useDocumentState', () => {
     expect(result.current.overview).toEqual({ full_text_summary: 'ok' });
   });
 
-  it('fetchOverview 在 YOLO 预览模式下透传 figure_render_mode', async () => {
+  it('fetchOverview 不再把旧 YOLO 预览设置作为独立解析分支透传', async () => {
     localStorage.setItem('ocrSettings', JSON.stringify({
       mode: 'auto',
       backend: 'auto',
@@ -358,7 +366,7 @@ describe('useDocumentState', () => {
     });
 
     const [url] = mockFetch.mock.calls.at(-1);
-    expect(url).toBe('/documents/doc-overview/overview?depth=standard&use_mineru_figures=true&figure_render_mode=yolo');
+    expect(url).toBe('/documents/doc-overview/overview?depth=standard');
   });
 
   it('fetchOverview 在远程 provider 缺少 API Key 时直接给出提示', async () => {

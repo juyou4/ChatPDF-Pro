@@ -2021,6 +2021,11 @@ class MinerUAdapter(WorkerOCRAdapter):
         headers = self._build_headers()
         max_attempts = 300
         poll_interval = 3  # 秒
+        unknown_state_count = 0
+        known_states = {
+            "", "pending", "queued", "running", "processing",
+            "done", "completed", "success", "succeeded", "failed", "error", "cancelled",
+        }
 
         for attempt in range(max_attempts):
             if cancel_event is not None and cancel_event.is_set():
@@ -2031,16 +2036,24 @@ class MinerUAdapter(WorkerOCRAdapter):
             )
             self._check_worker_response(response, "轮询结果")
             data = response.json()
-            state = data.get("state", "")
+            state = str(data.get("state", "") or "").strip().lower()
 
-            if state == "done":
+            if state in {"done", "completed", "success", "succeeded"}:
                 full_zip_url = data.get("full_zip_url")
                 if not full_zip_url:
                     raise RuntimeError("MinerU 处理完成但未返回 full_zip_url")
                 return full_zip_url
-            elif state == "failed":
+            elif state in {"failed", "error", "cancelled"}:
                 error_msg = data.get("error", "未知错误")
+                if state == "cancelled":
+                    raise RuntimeError("MinerU 深度解析已取消")
                 raise RuntimeError(f"MinerU 处理失败: {error_msg}")
+            elif str(state or "").strip().lower() not in known_states:
+                unknown_state_count += 1
+                if unknown_state_count >= 3:
+                    raise RuntimeError("MinerU 远端返回了无法识别的任务状态，已停止等待")
+            else:
+                unknown_state_count = 0
 
             # 继续等待
             if progress_callback:
@@ -2434,6 +2447,11 @@ class MinerUDirectAdapter(MinerUAdapter):
     ) -> str:
         max_attempts = max(1, int(max_attempts or 1))
         poll_interval = max(0.0, float(poll_interval or 0.0))
+        unknown_state_count = 0
+        known_states = {
+            "", "pending", "queued", "running", "processing",
+            "done", "completed", "success", "succeeded", "failed", "error", "cancelled",
+        }
         for attempt in range(max_attempts):
             if cancel_event is not None and cancel_event.is_set():
                 raise RuntimeError("MinerU 深度解析已取消")
@@ -2447,14 +2465,22 @@ class MinerUDirectAdapter(MinerUAdapter):
             if data.get("code") != 0:
                 raise RuntimeError(f"MinerU 查询结果失败: {data.get('msg') or data}")
             result = self._select_direct_extract_result(data, data_id=data_id)
-            state = result.get("state", "")
-            if state == "done":
+            state = str(result.get("state", "") or "").strip().lower()
+            if state in {"done", "completed", "success", "succeeded"}:
                 full_zip_url = result.get("full_zip_url")
                 if not full_zip_url:
                     raise RuntimeError("MinerU 处理完成但未返回 full_zip_url")
                 return full_zip_url
-            if state == "failed":
+            if state in {"failed", "error", "cancelled"}:
+                if state == "cancelled":
+                    raise RuntimeError("MinerU 深度解析已取消")
                 raise RuntimeError(f"MinerU 处理失败: {result.get('err_msg') or result.get('error') or '未知错误'}")
+            if str(state or "").strip().lower() not in known_states:
+                unknown_state_count += 1
+                if unknown_state_count >= 3:
+                    raise RuntimeError("MinerU 远端返回了无法识别的任务状态，已停止等待")
+            else:
+                unknown_state_count = 0
             if progress_callback:
                 progress = {
                     "stage": "polling",

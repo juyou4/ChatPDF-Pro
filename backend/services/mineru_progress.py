@@ -248,6 +248,14 @@ def derive_mineru_progress(task: Mapping[str, Any] | None, *, now: datetime | No
         if elapsed is not None:
             break
 
+    if status in {"ready", "partial_ready"} and stage == "awaiting_rag_index":
+        return {
+            "percent": None,
+            "estimated": False,
+            "source": "awaiting_publish",
+            "stage": stage,
+            "elapsed_seconds": elapsed,
+        }
     if status in {"ready", "partial_ready"}:
         return {
             "percent": 100,

@@ -72,3 +72,14 @@ def test_cancel_sends_remote_cancel_and_persists_result(monkeypatch, isolated_jo
         (isolated_jobs / "document_jobs" / document_routes._DEEP_PARSE_JOB_TYPE / "doc-1.json").read_text(encoding="utf-8")
     )
     assert saved["remote_cancel"]["state"] == "sent"
+
+
+@pytest.mark.parametrize("access_mode", ["direct", "worker"])
+def test_completed_remote_download_can_resume_without_reupload(access_mode):
+    assert document_routes._can_resume_direct_mineru_result_download({
+        "status": "failed",
+        "stage": "download_failed",
+        "error_code": "mineru_download_failed",
+        "access_mode": access_mode,
+        "batch_id": "batch-1",
+    }) is True

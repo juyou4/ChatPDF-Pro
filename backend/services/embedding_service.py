@@ -622,7 +622,7 @@ def _is_supported_embedding_identity_version(version: Any) -> bool:
     return normalized in {0, EMBEDDING_IDENTITY_VERSION}
 
 # ---- OpenAI Client 连接池 ----
-_openai_clients: dict[tuple, "OpenAI"] = {}  # (api_base, key_hash) -> OpenAI
+_openai_clients: dict[tuple, "OpenAI"] = {}  # (api_base, key_hash, timeout) -> OpenAI
 
 
 def _emit_retrieval_progress(
@@ -651,14 +651,31 @@ def _emit_retrieval_progress(
         logger.debug("[RetrievalProgress] 回调上报失败", exc_info=True)
 
 
-def _get_openai_client(api_key: str, api_base: str) -> "OpenAI":
+def _get_openai_client(
+    api_key: str,
+    api_base: str,
+    *,
+    timeout: float | None = None,
+) -> "OpenAI":
     """获取或创建 OpenAI client（连接池复用）"""
     from openai import OpenAI
     key_hash = hash(api_key)
-    cache_key = (api_base, key_hash)
+    normalized_timeout = None
+    if timeout is not None:
+        try:
+            normalized_timeout = max(1.0, min(600.0, float(timeout)))
+        except (TypeError, ValueError):
+            normalized_timeout = None
+    cache_key = (api_base, key_hash, normalized_timeout)
     if cache_key in _openai_clients:
         return _openai_clients[cache_key]
-    client = OpenAI(api_key=api_key, base_url=api_base)
+    client_kwargs = {
+        "api_key": api_key,
+        "base_url": api_base,
+    }
+    if normalized_timeout is not None:
+        client_kwargs["timeout"] = normalized_timeout
+    client = OpenAI(**client_kwargs)
     _openai_clients[cache_key] = client
     return client
 
@@ -679,12 +696,17 @@ class _DirectEmbeddingClient:
         provider_type: str | None = None,
         api_key_header: str | None = None,
         api_key_prefix: str | None = None,
+        timeout: float | None = None,
     ):
         self.endpoint = endpoint
         self.api_key = api_key
         self.provider_type = provider_type
         self.api_key_header = api_key_header
         self.api_key_prefix = api_key_prefix
+        try:
+            self.timeout = max(1.0, min(600.0, float(timeout))) if timeout is not None else 120.0
+        except (TypeError, ValueError):
+            self.timeout = 120.0
         self.embeddings = self
 
     def create(self, *, model: str, input: list[str]):
@@ -697,7 +719,7 @@ class _DirectEmbeddingClient:
                 api_key_prefix=self.api_key_prefix,
             ),
             json={"model": model, "input": input},
-            timeout=120.0,
+            timeout=self.timeout,
         )
         if response.status_code != 200:
             raise ValueError(f"Embedding API 返回 HTTP {response.status_code}: {response.text[:500]}")
@@ -1300,6 +1322,8 @@ _NON_DEGRADABLE_EMBEDDING_MODEL_CODES = {
 }
 _QUERY_EMBEDDING_AUTH_ERROR_DETAIL = "Embedding API 凭证无效或无权访问，请检查 API Key 与模型授权配置"
 _QUERY_EMBEDDING_MODEL_ERROR_DETAIL = "当前 Embedding 模型不存在、未开通或不可用，请切换可用模型后重试"
+_QUERY_EMBEDDING_QUOTA_ERROR_DETAIL = "Embedding 服务余额或额度不足，请充值或更换 Embedding 服务后重试"
+_QUERY_EMBEDDING_RATE_LIMIT_ERROR_DETAIL = "Embedding 服务请求过于频繁，请稍后重试或降低并发"
 _EMBEDDING_MODEL_NOT_FOUND_PATTERNS = (
     re.compile(
         r"\bmodel\s+[`'\"]?[a-z0-9][a-z0-9._:/-]{0,127}[`'\"]?\s+(?:was\s+)?not\s+found\b",
@@ -1325,6 +1349,48 @@ _EMBEDDING_MODEL_NOT_FOUND_PATTERNS = (
         r"\bdeployment\s+[`'\"]?[a-z0-9][a-z0-9._:/-]{0,127}[`'\"]?\s+is\s+unavailable\b",
         re.IGNORECASE,
     ),
+)
+_EMBEDDING_HTTP_STATUS_RE = re.compile(
+    r"\b(?:http\s*(?:status|code)?|status(?:_code)?|code)\s*[:=]?\s*(4\d\d|5\d\d)\b",
+    re.IGNORECASE,
+)
+_EMBEDDING_BARE_STATUS_RE = re.compile(
+    r"(?<!\d)(?:401|402|403|404|408|409|429|500|502|503|504)(?=\D|$)",
+)
+_EMBEDDING_QUOTA_HINTS = (
+    "insufficient balance",
+    "insufficient_balance",
+    "balance is insufficient",
+    "insufficient funds",
+    "quota exceeded",
+    "quota_exceeded",
+    "credit exhausted",
+    "payment required",
+    "billing",
+    "余额不足",
+    "账户余额",
+    "额度不足",
+    "配额不足",
+    "欠费",
+)
+_EMBEDDING_RATE_LIMIT_HINTS = (
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "请求过于频繁",
+    "请求频率",
+)
+_EMBEDDING_NETWORK_HINTS = (
+    "connection refused",
+    "connection reset",
+    "connect timeout",
+    "read timeout",
+    "timed out",
+    "timeout",
+    "network is unreachable",
+    "网络连接",
+    "连接失败",
+    "连接超时",
 )
 
 
@@ -1513,6 +1579,22 @@ def _collect_embedding_error_statuses(exc: Exception) -> list[int]:
                 if status is not None and status not in seen:
                     seen.add(status)
                     statuses.append(status)
+    # Direct/custom embedding clients intentionally raise a small ValueError
+    # such as ``Embedding API 返回 HTTP 402: ...`` instead of an SDK status
+    # exception.  Recover the status from the message so quota/auth failures
+    # receive the same stable classification as OpenAI-compatible exceptions.
+    for error_node in _iter_embedding_exception_chain(exc):
+        text = str(error_node or "")
+        for match in _EMBEDDING_HTTP_STATUS_RE.finditer(text):
+            status = _coerce_embedding_error_status(match.group(1))
+            if status is not None and status not in seen:
+                seen.add(status)
+                statuses.append(status)
+        for match in _EMBEDDING_BARE_STATUS_RE.finditer(text):
+            status = _coerce_embedding_error_status(match.group(0))
+            if status is not None and status not in seen:
+                seen.add(status)
+                statuses.append(status)
     return statuses
 
 
@@ -1596,6 +1678,12 @@ def _build_non_degradable_query_embedding_http_error(exc: Exception) -> Optional
     if any(code in _NON_DEGRADABLE_EMBEDDING_AUTH_CODES for code in codes):
         return HTTPException(status_code=401, detail=_QUERY_EMBEDDING_AUTH_ERROR_DETAIL)
 
+    aggregate = " ".join(messages).casefold()
+    if 402 in statuses or any(hint in aggregate for hint in _EMBEDDING_QUOTA_HINTS):
+        return HTTPException(status_code=402, detail=_QUERY_EMBEDDING_QUOTA_ERROR_DETAIL)
+    if 429 in statuses or any(hint in aggregate for hint in _EMBEDDING_RATE_LIMIT_HINTS):
+        return HTTPException(status_code=429, detail=_QUERY_EMBEDDING_RATE_LIMIT_ERROR_DETAIL)
+
     if any(status in {401, 403} for status in statuses):
         if any(_looks_like_model_access_error_message(message) for message in messages):
             return HTTPException(status_code=409, detail=_QUERY_EMBEDDING_MODEL_ERROR_DETAIL)
@@ -1618,6 +1706,102 @@ def _summarize_embedding_error(exc: Exception) -> str:
     if codes:
         parts.append("code=" + ",".join(codes[:4]))
     return " ".join(parts)
+
+
+def _embedding_provider_label(provider: str) -> str:
+    labels = {
+        "silicon": "SiliconFlow",
+        "siliconflow": "SiliconFlow",
+        "aliyun": "阿里云",
+        "moonshot": "Moonshot",
+        "deepseek": "DeepSeek",
+        "gemini": "Gemini",
+        "zhipu": "智谱",
+        "openai": "OpenAI",
+        "minimax": "MiniMax",
+        "ollama": "Ollama",
+        "local": "本地",
+    }
+    normalized = re.sub(r"[^a-z0-9_.:-]+", "", str(provider or "").strip().casefold())[:40]
+    return labels.get(normalized, normalized or "Embedding")
+
+
+def describe_embedding_error(
+    exc: Exception,
+    *,
+    provider: str = "",
+    model: str = "",
+    operation: str = "",
+) -> dict[str, Any]:
+    """Return a stable, credential-free description of an embedding failure.
+
+    Build/index callers need more than the query path's boolean fallback: the
+    user must know whether a retry can succeed after topping up an account,
+    changing credentials, waiting for rate limits, or fixing the network.  The
+    raw provider response is deliberately never returned because it can contain
+    request payloads or echoed secrets.
+    """
+    statuses = _collect_embedding_error_statuses(exc)
+    codes = _collect_embedding_error_codes(exc)
+    messages = _collect_embedding_error_messages(exc)
+    aggregate = " ".join(messages).casefold()
+    known_statuses = {401, 402, 403, 404, 408, 409, 429, 500, 502, 503, 504}
+    # Prefer the actionable nested provider status (402/429/auth) over an
+    # outer wrapper's generic 500 when SDKs chain exceptions.
+    status = next(
+        (candidate for candidate in (402, 429, 401, 403, 404, 408, 409, 502, 503, 504, 500) if candidate in statuses),
+        next((item for item in statuses if item in known_statuses), None),
+    )
+    provider_label = _embedding_provider_label(provider)
+    model_label = re.sub(r"[^a-zA-Z0-9_./:@-]+", "", str(model or "").strip())[:160]
+    prefix = f"{operation}：" if str(operation or "").strip() else ""
+
+    if status == 402 or any(hint in aggregate for hint in _EMBEDDING_QUOTA_HINTS):
+        code = "embedding_quota_exhausted"
+        message = f"{prefix}{provider_label} Embedding 余额或额度不足（HTTP 402），请充值或更换 Embedding 服务后重试。"
+        retryable = True
+        requires_user_action = True
+    elif status == 429 or any(hint in aggregate for hint in _EMBEDDING_RATE_LIMIT_HINTS):
+        code = "embedding_rate_limited"
+        message = f"{prefix}{provider_label} Embedding 请求被限流（HTTP 429），请稍后重试或降低并发。"
+        retryable = True
+        requires_user_action = False
+    elif status in {401, 403} or any(_looks_like_auth_error_message(item) for item in messages):
+        code = "embedding_auth_failed"
+        message = f"{prefix}{provider_label} Embedding 凭证无效或无权访问，请检查 API Key 和模型授权后重试。"
+        retryable = True
+        requires_user_action = True
+    elif status == 404 or any(code_item in _NON_DEGRADABLE_EMBEDDING_MODEL_CODES for code_item in codes) or any(
+        _looks_like_model_access_error_message(item) for item in messages
+    ):
+        code = "embedding_model_unavailable"
+        message = f"{prefix}{provider_label} Embedding模型不存在、未开通或不可用，请切换模型后重试。"
+        retryable = True
+        requires_user_action = True
+    elif isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, httpx.RequestError)) or any(
+        hint in aggregate for hint in _EMBEDDING_NETWORK_HINTS
+    ):
+        code = "embedding_network_error"
+        message = f"{prefix}{provider_label} Embedding 服务暂时不可达，请检查网络或 API 地址后重试。"
+        retryable = True
+        requires_user_action = False
+    else:
+        code = "embedding_failed"
+        message = f"{prefix}{provider_label} Embedding 调用失败，请检查模型服务配置后重试。"
+        retryable = True
+        requires_user_action = True
+
+    return {
+        "code": code,
+        "kind": "embedding",
+        "message": message,
+        "http_status": status or 502,
+        "retryable": retryable,
+        "requires_user_action": requires_user_action,
+        "provider": str(provider or "").strip()[:80],
+        "model": model_label,
+        "status": status,
+    }
 
 
 def _fetch_available_model_ids(api_base: str, api_key: str) -> list[str]:
@@ -1794,6 +1978,7 @@ def get_embedding_function(
     api_key: str = None,
     base_url: str = None,
     allow_model_fallback: bool = False,
+    request_timeout: float | None = None,
 ):
     """获取指定模型的 embedding 函数
 
@@ -1806,6 +1991,7 @@ def get_embedding_function(
         api_key: API 密钥（非本地模型必需）
         base_url: 自定义 API 基础 URL（可选，优先于注册表中的 base_url）
         allow_model_fallback: 是否允许 model-not-found 时自动切换模型
+        request_timeout: 单次远程请求超时（秒），仅供短预检等调用覆盖默认值
 
     Returns:
         embedding 函数，接受文本列表并返回向量数组
@@ -1928,17 +2114,21 @@ def get_embedding_function(
     )
 
     # 使用连接池复用 OpenAI client，非标准 endpoint 使用直连适配器。
-    client = (
-        _DirectEmbeddingClient(
+    if direct_embedding_endpoint:
+        client = _DirectEmbeddingClient(
             direct_embedding_endpoint,
             actual_key,
             provider_type=provider_type,
             api_key_header=api_key_header,
             api_key_prefix=api_key_prefix,
+            timeout=request_timeout,
         )
-        if direct_embedding_endpoint
-        else _get_openai_client(actual_key, api_base)
-    )
+    elif request_timeout is None:
+        # Preserve compatibility with injected test/client factories that
+        # implement the historical two-argument helper.
+        client = _get_openai_client(actual_key, api_base)
+    else:
+        client = _get_openai_client(actual_key, api_base, timeout=request_timeout)
 
     # 远程 embedding 接口通常限制“单次请求总 token”，不是“单条文本 token”
     # 使用模型 max_tokens 的 90% 作为单请求预算，并自动分批请求。

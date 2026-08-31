@@ -253,6 +253,28 @@ def _overview_workflow_status(status: str) -> str:
     }.get(str(status or "").strip().lower(), "failed")
 
 
+def _safe_overview_error(error: Any) -> str:
+    """Normalize provider/transport failures before durable task persistence."""
+    text = str(error or "").strip()
+    if not text:
+        return ""
+    code = classify_error_code(text)
+    labels = {
+        "embedding_quota_exhausted": "Embedding 余额或额度不足，请更换服务后重试",
+        "embedding_auth_failed": "Embedding 凭证无效，请检查 API Key 后重试",
+        "embedding_rate_limited": "Embedding 请求被限流，请稍后重试",
+        "timeout": "模型请求超时，请稍后重试",
+        "network_error": "模型服务连接失败，请检查网络后重试",
+        "missing_credentials": "模型服务凭证未配置，请先完成配置",
+        "worker_interrupted": "服务重启导致速览任务中断，请重新生成",
+    }
+    if code in labels:
+        return labels[code]
+    if any(token in text.lower() for token in ("api_key", "authorization", "bearer ", "secret", "password", "http://", "https://")):
+        return "模型服务返回了不可公开的错误，请检查配置后重试"
+    return text[:240]
+
+
 def _persist_overview_workflow_state(
     task: OverviewTask,
     status: str,
@@ -263,6 +285,7 @@ def _persist_overview_workflow_state(
     include_result: bool = False,
 ) -> None:
     """Best-effort durable status; a persistence issue must not discard output."""
+    safe_error = _safe_overview_error(error)
     try:
         kwargs: dict[str, Any] = {
             "purpose": "overview",
@@ -270,13 +293,13 @@ def _persist_overview_workflow_state(
             "task_id": task.task_id,
             "status": status,
             "stage": stage,
-            "error": error,
+            "error": safe_error,
             "retryable": status not in {"succeeded", "cancelled"},
         }
         if error or status in {"partial", "degraded", "failed"}:
             kwargs["shortfall"] = {
                 "kind": "overview",
-                "code": classify_error_code(error) if error else (
+                "code": classify_error_code(safe_error) if safe_error else (
                     "partial_result" if status == "partial" else "degraded_result"
                 ),
                 "stage": stage or "downstream_ai",
@@ -3903,7 +3926,7 @@ async def _process_overview_task(task_id: str):
         task.result = result
         task.status = overview_generation_status(result)
         _require_current_overview_work_epoch(task.doc_id, work_epoch)
-        task.error = str((result.ai_meta or {}).get("generation_error") or "") or None
+        task.error = _safe_overview_error((result.ai_meta or {}).get("generation_error")) or None
     except (OverviewGenerationSuperseded, OverviewWorkInvalidated) as e:
         if task.status not in {"invalidated", "superseded"}:
             task.status = (
@@ -3912,7 +3935,7 @@ async def _process_overview_task(task_id: str):
                 else "invalidated"
             )
         task.result = None
-        task.error = str(e)
+        task.error = _safe_overview_error(e)
     except asyncio.CancelledError:
         if task.status not in {"invalidated", "superseded"}:
             task.status = "cancelled"
@@ -3922,7 +3945,7 @@ async def _process_overview_task(task_id: str):
         if task.status not in {"invalidated", "superseded"}:
             task.status = "failed"
             task.result = None
-            task.error = str(e)
+            task.error = _safe_overview_error(e)
             logger.error(f"速览任务 {task_id} 失败: {e}")
     finally:
         task.updated_at = time.time()

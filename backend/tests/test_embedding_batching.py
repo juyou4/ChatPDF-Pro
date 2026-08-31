@@ -420,3 +420,28 @@ def test_remote_embedding_preserves_versioned_base_url(monkeypatch):
     get_embedding_function("zhipu:embedding-3", api_key="sk-user")
 
     assert captured["api_base"] == "https://open.bigmodel.cn/api/paas/v4"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_code", "expected_status"),
+    [
+        ("Embedding API 返回 HTTP 402: Insufficient Balance", "embedding_quota_exhausted", 402),
+        ("Embedding API 返回 HTTP 429: Too Many Requests", "embedding_rate_limited", 429),
+        ("Embedding API 返回 HTTP 401: Unauthorized", "embedding_auth_failed", 401),
+        ("Embedding API 返回 HTTP 404: model not found", "embedding_model_unavailable", 404),
+        ("Embedding connect timeout", "embedding_network_error", 502),
+    ],
+)
+def test_embedding_failure_description_is_actionable_and_sanitized(error, expected_code, expected_status):
+    details = embedding_service_module.describe_embedding_error(
+        RuntimeError(error),
+        provider="silicon",
+        model="BAAI/bge-m3",
+        operation="问答索引构建",
+    )
+
+    assert details["code"] == expected_code
+    assert details["http_status"] == expected_status
+    assert details["retryable"] is True
+    assert "sk-" not in details["message"]
+    assert "问答索引构建" in details["message"]

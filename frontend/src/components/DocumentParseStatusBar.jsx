@@ -1,9 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertCircle, CheckCircle2, Loader2, RefreshCw, Route, Upload, X } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Clock3, Loader2, RefreshCw, Route, Upload, X } from 'lucide-react';
 import { resolveDocumentParseState } from '../utils/parseRouteUtils';
-import { getMinerUProgressPresentation } from '../utils/mineruProgressUtils';
-import MinerUScanLoader from './MinerUScanLoader';
 
 const STATE_STYLES = {
   ready: {
@@ -20,11 +18,11 @@ const STATE_STYLES = {
     iconClassName: 'animate-spin',
   },
   awaiting_publish: {
-    Icon: Loader2,
+    // 这是等待用户修正/发布索引的停顿态，不是远端仍在运行。
+    Icon: Clock3,
     light: 'border-amber-200/90 bg-[#fffaf0]/95 text-amber-700',
     dark: 'border-amber-300/20 bg-[#2a261b]/95 text-amber-300',
     icon: 'bg-amber-500/10',
-    iconClassName: 'animate-spin',
   },
   // 能力已开放但覆盖面残缺：不能用 ready 的绿色勾，那会把降级说成完成。
   partial_ready: {
@@ -50,6 +48,12 @@ const STATE_STYLES = {
     light: 'border-amber-200/90 bg-[#fffaf0]/95 text-amber-700',
     dark: 'border-amber-300/20 bg-[#2a261b]/95 text-amber-300',
     icon: 'bg-amber-500/10',
+  },
+  not_started: {
+    Icon: RefreshCw,
+    light: 'border-slate-200/90 bg-white/95 text-slate-600',
+    dark: 'border-white/10 bg-[#20232a]/95 text-gray-300',
+    icon: 'bg-slate-500/10',
   },
 };
 
@@ -116,11 +120,13 @@ const DocumentParseStatusBar = React.memo(({
   darkMode = false,
   onOpenProcessing,
   onRetry,
+  onRetryIndex,
+  onRefresh,
   onChooseRoute,
   suppressed = false,
   className = '',
 }) => {
-  const parseState = resolveDocumentParseState({ manifest, parseReady, deepParseStatus });
+  const parseState = resolveDocumentParseState({ manifest, parseReady, deepParseStatus, ragIndexStatus });
   const ragPublishFailed = parseState.state === 'awaiting_publish'
     && ragIndexStatus?.status === 'failed';
   const state = ragPublishFailed
@@ -133,39 +139,33 @@ const DocumentParseStatusBar = React.memo(({
     : parseState;
   const style = STATE_STYLES[state.state] || STATE_STYLES.processing;
   const StateIcon = style.Icon;
-  const canRetry = state.resolvedRoute === 'mineru' && state.state === 'failed' && onRetry;
+  const canRetry = state.resolvedRoute === 'mineru'
+    && ['failed', 'cancelled', 'not_started'].includes(state.state)
+    && onRetry;
+  const canRetryIndex = state.resolvedRoute === 'mineru' && state.state === 'publish_failed' && onRetryIndex;
+  const statusSyncFailed = state.state === 'failed'
+    && ['status_sync_failed', 'downstream_task_stalled'].includes(
+      String(state.errorCode || deepParseStatus?.error_code || deepParseStatus?.stage || '').trim().toLowerCase(),
+    );
+  const canRefresh = statusSyncFailed && onRefresh;
   const retryLabel = deepParseStatus?.resume_available && deepParseStatus?.resume_kind === 'result_download'
     ? '重试结果下载'
+    : ['not_started', 'cancelled'].includes(state.state)
+      ? '开始解析'
     : '重试 MinerU';
   const canInspect = state.resolvedRoute === 'mineru'
     && ['processing', 'awaiting_publish', 'publish_failed'].includes(state.state)
     && onOpenProcessing;
   // 进行中的解析进度已经在聊天区上传卡片里展示，右上角弹窗只保留失败/重建等提醒。
   const isParseProgressNotice = state.state === 'processing';
-  const showMinerUProgress = !isParseProgressNotice
-    && state.resolvedRoute === 'mineru'
-    && state.state === 'awaiting_publish';
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    if (!showMinerUProgress) return undefined;
-    setNowMs(Date.now());
-    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [showMinerUProgress, documentId, manifest?.generation, deepParseStatus?.started_at]);
-  const minerUProgress = getMinerUProgressPresentation(deepParseStatus, {
-    status: deepParseStatus?.status || manifest?.status,
-    stage: deepParseStatus?.stage || manifest?.stage,
-    doc_id: documentId,
-    parse_generation: manifest?.generation,
-  }, nowMs);
-  const showMinerUProgressBar = showMinerUProgress && Number.isFinite(minerUProgress?.percent);
-  const showMinerUScanLoader = state.resolvedRoute === 'mineru' && state.state === 'processing';
   const shouldOfferRouteChange = ['failed', 'cancelled'].includes(state.state) && onChooseRoute;
   const noticeKey = [
     documentId,
     manifest?.generation,
     manifest?.source_hash,
     state.state,
+    state.errorCode,
+    deepParseStatus?.stage,
   ].map((value) => String(value || '')).join('|');
   const [dismissedNoticeKey, setDismissedNoticeKey] = useState('');
   const seenNoticeKeysRef = useRef(null);
@@ -213,14 +213,10 @@ const DocumentParseStatusBar = React.memo(({
                 : `${style.light} shadow-[0_18px_44px_-18px_rgba(78,64,56,0.34),0_4px_12px_rgba(78,64,56,0.1)]`
             }`}
           >
-            <div className="flex items-start gap-2.5">
-              <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] ${style.icon}`}>
-                {showMinerUScanLoader ? (
-                  <MinerUScanLoader size={20} />
-                ) : (
+              <div className="flex items-start gap-2.5">
+                <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[9px] ${style.icon}`}>
                   <StateIcon className={`h-4 w-4 ${style.iconClassName || ''}`} />
-                )}
-              </div>
+                </div>
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2 text-[12px]">
                   <span className="inline-flex shrink-0 items-center gap-1.5 font-bold">
@@ -231,29 +227,7 @@ const DocumentParseStatusBar = React.memo(({
                   <span className="truncate font-semibold">{state.statusLabel}</span>
                 </div>
                 <p className="mt-1 line-clamp-2 text-[11px] leading-4 opacity-70">{state.detail}</p>
-                {showMinerUProgressBar && (
-                  <div className="mt-2.5">
-                    <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] font-semibold opacity-80">
-                      <span className="truncate">{minerUProgress.detail}</span>
-                      <span className="shrink-0 tabular-nums">{minerUProgress.label}</span>
-                    </div>
-                    <div
-                      role="progressbar"
-                      aria-label={`MinerU 解析：${minerUProgress.ariaLabel}`}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-valuenow={minerUProgress.percent}
-                      className={`relative h-1.5 overflow-hidden rounded-full ${darkMode ? 'bg-white/10' : 'bg-current/10'}`}
-                    >
-                      <div
-                        className="mineru-progress-fill absolute inset-y-0 left-0 rounded-full bg-current"
-                        style={{ transform: `scaleX(${minerUProgress.percent / 100})` }}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {(canInspect || canRetry || shouldOfferRouteChange) && (
+                {(canInspect || canRetry || canRetryIndex || shouldOfferRouteChange) && (
                   <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
                     {canInspect && (
                       <button
@@ -264,7 +238,17 @@ const DocumentParseStatusBar = React.memo(({
                         {state.state === 'publish_failed' ? '查看任务' : '查看进度'}
                       </button>
                     )}
-                    {canRetry && (
+                    {canRefresh && (
+                      <button
+                        type="button"
+                        onClick={onRefresh}
+                        className={`inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1.5 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#D97A5D]/35 ${darkMode ? 'bg-white/10 hover:bg-white/15' : 'bg-white/65 hover:bg-white'}`}
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        刷新状态
+                      </button>
+                    )}
+                    {canRetry && !canRefresh && (
                       <button
                         type="button"
                         onClick={onRetry}
@@ -272,6 +256,16 @@ const DocumentParseStatusBar = React.memo(({
                       >
                         <RefreshCw className="h-3.5 w-3.5" />
                         {retryLabel}
+                      </button>
+                    )}
+                    {canRetryIndex && (
+                      <button
+                        type="button"
+                        onClick={onRetryIndex}
+                        className={`inline-flex items-center gap-1.5 rounded-[8px] px-2.5 py-1.5 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300/45 ${darkMode ? 'bg-rose-300/10 hover:bg-rose-300/15' : 'bg-white/65 hover:bg-white'}`}
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        重试发布
                       </button>
                     )}
                     {shouldOfferRouteChange && (

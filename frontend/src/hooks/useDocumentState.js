@@ -52,6 +52,7 @@ const loadOCRSettings = () => {
 const API_BASE_URL = '';
 const UPLOAD_PROGRESS_CAP = 42;
 const PROCESSING_PROGRESS_CAP = 88;
+const UPLOAD_REQUEST_TIMEOUT_MS = 3 * 60 * 1000;
 export const SESSION_PERSIST_DEBOUNCE_MS = 400;
 
 const sessionListIdentity = (sessions) => (
@@ -277,8 +278,14 @@ const getUploadErrorMessage = (xhr) => {
   if (xhr.status === 401) {
     return '桌面后端鉴权失败，请重启 ChatPDF Pro 后重试';
   }
+  if (xhr.status === 402) {
+    return 'Embedding 服务余额或额度不足，请充值或更换 Embedding 服务后重试';
+  }
+  if (xhr.status === 429) {
+    return 'Embedding 服务请求过于频繁，请稍后重试';
+  }
 
-  const fallback = `Upload failed (HTTP ${xhr.status || 'unknown'})`;
+  const fallback = `上传失败（HTTP ${xhr.status || 'unknown'}）`;
   const raw = xhr.responseText;
   if (!raw) return fallback;
 
@@ -286,6 +293,27 @@ const getUploadErrorMessage = (xhr) => {
     const parsed = JSON.parse(raw);
     if (typeof parsed?.detail === 'string' && parsed.detail.trim()) {
       return parsed.detail;
+    }
+    if (parsed?.detail && typeof parsed.detail === 'object') {
+      const code = String(parsed.detail.code || '').trim().toLowerCase();
+      const codeMessages = {
+        embedding_quota_exhausted: 'Embedding 服务余额或额度不足，请充值或更换服务后重试',
+        embedding_auth_failed: 'Embedding 凭证无效或无权访问，请检查 API Key 后重试',
+        embedding_model_unavailable: 'Embedding 模型不可用，请切换模型后重试',
+        embedding_rate_limited: 'Embedding 请求被限流，请稍后重试',
+        embedding_network_error: 'Embedding 服务连接超时或不可达，请检查网络后重试',
+        mineru_auth_failed: 'MinerU 凭证无效或已过期，请检查 Token 后重试',
+        mineru_network_error: 'MinerU 网络连接失败，请检查直连网络后重试',
+        mineru_file_rejected: 'MinerU 拒绝了当前 PDF，请检查文件格式或大小',
+        mineru_service_unavailable: 'MinerU 服务暂时不可用，请稍后重试',
+      };
+      if (codeMessages[code]) return codeMessages[code];
+      if (typeof parsed.detail.message === 'string' && parsed.detail.message.trim()) {
+        return parsed.detail.message;
+      }
+      if (typeof parsed.detail.error === 'string' && parsed.detail.error.trim()) {
+        return parsed.detail.error;
+      }
     }
     if (Array.isArray(parsed?.detail)) {
       const msgs = parsed.detail
@@ -304,7 +332,12 @@ const getUploadErrorMessage = (xhr) => {
     // ignore JSON parse error
   }
 
-  return raw.slice(0, 300) || fallback;
+  // 纯文本响应可能是代理/供应商原始 JSON；只保留短诊断，避免把密钥或
+  // 请求体原样展示给用户。
+  if (raw.length > 300 || /api[_-]?key|authorization|bearer\s|secret|password/i.test(raw)) {
+    return fallback;
+  }
+  return raw.trim() || fallback;
 };
 
 /**
@@ -597,8 +630,13 @@ export function useDocumentState({
         });
         xhr.addEventListener('error', () => {
           clearUploadProcessingTimer();
-          reject(new Error('Network error'));
+          reject(new Error('上传连接中断，请检查网络后重试'));
         });
+        xhr.addEventListener('timeout', () => {
+          clearUploadProcessingTimer();
+          reject(new Error('上传请求超时，未能确认服务端结果；请检查网络后重试'));
+        });
+        xhr.timeout = UPLOAD_REQUEST_TIMEOUT_MS;
         xhr.open('POST', uploadUrl);
         xhr.send(formData);
       });
@@ -656,12 +694,16 @@ export function useDocumentState({
           description: `使用 ${data.ocr_backend || '自动模式'} 处理了需要识别的页面。`,
         });
       }
-      if (!isMinerUAccepted && data.indexing_status && data.indexing_status !== 'ready') {
+      const indexingStatus = String(data.indexing_status || '').trim().toLowerCase();
+      if (!isMinerUAccepted && data.indexing_status && indexingStatus !== 'ready') {
+        const indexingFailed = indexingStatus === 'failed';
         uploadStatusItems.push({
           id: 'rag_index',
-          status: 'processing',
-          title: '问答索引准备中',
-          description: 'PDF 与正文阅读可先使用；首次问答可能需要稍等。',
+          status: indexingFailed ? 'failed' : 'processing',
+          title: indexingFailed ? '问答索引失败' : '问答索引准备中',
+          description: indexingFailed
+            ? data.indexing_error || '问答索引构建失败，请修正 Embedding 配置后重试。'
+            : 'PDF 与正文阅读可先使用；首次问答可能需要稍等。',
         });
       }
       const uploadMsg = [

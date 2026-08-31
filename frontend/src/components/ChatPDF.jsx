@@ -225,6 +225,17 @@ const SIDEBAR_MAX_WIDTH = 420;
 const MAIN_PANEL_MIN_WIDTH = 780;
 const SIDEBAR_KEYBOARD_STEP = 16;
 
+const getApiErrorMessage = (payload, status = 0, fallback = '请求失败') => {
+  const detail = payload?.detail ?? payload?.error ?? payload?.message;
+  if (typeof detail === 'string' && detail.trim()) return detail.trim();
+  if (detail && typeof detail === 'object') {
+    if (typeof detail.message === 'string' && detail.message.trim()) return detail.message.trim();
+    if (typeof detail.error === 'string' && detail.error.trim()) return detail.error.trim();
+    if (typeof detail.code === 'string' && detail.code.trim()) return `${fallback}（${detail.code.trim()}）`;
+  }
+  return status ? `${fallback}（HTTP ${status}）` : fallback;
+};
+
 const UPLOAD_STATUS_META = {
   uploading: {
     label: 'Uploading',
@@ -583,10 +594,11 @@ const isMinerUParseGateError = (error) => {
   return /mineru|全程解析/i.test(String(error?.message || ''));
 };
 
-const getMinerUParsePendingNotice = (manifest, deepParseStatus) => {
+const getMinerUParsePendingNotice = (manifest, deepParseStatus, ragIndexStatus) => {
   const status = String(manifest?.status || '').trim().toLowerCase();
   const stage = String(manifest?.stage || deepParseStatus?.stage || '').trim().toLowerCase();
   const error = String(manifest?.error || deepParseStatus?.error || '').trim();
+  const errorCode = String(deepParseStatus?.error_code || '').trim().toLowerCase();
 
   if (status === 'failed') {
     if (deepParseStatus?.resume_available && deepParseStatus?.resume_kind === 'result_download') {
@@ -595,8 +607,22 @@ const getMinerUParsePendingNotice = (manifest, deepParseStatus) => {
     return error || 'MinerU 全程解析失败，请重新上传后选择 MinerU 路线重试';
   }
   if (status === 'cancelled') return 'MinerU 全程解析已取消，请重新上传后选择 MinerU 路线重试';
+  if (stage === 'status_sync_failed' || errorCode === 'status_sync_failed') {
+    return error || '解析状态连续同步失败，已暂停等待；恢复网络后可刷新状态或重试';
+  }
+  if (stage === 'stalled' || errorCode === 'mineru_stalled') {
+    return error || 'MinerU 任务长时间没有进展，已停止等待；检查网络后可重试';
+  }
   if (stage === 'awaiting_rag_index') {
+    if (ragIndexStatus?.status === 'failed') {
+      return ragIndexStatus.error
+        || manifest?.metadata?.rag_index_failure?.message
+        || 'MinerU 版面解析已完成，但问答索引发布失败；修正 Embedding 配置后可重试，无需重新上传。';
+    }
     return 'MinerU 版面解析已完成，正在等待问答索引发布后统一开放阅读、翻译、速览和问答';
+  }
+  if (String(deepParseStatus?.status || '').trim().toLowerCase() === 'pending' && !deepParseStatus?.active) {
+    return 'MinerU 解析任务尚未启动，可点击开始解析';
   }
   return 'MinerU 全程解析中，完成后将自动加载阅读结构、大纲、翻译、速览和问答';
 };
@@ -908,6 +934,10 @@ const ChatPDF = () => {
   const [ragIndexBusy, setRagIndexBusy] = useState(false);
   const [ragIndexNotice, setRagIndexNotice] = useState('');
   const [ragIndexError, setRagIndexError] = useState('');
+  const ragIndexPollErrorsRef = useRef(0);
+  const downstreamStatusPollErrorsRef = useRef(0);
+  const downstreamTaskStatusesRef = useRef({});
+  downstreamTaskStatusesRef.current = downstreamTaskStatuses;
   const [embeddingConflictRecovery, setEmbeddingConflictRecovery] = useState({
     messageId: null,
     status: 'idle',
@@ -931,6 +961,7 @@ const ChatPDF = () => {
     lastRequestAt: 0,
     lastResult: null,
   });
+  const deepParsePollErrorsRef = useRef(0);
   const prevShouldAutoPretranslateRef = useRef(shouldAutoPretranslate);
   const readingOutlineRequestRef = useRef(0);
   const readingOutlineForceRef = useRef(false);
@@ -1920,8 +1951,19 @@ const ChatPDF = () => {
   const currentParseStatus = String(
     currentDeepParseStatus?.status || documentParseManifest?.status || ''
   ).trim().toLowerCase();
+  const isMinerURagPublishFailed = Boolean(
+    isMinerUFullRoute(documentParseManifest)
+    && ragIndexStatus?.status === 'failed'
+    && (
+      documentParseManifest?.stage === 'awaiting_rag_index'
+      || ragIndexStatus?.preserve_parse === true
+      || currentDeepParseStatus?.rag_index_failure?.preserve_parse === true
+      || documentParseManifest?.metadata?.rag_index_failure?.preserve_parse === true
+    )
+  );
   const isMinerUFullRouteFailed = isMinerUFullRoute(documentParseManifest)
-    && currentParseStatus === 'failed';
+    && currentParseStatus === 'failed'
+    && !isMinerURagPublishFailed;
   const canResumeMinerUResultDownload = isMinerUFullRouteFailed
     && currentDeepParseStatus?.resume_available === true
     && currentDeepParseStatus?.resume_kind === 'result_download';
@@ -1929,7 +1971,11 @@ const ChatPDF = () => {
     && currentParseStatus === 'cancelled';
   const isMinerUFullRoutePending = isMinerUFullRoute(documentParseManifest)
     && (!documentParseReady || documentParseManifest?.status !== 'ready');
-  const minerUParsePendingNotice = getMinerUParsePendingNotice(documentParseManifest, currentDeepParseStatus);
+  const minerUParsePendingNotice = getMinerUParsePendingNotice(
+    documentParseManifest,
+    currentDeepParseStatus,
+    ragIndexStatus,
+  );
   const isDocumentParseIdentityHydrating = Boolean(
     docId
     && (
@@ -1949,12 +1995,24 @@ const ChatPDF = () => {
   const isNewMinerUPrimaryRoute = Boolean(
     documentParseManifest && !isLegacyParseManifest && primaryParseRoute === 'mineru'
   );
+  const isMinerUParseNotStarted = Boolean(
+    isNewMinerUPrimaryRoute
+    && String(documentParseManifest?.status || '').trim().toLowerCase() === 'pending'
+    && ['idle', 'pending'].includes(String(currentDeepParseStatus?.status || '').trim().toLowerCase())
+    && ['selected', 'not_started'].includes(
+      String(currentDeepParseStatus?.stage || documentParseManifest?.stage || '').trim().toLowerCase(),
+    )
+  );
   const shouldPollDeepParseStatus = shouldPollMinerUStatus({
     status: currentDeepParseStatus?.status,
     primaryMinerURoute: isNewMinerUPrimaryRoute,
     routePending: isMinerUFullRoutePending,
     routeFailed: isMinerUFullRouteFailed,
     routeCancelled: isMinerUFullRouteCancelled,
+    publishFailed: isMinerURagPublishFailed,
+    awaitingPublish: String(documentParseManifest?.stage || '').trim().toLowerCase() === 'awaiting_rag_index'
+      || isMinerURagPublishFailed,
+    notStarted: isMinerUParseNotStarted,
   });
   const canUseLegacyMinerUActions = !documentParseManifest || isLegacyParseManifest;
   const canPublishPendingMinerURag = isNewMinerUPrimaryRoute && (
@@ -2247,7 +2305,7 @@ const ChatPDF = () => {
         settleParseIdentityHydration(requestContext.docId);
       }
       releaseRequest();
-      throw new Error(data?.detail || `HTTP ${res.status}`);
+      throw new Error(getApiErrorMessage(data, res.status, '解析状态同步失败'));
     }
     if (
       deepParseStatusRequestRef.current.sequence !== requestSequence
@@ -2258,6 +2316,7 @@ const ChatPDF = () => {
       return null;
     }
     settleParseIdentityHydration(requestContext.docId);
+    deepParsePollErrorsRef.current = 0;
     tracker.lastResult = data;
     setDeepParseStatus((current) => (
       sameDeepParseStatus(current, data) ? current : data
@@ -2314,13 +2373,14 @@ const ChatPDF = () => {
     };
     const res = await fetch(`${API_BASE_URL}/documents/${requestContext.docId}/rag-index/status?t=${Date.now()}`);
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+    if (!res.ok) throw new Error(getApiErrorMessage(data, res.status, '问答索引状态加载失败'));
     if (
       !isCurrentParseContext(requestContext)
       || (data?.doc_id && String(data.doc_id) !== String(requestContext.docId))
     ) {
       return null;
     }
+    ragIndexPollErrorsRef.current = 0;
     setRagIndexStatus(data);
     setRagIndexError(data?.status === 'failed' ? data.error || '问答索引处理失败' : '');
     return data;
@@ -2340,14 +2400,49 @@ const ChatPDF = () => {
           `${API_BASE_URL}/documents/${requestContext.docId}/ai-tasks/${purpose}?t=${Date.now()}`,
           { cache: 'no-store' },
         );
-        if (!response.ok) return [purpose, null];
-        return [purpose, await response.json().catch(() => null)];
+        if (response.status === 404) return [purpose, null, false];
+        if (!response.ok) return [purpose, null, true];
+        return [purpose, await response.json().catch(() => null), false];
       } catch {
-        return [purpose, null];
+        return [purpose, null, true];
       }
     }));
     if (!isCurrentParseContext(requestContext)) return {};
-    const next = Object.fromEntries(responses.filter(([, value]) => value));
+    const hadStatusTransportError = responses.some(([, , failed]) => failed);
+    const next = Object.fromEntries(responses.filter(([, value]) => value).map(([purpose, value]) => [purpose, value]));
+    if (hadStatusTransportError) {
+      // A transient status request failure must not erase the last known task
+      // and make the panel look idle. Keep it until the retry budget is
+      // exhausted, then convert it to an explicit sync failure below.
+      Object.entries(downstreamTaskStatusesRef.current).forEach(([purpose, task]) => {
+        if (task && !next[purpose]) next[purpose] = task;
+      });
+    }
+    if (hadStatusTransportError) {
+      downstreamStatusPollErrorsRef.current += 1;
+    } else {
+      downstreamStatusPollErrorsRef.current = 0;
+    }
+    if (hadStatusTransportError && downstreamStatusPollErrorsRef.current >= 3) {
+      // Do not leave an old running snapshot in the pill when the status API
+      // itself is unreachable. Only convert tasks that were visibly active;
+      // a missing optional task remains absent.
+      Object.entries(downstreamTaskStatusesRef.current).forEach(([purpose, task]) => {
+        if (!task || !['queued', 'pending', 'running', 'processing', 'verifying', 'publishing'].includes(String(task.status || '').toLowerCase())) return;
+        next[purpose] = {
+          ...task,
+          status: 'failed',
+          stage: 'status_sync_failed',
+          stage_label: '状态同步失败',
+          error: '下游任务状态连续同步失败，已暂停等待；恢复网络后可刷新或重试',
+          error_code: 'status_sync_failed',
+          retryable: true,
+          active: false,
+          terminal: true,
+          progress: null,
+        };
+      });
+    }
     setDownstreamTaskStatuses((prev) => (
       JSON.stringify(prev) === JSON.stringify(next) ? prev : next
     ));
@@ -2467,7 +2562,7 @@ const ChatPDF = () => {
           return false;
         }
         if (['ready', 'partial_ready'].includes(data.status) && data.active_mineru) {
-          setDeepParseNotice(getMinerUParsePendingNotice(data.parse_manifest, data));
+          setDeepParseNotice(getMinerUParsePendingNotice(data.parse_manifest, data, data.rag_index));
           return false;
         }
         if (data.status === 'failed') {
@@ -2480,6 +2575,24 @@ const ChatPDF = () => {
         }
         return true;
       } catch (error) {
+        deepParsePollErrorsRef.current += 1;
+        if (deepParsePollErrorsRef.current >= 3) {
+          const message = 'MinerU 解析状态连续同步失败，已暂停等待；恢复网络后可刷新或重试。';
+          setDeepParseNotice(message);
+          setDeepParseStatus((previous) => ({
+            ...(previous || {}),
+            status: 'failed',
+            stage: 'status_sync_failed',
+            error: message,
+            error_code: 'status_sync_failed',
+            retryable: true,
+            terminal: true,
+            active: false,
+            remote_state: 'unknown',
+            progress: null,
+          }));
+          return false;
+        }
         setDeepParseNotice(error.message || 'MinerU 深度解析状态同步失败');
         return true;
       }
@@ -2492,9 +2605,51 @@ const ChatPDF = () => {
     shouldPollDeepParseStatus,
   ]);
 
+  useEffect(() => {
+    // MinerU's full route returns its RAG status in the same endpoint. Local
+    // uploads only have the standalone index status, so poll that task until a
+    // terminal result arrives; otherwise its upload notice would stay on
+    // "preparing" forever after a quota/network failure.
+    if (
+      !docId
+      || shouldPollDeepParseStatus
+      || !['queued', 'running'].includes(String(ragIndexStatus?.status || '').trim().toLowerCase())
+    ) {
+      return () => {};
+    }
+    ragIndexPollErrorsRef.current = 0;
+    return startVisiblePoll(
+      async () => {
+        try {
+          const data = await refreshRagIndexStatus();
+          return Boolean(data) && ['queued', 'running'].includes(String(data.status || '').trim().toLowerCase());
+        } catch {
+          ragIndexPollErrorsRef.current += 1;
+          if (ragIndexPollErrorsRef.current >= 3) {
+            setRagIndexNotice('问答索引状态暂时无法同步，已暂停轮询；恢复网络后可刷新或重试。');
+            setRagIndexError('问答索引状态暂时无法同步');
+            return false;
+          }
+          return true;
+        }
+      },
+      2500,
+      { immediate: false },
+    );
+  }, [
+    docId,
+    ragIndexStatus?.status,
+    refreshRagIndexStatus,
+    shouldPollDeepParseStatus,
+  ]);
+
   const handleStartMinerUDeepParse = useCallback(async (options = {}) => {
     const retryFullRoute = options?.retryFullRoute === true;
-    const canRetryFullRoute = retryFullRoute && isNewMinerUPrimaryRoute && isMinerUFullRouteFailed;
+    const retryablePendingFullRoute = String(documentParseManifest?.status || '').trim().toLowerCase() === 'pending'
+      && String(documentParseManifest?.stage || '').trim().toLowerCase() !== 'awaiting_rag_index';
+    const canRetryFullRoute = retryFullRoute
+      && isNewMinerUPrimaryRoute
+      && (isMinerUFullRouteFailed || isMinerUFullRouteCancelled || retryablePendingFullRoute);
     const canResumeResultDownload = canRetryFullRoute
       && currentDeepParseStatus?.resume_available === true
       && currentDeepParseStatus?.resume_kind === 'result_download';
@@ -2554,7 +2709,7 @@ const ChatPDF = () => {
         body: JSON.stringify({ provider: 'mineru', force: activeMinerU || canRetryFullRoute }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(getApiErrorMessage(data, res.status, 'MinerU 深度解析启动失败'));
       if (
         !isCurrentParseContext(requestContext)
         || (data?.doc_id && String(data.doc_id) !== String(requestContext.docId))
@@ -2570,7 +2725,7 @@ const ChatPDF = () => {
         );
         refreshReadingBlocksAfterDeepParse();
       } else if (['ready', 'partial_ready'].includes(data.status) && data.active_mineru) {
-        setDeepParseNotice(getMinerUParsePendingNotice(data.parse_manifest, data));
+        setDeepParseNotice(getMinerUParsePendingNotice(data.parse_manifest, data, data.rag_index));
       } else if (data.resume_kind === 'result_download' || data.stage === 'resuming_result_download') {
         setDeepParseNotice('正在重新获取 MinerU 已完成的解析结果，不会重新上传 PDF');
       } else {
@@ -2592,7 +2747,10 @@ const ChatPDF = () => {
     documentParseIdentity,
     invalidateDeepParseStatusRequest,
     isCurrentParseContext,
+    documentParseManifest?.stage,
+    documentParseManifest?.status,
     isMinerUFullRouteFailed,
+    isMinerUFullRouteCancelled,
     isNewMinerUPrimaryRoute,
     minerUActionLockedNotice,
     confirmAction,
@@ -2612,7 +2770,7 @@ const ChatPDF = () => {
         method: 'POST',
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(getApiErrorMessage(data, res.status, 'MinerU 取消失败'));
       if (
         !isCurrentParseContext(requestContext)
         || (data?.doc_id && String(data.doc_id) !== String(requestContext.docId))
@@ -2762,6 +2920,10 @@ const ChatPDF = () => {
       const message = error.message || '问答索引重建失败，已保留原索引';
       setRagIndexNotice(message);
       setRagIndexError(message);
+      // The backend records a terminal, identity-bound failure even when the
+      // HTTP request itself fails. Refresh once so an old progress snapshot
+      // cannot keep the upload card looking active.
+      refreshDeepParseStatus().catch(() => {});
       if (conflictMessageId !== null) {
         setEmbeddingConflictRecovery({ messageId: conflictMessageId, status: 'failed' });
       }
@@ -2805,7 +2967,7 @@ const ChatPDF = () => {
     try {
       const res = await fetch(`${API_BASE_URL}/documents/${docId}/rag-index/rollback`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(getApiErrorMessage(data, res.status, '问答索引回退失败'));
       setRagIndexStatus(data.rag_index || null);
       setRagIndexNotice('已回退到本地问答索引');
       refreshDeepParseStatus().catch(() => {});
@@ -2888,7 +3050,7 @@ const ChatPDF = () => {
         }),
       } : { method });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(getApiErrorMessage(data, res.status, '章节大纲请求失败'));
       return data;
     };
 
@@ -2995,7 +3157,7 @@ const ChatPDF = () => {
         body: JSON.stringify({ force: true }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(getApiErrorMessage(data, res.status, '章节大纲请求失败'));
       if (sectionOutlineRequestRef.current !== requestId) return;
       const cacheKey = buildOutlineCacheKey(docId, documentParseIdentity, blockIndex);
       sectionOutlineCacheRef.current.set(cacheKey, data);
@@ -3107,7 +3269,7 @@ const ChatPDF = () => {
         body: JSON.stringify({ force }),
       } : { method });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(getApiErrorMessage(data, res.status, '章节大纲请求失败'));
       return data;
     };
 
@@ -5032,18 +5194,30 @@ const ChatPDF = () => {
     manifest: documentParseManifest,
     parseReady: documentParseReady,
     deepParseStatus: currentDeepParseStatus,
-  }), [currentDeepParseStatus, documentParseManifest, documentParseReady]);
-  const deepParseFailed = isMinerUFullRouteFailed || deepParseStatusValue === 'failed';
+    ragIndexStatus,
+  }), [currentDeepParseStatus, documentParseManifest, documentParseReady, ragIndexStatus]);
+  const deepParseFailed = !isMinerURagPublishFailed
+    && (isMinerUFullRouteFailed || deepParseStatusValue === 'failed');
+  const isRagIndexPublishWaiting = Boolean(
+    isMinerUFullRoute(documentParseManifest)
+    && String(documentParseManifest?.stage || currentDeepParseStatus?.stage || '').trim().toLowerCase() === 'awaiting_rag_index'
+    && !isMinerURagPublishFailed
+  );
   const fullRouteAlreadyPublished = isNewMinerUPrimaryRoute
     && ['ready', 'partial_ready'].includes(resolvedDocumentParseState.state);
-  const deepParseRunning = !fullRouteAlreadyPublished && (
-    ['queued', 'running'].includes(deepParseStatusValue) || Boolean(
-      isNewMinerUPrimaryRoute
-      && isMinerUFullRoutePending
-      && !deepParseFailed
-      && !isMinerUFullRouteCancelled
-    )
-  );
+  const deepParseRunning = !fullRouteAlreadyPublished
+    && !isMinerURagPublishFailed
+    && !isRagIndexPublishWaiting
+    && resolvedDocumentParseState.state !== 'not_started'
+    && (
+      ['queued', 'running'].includes(deepParseStatusValue) || Boolean(
+        isNewMinerUPrimaryRoute
+        && isMinerUFullRoutePending
+        && !deepParseFailed
+        && !isMinerUFullRouteCancelled
+        && !isMinerURagPublishFailed
+      )
+    );
   // 秒表和预估百分比的 1Hz 跳动留在上传卡片 / 任务面板内部。
   // 这里只拍阶段快照；预估百分比按耗时在卡片里重算，避免轮询换对象把卡片抖起来。
   const deepParseProgress = useMemo(() => (
@@ -5065,12 +5239,53 @@ const ChatPDF = () => {
     docInfo?.parse_manifest?.generation,
   ]);
   const documentUploadParseStatusRaw = useMemo(() => {
-    if (resolvedDocumentParseState.resolvedRoute !== 'mineru') return null;
+    if (resolvedDocumentParseState.resolvedRoute !== 'mineru') {
+      const ragStatus = String(ragIndexStatus?.status || '').trim().toLowerCase();
+      if (ragStatus === 'failed') {
+        return {
+          status: 'failed',
+          title: '问答索引失败',
+          description: ragIndexStatus?.error || '问答索引构建失败，请修正 Embedding 配置后重试。',
+          errorCode: ragIndexStatus?.error_code || '',
+        };
+      }
+      if (['queued', 'running'].includes(ragStatus)) {
+        return {
+          status: 'processing',
+          title: '问答索引构建中',
+          description: ragIndexStatus?.stage_label || ragIndexStatus?.stage || '正在生成问答索引，完成后即可提问。',
+        };
+      }
+      if (['ready', 'partial_ready'].includes(ragStatus)) {
+        return {
+          status: 'complete',
+          title: '问答索引已就绪',
+          description: ragStatus === 'partial_ready'
+            ? '部分页面未纳入问答索引，已保留可用结果。'
+            : '正文和问答索引已准备完成。',
+        };
+      }
+      return null;
+    }
     if (['failed', 'publish_failed'].includes(resolvedDocumentParseState.state)) {
       return {
         status: 'failed',
-        title: resolvedDocumentParseState.state === 'publish_failed' ? '问答索引发布失败' : 'MinerU 解析失败',
+        title: resolvedDocumentParseState.state === 'publish_failed'
+          ? '问答索引发布失败'
+          : currentDeepParseStatus?.stage === 'status_sync_failed'
+            ? '解析状态同步失败'
+            : currentDeepParseStatus?.stage === 'stalled'
+              ? '解析任务已停止等待'
+              : 'MinerU 解析失败',
         description: resolvedDocumentParseState.detail || '解析未完成，可在右上角任务面板中重试。',
+        errorCode: currentDeepParseStatus?.error_code || '',
+      };
+    }
+    if (resolvedDocumentParseState.state === 'not_started') {
+      return {
+        status: 'warning',
+        title: 'MinerU 尚未开始解析',
+        description: resolvedDocumentParseState.detail,
       };
     }
     if (resolvedDocumentParseState.state === 'cancelled') {
@@ -5128,6 +5343,10 @@ const ChatPDF = () => {
     docInfo?.parse_manifest?.generation,
     currentDeepParseStatus?.started_at,
     currentDeepParseStatus?.created_at,
+    ragIndexStatus?.status,
+    ragIndexStatus?.error,
+    ragIndexStatus?.stage,
+    ragIndexStatus?.preserve_parse,
     resolvedDocumentParseState,
   ]);
   const documentUploadParseStatusRef = useRef(null);
@@ -5343,11 +5562,30 @@ const ChatPDF = () => {
     const overviewTask = downstreamTaskStatuses.overview || {};
     const summaryTask = downstreamTaskStatuses.reading_outline || {};
     const outlineTask = downstreamTaskStatuses.section_outline || {};
-    const taskState = (task, fallback) => {
-      if (task.status === 'failed') return 'failed';
-      if (['partial', 'degraded', 'fallback'].includes(task.status)) return 'recommended';
+    const taskState = (task, fallback = 'idle') => {
+      const status = String(task?.status || '').trim().toLowerCase();
+      if (status === 'failed' || status === 'invalidated' || status === 'superseded') return 'failed';
+      if (['partial', 'degraded', 'fallback', 'cancelled'].includes(status)) return 'recommended';
+      if (['queued', 'pending', 'running', 'processing', 'verifying', 'publishing'].includes(status)) return 'running';
+      if (['succeeded', 'completed', 'ready'].includes(status)) return 'idle';
+      // Unknown non-empty statuses must be visible as an attention state,
+      // never silently fall through to a fake spinner or a completed result.
+      if (status) return 'failed';
       return fallback;
     };
+    const taskIsBusy = (task) => ['queued', 'pending', 'running', 'processing', 'verifying', 'publishing']
+      .includes(String(task?.status || '').trim().toLowerCase());
+    const taskStatusLabel = (state, task, { complete = '已完成', idle = '未生成' } = {}) => {
+      const status = String(task?.status || '').trim().toLowerCase();
+      if (state === 'running') return task?.stage_label || task?.stage || '处理中';
+      if (state === 'failed') return status === 'cancelled' ? '已取消' : '生成失败';
+      if (state === 'recommended') return status === 'cancelled' ? '已取消' : '需注意';
+      if (['succeeded', 'completed', 'ready'].includes(status)) return complete;
+      return idle;
+    };
+    const taskDescription = (task, fallback) => (
+      String(task?.error || task?.message || '').trim() || fallback
+    );
     const summaryState = suppressDependentTasks
       ? 'idle'
       : readingOutlineLoading
@@ -5387,7 +5625,11 @@ const ChatPDF = () => {
         : pretranslateError || failedReadingBlockCount > 0
           ? 'failed'
           : 'idle';
-    const deepParseStatusText = deepParseFailed
+    const deepParseStatusText = isRagIndexPublishWaiting
+      ? '待发布问答索引'
+      : resolvedDocumentParseState.state === 'not_started'
+        ? '尚未开始'
+      : deepParseFailed
       ? '失败'
       : isMinerUFullRouteCancelled || deepParseStatusValue === 'cancelled'
         ? '已取消'
@@ -5425,7 +5667,15 @@ const ChatPDF = () => {
       && currentDeepParseStatus?.configured !== false
       && currentDeepParseStatus?.recommend_deep_parse
     );
-    const deepParseState = deepParseFailed
+    const deepParseState = isRagIndexPublishWaiting
+      ? 'recommended'
+      : resolvedDocumentParseState.state === 'not_started'
+        ? 'recommended'
+      : isMinerUFullRouteCancelled || deepParseStatusValue === 'cancelled'
+        ? 'recommended'
+      : deepParseStatusValue === 'partial_ready'
+        ? 'recommended'
+      : deepParseFailed
       ? 'failed'
       : deepParseRunning
         ? 'running'
@@ -5433,7 +5683,11 @@ const ChatPDF = () => {
           ? 'recommended'
           : 'idle';
     const canCancelDeepParse = ['queued', 'running'].includes(deepParseStatusValue);
-    const canRetryFullRoute = isNewMinerUPrimaryRoute && deepParseFailed;
+    const canRetryFullRoute = isNewMinerUPrimaryRoute && (
+      deepParseFailed
+      || isMinerUFullRouteCancelled
+      || resolvedDocumentParseState.state === 'not_started'
+    );
     const ragIndexSource = ragIndexStatus?.index_source || (ragIndexStatus?.ready ? 'pdf_native' : '');
     const ragIndexIsMinerU = ragIndexSource === 'mineru';
     const ragIndexUpgradeRequired = Boolean(ragIndexStatus?.upgrade_required);
@@ -5489,7 +5743,13 @@ const ChatPDF = () => {
         id: 'deep_parse',
         title: 'MinerU 深度解析',
         state: deepParseState,
-        desc: deepParseFailed
+        desc: isRagIndexPublishWaiting
+          ? minerUParsePendingNotice
+          : resolvedDocumentParseState.state === 'not_started'
+            ? 'MinerU 解析任务尚未启动，可点击开始解析'
+          : isMinerUFullRouteCancelled || deepParseStatusValue === 'cancelled'
+            ? 'MinerU 解析已取消；原 PDF 仍保留，可直接重新开始'
+          : deepParseFailed
           ? currentDeepParseStatus?.error || documentParseManifest?.error || deepParseNotice || 'MinerU 深度解析失败'
           : isMinerUFullRoutePending
           ? minerUParsePendingNotice
@@ -5518,6 +5778,10 @@ const ChatPDF = () => {
         busy: deepParseRunning,
         actionLabel: deepParseRunning && canCancelDeepParse
           ? '取消'
+          : resolvedDocumentParseState.state === 'not_started'
+            ? '开始解析'
+          : isMinerUFullRouteCancelled || deepParseStatusValue === 'cancelled'
+            ? '重新开始'
           : deepParseFailed
             ? (canResumeMinerUResultDownload ? '重试下载' : '重试')
             : deepParseRecommended
@@ -5525,6 +5789,10 @@ const ChatPDF = () => {
               : null,
         onAction: deepParseRunning && canCancelDeepParse
           ? handleCancelMinerUDeepParse
+          : resolvedDocumentParseState.state === 'not_started'
+            ? () => handleStartMinerUDeepParse({ retryFullRoute: true })
+          : isMinerUFullRouteCancelled || deepParseStatusValue === 'cancelled'
+            ? () => handleStartMinerUDeepParse({ retryFullRoute: true })
           : canRetryFullRoute
             ? () => handleStartMinerUDeepParse({ retryFullRoute: true })
             : canUseLegacyMinerUActions
@@ -5553,7 +5821,12 @@ const ChatPDF = () => {
       }] : []),
     ];
 
-    const localRagUpgradeItems = isNewLocalPrimaryRoute && ragIndexUpgradeRequired
+    const localRagStatus = String(ragIndexStatus?.status || '').trim().toLowerCase();
+    const localRagNeedsAttention = isNewLocalPrimaryRoute && (
+      ragIndexUpgradeRequired
+      || ['failed', 'queued', 'running'].includes(localRagStatus)
+    );
+    const localRagUpgradeItems = localRagNeedsAttention
       ? [{
         id: 'rag_index',
         title: '问答索引',
@@ -5561,9 +5834,9 @@ const ChatPDF = () => {
         desc: ragIndexTaskError || ragIndexNotice || ragIndexDesc,
         status: ragIndexStatusText,
         busy: ragIndexBusy,
-        actionLabel: ragIndexState === 'failed' ? '重试升级' : '升级',
+        actionLabel: ragIndexState === 'failed' ? '重试' : ragIndexUpgradeRequired ? '升级' : null,
         onAction: handleRebuildMinerURagIndex,
-        disabled: !docId || ragIndexBusy,
+        disabled: !docId || ragIndexBusy || !['failed', 'recommended'].includes(ragIndexState),
       }]
       : [];
 
@@ -5574,40 +5847,40 @@ const ChatPDF = () => {
         id: 'summary',
         title: 'AI 总结',
         state: summaryState,
-        desc: readingOutlineError || readingOutlineFallbackNotice || '左侧总结栏的结构化论文梳理',
-        status: summaryState === 'failed' ? '生成失败' : summaryState === 'recommended' ? '已降级' : '生成中',
+        desc: readingOutlineError || readingOutlineFallbackNotice || taskDescription(summaryTask, '左侧总结栏的结构化论文梳理'),
+        status: taskStatusLabel(summaryState, summaryTask),
         events: summaryTask.events,
         shortfall: summaryTask.shortfall,
-        busy: readingOutlineLoading,
+        busy: readingOutlineLoading || taskIsBusy(summaryTask),
         actionLabel: ['failed', 'recommended'].includes(summaryState) ? '重试' : null,
         onAction: handleRegenerateReadingOutline,
-        disabled: readingOutlineLoading || !docId || isMinerUFullRoutePending,
+        disabled: readingOutlineLoading || taskIsBusy(summaryTask) || !docId || isMinerUFullRoutePending,
       },
       {
         id: 'outline',
         title: '章节大纲',
         state: outlineState,
-        desc: sectionOutlineError || sectionOutlineFallbackNotice || '左侧大纲栏的原文章节树',
-        status: outlineState === 'failed' ? '生成失败' : outlineState === 'recommended' ? '已降级' : '生成中',
+        desc: sectionOutlineError || sectionOutlineFallbackNotice || taskDescription(outlineTask, '左侧大纲栏的原文章节树'),
+        status: taskStatusLabel(outlineState, outlineTask),
         events: outlineTask.events,
         shortfall: outlineTask.shortfall,
-        busy: sectionOutlineLoading,
+        busy: sectionOutlineLoading || taskIsBusy(outlineTask),
         actionLabel: ['failed', 'recommended'].includes(outlineState) ? '重试' : null,
         onAction: handleRegenerateSectionOutline,
-        disabled: sectionOutlineLoading || !docId || isMinerUFullRoutePending,
+        disabled: sectionOutlineLoading || taskIsBusy(outlineTask) || !docId || isMinerUFullRoutePending,
       },
       {
         id: 'overview',
         title: '速览',
         state: overviewState,
-        desc: overviewError || `当前默认详细度：${overviewDepth === 'brief' ? '简略' : overviewDepth === 'detailed' ? '详细' : '标准'}`,
-        status: overviewState === 'failed' ? '生成失败' : '生成中',
+        desc: overviewError || taskDescription(overviewTask, `当前默认详细度：${overviewDepth === 'brief' ? '简略' : overviewDepth === 'detailed' ? '详细' : '标准'}`),
+        status: taskStatusLabel(overviewState, overviewTask),
         events: overviewTask.events,
         shortfall: overviewTask.shortfall,
-        busy: overviewLoading,
+        busy: overviewLoading || taskIsBusy(overviewTask),
         actionLabel: overviewState === 'failed' ? '重试' : null,
         onAction: handleRegenerateOverview,
-        disabled: overviewLoading || !docId || isMinerUFullRoutePending,
+        disabled: overviewLoading || taskIsBusy(overviewTask) || !docId || isMinerUFullRoutePending,
       },
       {
         id: 'translation',
@@ -5620,7 +5893,9 @@ const ChatPDF = () => {
           ? `${Math.min(pretranslateProgress.done, pretranslateProgress.total)}/${pretranslateProgress.total || allTranslatableReadingBlocks.length}`
           : failedReadingBlockCount > 0
             ? `失败 ${failedReadingBlockCount}`
-            : '缓存失败',
+            : translatedReadingBlockCount > 0 && translatedReadingBlockCount >= allTranslatableReadingBlocks.length
+              ? '已完成'
+              : '未开始',
         busy: pretranslateProgress.running,
         actionLabel: pretranslateProgress.running
           ? '取消'
@@ -5640,6 +5915,8 @@ const ChatPDF = () => {
     canUseLegacyMinerUActions,
     cancelPretranslateReadingDocument,
     deepParseFailed,
+    isRagIndexPublishWaiting,
+    isMinerURagPublishFailed,
     deepParseNotice,
     deepParseProgress,
     docId,
@@ -5670,6 +5947,7 @@ const ChatPDF = () => {
     currentDeepParseStatus?.stage,
     currentDeepParseStatus?.status,
     failedReadingBlockCount,
+    translatedReadingBlockCount,
     handleRebuildMinerURagIndex,
     handleStartPretranslate,
     handleRegenerateOverview,
@@ -5699,6 +5977,7 @@ const ChatPDF = () => {
     readingOutlineError,
     readingOutlineFallbackNotice,
     readingOutlineLoading,
+    resolvedDocumentParseState,
     sectionOutline,
     sectionOutlineError,
     sectionOutlineFallbackNotice,
@@ -6309,6 +6588,8 @@ const ChatPDF = () => {
                 darkMode={darkMode}
                 onOpenProcessing={openAiProcessingPanel}
                 onRetry={retryMinerUFromParseNotice}
+                onRetryIndex={handleRebuildMinerURagIndex}
+                onRefresh={refreshDeepParseStatus}
                 onChooseRoute={openUploadHome}
                 suppressed={showAiProcessingPanel}
               />

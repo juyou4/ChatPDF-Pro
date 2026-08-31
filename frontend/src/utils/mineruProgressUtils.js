@@ -21,6 +21,14 @@ const STAGE_LABELS = {
   validating_semantic_index: '正在校验语义索引',
   publishing_rag_index: '正在发布问答索引',
   awaiting_rag_index: '等待问答索引发布',
+  rag_index_failed: '问答索引发布失败',
+  download_failed: '解析结果下载失败',
+  queue_full: '任务排队已满',
+  start_failed: '任务启动失败',
+  mineru_quality_failed: 'MinerU 结果质量校验失败',
+  mineru_response_invalid: 'MinerU 返回格式异常',
+  status_sync_failed: '解析状态同步失败',
+  stalled: '任务长时间无进展',
 };
 
 const STAGE_ESTIMATES = {
@@ -398,6 +406,25 @@ export const getMinerUProgressPresentation = (task = {}, fallback = {}, nowMs = 
   }
   const stageLabel = STAGE_LABELS[stage] || (status === 'queued' ? '等待开始解析' : 'MinerU 正在解析');
   const elapsedLabel = formatMinerUElapsed(elapsedSeconds);
+  if (['failed', 'cancelled'].includes(status) || (
+    stage === 'awaiting_rag_index'
+    && task?.rag_index?.status === 'failed'
+  )) {
+    return {
+      percent: null,
+      estimated: false,
+      remotePercent: null,
+      elapsedSeconds,
+      stageElapsedSeconds: 0,
+      elapsedLabel,
+      stage,
+      stageLabel,
+      label: status === 'cancelled' ? '已取消' : '已失败',
+      summaryLabel: status === 'cancelled' ? '已取消' : '失败',
+      detail: stageLabel,
+      ariaLabel: `${stageLabel}，${status === 'cancelled' ? '已取消' : '已失败'}`,
+    };
+  }
   const label = remotePercent !== null && !estimated
     ? `远端 ${remotePercent}%`
     : `预估 ${percent}%`;

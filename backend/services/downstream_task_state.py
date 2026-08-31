@@ -8,6 +8,7 @@ identity metadata: credentials and endpoints never reach disk.
 """
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from pathlib import Path
@@ -39,6 +40,97 @@ TERMINAL_DOWNSTREAM_TASK_STATUSES = DOWNSTREAM_TASK_STATUSES - ACTIVE_DOWNSTREAM
 
 _SENSITIVE_METADATA_TOKENS = ("api_key", "token", "secret", "password", "authorization", "endpoint", "host")
 _UNSET = object()
+_WORKER_INSTANCE_ID = uuid.uuid4().hex
+
+
+def _read_stall_seconds() -> float:
+    """Read the upper bound for a silent downstream task.
+
+    A task may legitimately spend several minutes in one model call, so this
+    is deliberately much longer than the normal polling interval.  The value
+    remains configurable for desktop/CI environments where a shorter bound is
+    useful for detecting a dead worker quickly.
+    """
+    try:
+        value = float(os.environ.get("CHATPDF_DOWNSTREAM_TASK_STALL_SECONDS", "1800"))
+    except (TypeError, ValueError):
+        value = 1800.0
+    return max(30.0, min(value, 24 * 60 * 60))
+
+
+DOWNSTREAM_TASK_STALL_SECONDS = _read_stall_seconds()
+
+
+def _record_age_seconds(record: Mapping[str, Any]) -> float | None:
+    value = record.get("updated_at") or record.get("created_at")
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if timestamp <= 0:
+        return None
+    return max(0.0, time.time() - timestamp)
+
+
+def _recover_active_record(
+    data_dir: Path | str,
+    *,
+    purpose: str,
+    doc_id: str,
+    record: Mapping[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    """Persist one terminal outcome for an active record that cannot proceed."""
+    recovered = dict(record)
+    is_stalled = reason == "stalled"
+    if is_stalled:
+        recovered.update({
+            "status": "failed",
+            "stage": "stalled",
+            "error": "任务长时间没有进展，已停止等待；请检查模型服务/网络后重试",
+            "error_code": "downstream_task_stalled",
+            "stalled": True,
+        })
+        shortfall = {
+            "kind": "downstream_ai",
+            "code": "downstream_task_stalled",
+            "stage": "stalled",
+            "retryable": True,
+        }
+    else:
+        recovered.update({
+            "status": "failed",
+            "stage": "restart_recovery",
+            "error": "服务重启导致下游 AI 任务中断，请重新执行",
+            "error_code": "worker_interrupted",
+            "recovered_after_restart": True,
+        })
+        shortfall = {
+            "kind": "restart_recovery",
+            "code": "worker_interrupted",
+            "stage": "restart_recovery",
+            "retryable": True,
+        }
+    recovered["retryable"] = True
+    recovered["active"] = False
+    recovered["terminal"] = True
+    recovered["shortfall"] = sanitize_task_shortfall(shortfall)
+    recovered["updated_at"] = time.time()
+    persist_document_job(data_dir, downstream_task_job_type(purpose), doc_id, recovered)
+    try:
+        identity = recovered.get("identity") if isinstance(recovered.get("identity"), Mapping) else {}
+        append_task_event(
+            data_dir,
+            task_id=str(recovered.get("task_id") or ""),
+            stage=str(recovered.get("stage") or "failed"),
+            status="failed",
+            identity={"route": "downstream", **dict(identity)},
+            error_code=str(recovered.get("error_code") or "downstream_task_stalled"),
+            shortfall=recovered.get("shortfall"),
+        )
+    except Exception:
+        pass
+    return recovered
 
 
 def build_downstream_task_identity(
@@ -86,10 +178,13 @@ def create_downstream_task(
         "status": "queued",
         "stage": "queued",
         "retryable": True,
+        "active": True,
+        "terminal": False,
         "identity": _clean_identity(identity),
         "metadata": _sanitize_metadata(metadata or {}),
         "created_at": now,
         "updated_at": now,
+        "worker_instance_id": _WORKER_INSTANCE_ID,
     }
     persist_document_job(data_dir, downstream_task_job_type(record["purpose"]), record["doc_id"], record)
     try:
@@ -144,8 +239,18 @@ def transition_downstream_task(
     record["status"] = normalized_status
     record["stage"] = str(stage or normalized_status).strip() or normalized_status
     record["updated_at"] = time.time()
+    # Stamp ownership on records created by older builds when they are touched
+    # by the current worker.  A later process can then distinguish a live task
+    # from a restart orphan without relying only on elapsed time.
+    record.setdefault("worker_instance_id", _WORKER_INSTANCE_ID)
+    record["active"] = normalized_status in ACTIVE_DOWNSTREAM_TASK_STATUSES
+    record["terminal"] = normalized_status in TERMINAL_DOWNSTREAM_TASK_STATUSES
     if error is not None:
         record["error"] = str(error or "")[:1000]
+        record["error_code"] = classify_error_code(error)
+    elif normalized_status in ACTIVE_DOWNSTREAM_TASK_STATUSES or normalized_status in {"succeeded"}:
+        record["error"] = ""
+        record.pop("error_code", None)
     if retryable is not None:
         record["retryable"] = bool(retryable)
     if result is not _UNSET:
@@ -156,6 +261,8 @@ def transition_downstream_task(
             record["shortfall"] = clean_shortfall
         else:
             record.pop("shortfall", None)
+    elif normalized_status in ACTIVE_DOWNSTREAM_TASK_STATUSES or normalized_status == "succeeded":
+        record.pop("shortfall", None)
     persist_document_job(data_dir, downstream_task_job_type(normalized_purpose), normalized_doc_id, record)
     try:
         identity = record.get("identity") if isinstance(record.get("identity"), Mapping) else {}
@@ -191,31 +298,28 @@ def get_downstream_task(
         return {}
     record = dict(record)
     if recover_interrupted and str(record.get("status") or "").strip().lower() in ACTIVE_DOWNSTREAM_TASK_STATUSES:
-        record["status"] = "failed"
-        record["stage"] = "restart_recovery"
-        record["error"] = "服务重启导致下游 AI 任务中断，请重新执行"
-        record["retryable"] = True
-        record["recovered_after_restart"] = True
-        record["updated_at"] = time.time()
-        persist_document_job(data_dir, downstream_task_job_type(normalized_purpose), normalized_doc_id, record)
-        try:
-            identity = record.get("identity") if isinstance(record.get("identity"), Mapping) else {}
-            append_task_event(
+        worker_instance = str(record.get("worker_instance_id") or "").strip()
+        is_foreign_worker = bool(worker_instance and worker_instance != _WORKER_INSTANCE_ID)
+        # Records written before the worker marker was introduced are treated
+        # as restart leftovers. New records from this process are never
+        # mistaken for interrupted work while their request is still active.
+        if is_foreign_worker or not worker_instance:
+            return _recover_active_record(
                 data_dir,
-                task_id=str(record.get("task_id") or ""),
-                stage="restart_recovery",
-                status="failed",
-                identity={"route": "downstream", **dict(identity)},
-                error_code="restart_recovery",
-                shortfall={
-                    "kind": "restart_recovery",
-                    "code": "worker_interrupted",
-                    "stage": "restart_recovery",
-                    "retryable": True,
-                },
+                purpose=normalized_purpose,
+                doc_id=normalized_doc_id,
+                record=record,
+                reason="restart",
             )
-        except Exception:
-            pass
+        age = _record_age_seconds(record)
+        if age is not None and age >= DOWNSTREAM_TASK_STALL_SECONDS:
+            return _recover_active_record(
+                data_dir,
+                purpose=normalized_purpose,
+                doc_id=normalized_doc_id,
+                record=record,
+                reason="stalled",
+            )
     return record
 
 
@@ -269,6 +373,7 @@ __all__ = [
     "ACTIVE_DOWNSTREAM_TASK_STATUSES",
     "DOWNSTREAM_TASK_SCHEMA_VERSION",
     "DOWNSTREAM_TASK_STATUSES",
+    "DOWNSTREAM_TASK_STALL_SECONDS",
     "TERMINAL_DOWNSTREAM_TASK_STATUSES",
     "build_downstream_task_identity",
     "create_downstream_task",

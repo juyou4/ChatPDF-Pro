@@ -6,6 +6,7 @@
 身份完整、向量真实、代次自洽的索引对。
 """
 
+import asyncio
 import json
 import os
 import pickle
@@ -129,6 +130,35 @@ def _write_semantic_group_artifacts(data_dir: Path, doc_id: str):
     faiss.write_index(group_index, str(groups_dir / f"{doc_id}_groups.index"))
     with open(groups_dir / f"{doc_id}_groups.pkl", "wb") as f:
         pickle.dump({"digest_texts": ["old"], "group_ids": ["group-0"], **identity}, f)
+
+
+@pytest.mark.asyncio
+async def test_embedding_preflight_timeout_returns_structured_network_error(monkeypatch):
+    async def fail_immediately(awaitable, *, timeout):
+        del timeout
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(document_routes.asyncio, "wait_for", fail_immediately)
+
+    with pytest.raises(document_routes.HTTPException) as exc_info:
+        await document_routes._probe_embedding_configuration_async(
+            {
+                "provider": "silicon",
+                "model": "BAAI/bge-m3",
+                "api_key": "sk-test",
+                "api_host": "https://api.siliconflow.cn/v1",
+            },
+            operation="上传前 Embedding 预检",
+        )
+
+    assert exc_info.value.status_code == 504
+    assert exc_info.value.detail["code"] == "embedding_network_error"
+    assert exc_info.value.detail["stage"] == "embedding_preflight"
+    assert exc_info.value.detail["retryable"] is True
+    assert "超时" in exc_info.value.detail["message"]
 
 
 def test_read_vector_index_meta_defaults_old_pkl_to_pdf_native(isolated_document_routes):

@@ -81,6 +81,7 @@ describe('Property 7: OCR 设置持久化 round-trip', () => {
     expect(loaded).toEqual({
       mode: 'auto',
       backend: 'auto',
+      parseRoute: 'mineru',
       mineruFigureEnhance: true,
       figureRenderMode: 'raw',
     })
