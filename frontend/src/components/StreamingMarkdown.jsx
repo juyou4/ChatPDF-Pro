@@ -351,6 +351,9 @@ export const isRefDirectWriteStreaming = (props) => (
   Boolean(
     props?.isStreaming
     && props?.streamingRef != null
+    // React.memo 的比较器可能在目标 DOM 首次挂载前运行。此时不能
+    // 忽略 state 中的新正文，否则首包会永久停在空节点/旧文本上。
+    && props?.streamingRef?.current
     && (props?.enableBlurReveal || typeof props?.subscribeDisplayedText !== 'function')
   )
 );

@@ -39,18 +39,27 @@ const looksLikeFormulaSubscript = (text, offset) => {
     );
     return !preceding || !isInlineCitationMatch(text, preceding);
   }
-  if (previous === ')' || previous === '}') return true;
-  if (/\\[A-Za-z]+$/.test(prefix)) return true;
+  if (previous === ')' || previous === '}') {
+    // A closing delimiter is only evidence of an expression subscript when
+    // its matching opener is present in the same text run. A bare ``}[1]`` or
+    // ``)[1]`` is often ordinary prose followed by a citation and must stay
+    // eligible for replacement.
+    const opener = previous === ')' ? '(' : '{';
+    const openerIndex = prefix.lastIndexOf(opener);
+    if (openerIndex >= 0 && (openerIndex > 0 || prefix.slice(openerIndex + 1, -1).trim())) {
+      return true;
+    }
+  }
+  // A standalone LaTeX command is not enough evidence either. Math-delimited
+  // commands have already been rejected by looksProtectedByCodeOrMath; an
+  // escaped command in prose may legitimately precede a citation.
   const identifier = prefix.match(/([A-Za-z_][A-Za-z0-9_]*)$/)?.[1] || '';
   if (!identifier) return false;
   const normalized = identifier.toLowerCase();
-  if (
-    identifier.length === 1
-    && identifier === identifier.toLowerCase()
-    && 'xyzijkmnpqrstuvw'.includes(normalized)
-  ) {
-    return true;
-  }
+  // 单个字母紧接引用并不足以判断它是数组下标：正文中常见
+  // ``p[1]``、``方法 x[1]`` 这类引用前缀。真正的公式通常已被
+  // looksProtectedByCodeOrMath 的数学分隔符捕获；这里仅保护有明确
+  // 语义的容器/变量名，避免误吞合法引用。
   return new Set([
     'arr', 'array', 'list', 'dict', 'data', 'tensor', 'matrix',
     'vector', 'values', 'value', 'items', 'index', 'indices', 'row',

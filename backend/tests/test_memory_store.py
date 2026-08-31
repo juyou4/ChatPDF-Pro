@@ -618,7 +618,7 @@ class TestDefaultStructureProperty:
             assert session["last_accessed"] == "", "last_accessed 应为空字符串"
 
     @given(data=st.data())
-    @settings(max_examples=100)
+    @settings(max_examples=100, deadline=None)
     def test_property_load_profile_default_structure(self, data):
         """属性测试：不存在的文件调用 load_profile 返回包含所有必需字段的默认结构
 

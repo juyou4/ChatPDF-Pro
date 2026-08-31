@@ -145,11 +145,11 @@ const citationRefArb = (ref) =>
   });
 
 /**
- * 生成不含方括号和感叹号的安全文本片段，避免干扰引文正则匹配
+ * 生成不含引文、代码和公式定界符的安全文本片段，避免改变测试语义
  */
 const safeTextArb = fc
   .string({ minLength: 0, maxLength: 30 })
-  .map((s) => s.replace(/[[\]!()\0]/g, ''));
+  .map((s) => s.replace(/[[\]!()\0]/g, '').replace(/[`$]/g, ''));
 
 describe('Feature: chatpdf-citation-fix, Property 4: processCitationRefs 正确替换有效引用并保留无效引用', () => {
   /**

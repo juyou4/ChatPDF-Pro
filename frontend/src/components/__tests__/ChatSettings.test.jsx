@@ -152,8 +152,8 @@ describe('ChatSettings - 开关单元测试', () => {
         expect(screen.getByText('气泡样式')).toBeTruthy();
     });
 
-    it('应渲染「消息字体大小」设置', () => {
+    it('对话设置保留回答详细度，字体字号统一位于设置中心的界面分区', () => {
         render(<ChatSettings isOpen={true} onClose={vi.fn()} />);
-        expect(screen.getByText('字体大小')).toBeTruthy();
+        expect(screen.getByText('回答详细度')).toBeTruthy();
     });
 });
